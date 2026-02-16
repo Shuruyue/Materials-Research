@@ -1,0 +1,31 @@
+{
+  "property": "formation_energy",
+  "test_metrics": {
+    "formation_energy_MAE": 0.0442592054605484,
+    "formation_energy_RMSE": 0.12498047947883606,
+    "formation_energy_R2": 0.9865023493766785,
+    "formation_energy_MaxAE": 6.896018028259277
+  },
+  "target_mae": 0.07,
+  "cgcnn_literature_mae": 0.063,
+  "alignn_literature_mae": 0.033,
+  "passed": true,
+  "n_train": 60794,
+  "n_val": 7599,
+  "n_test": 7600,
+  "n_params": 1164289,
+  "best_epoch": 227,
+  "total_epochs": 307,
+  "training_time_minutes": 75.40315060218175,
+  "hyperparameters": {
+    "hidden_dim": 256,
+    "n_conv": 4,
+    "lr": 0.001,
+    "batch_size": 128,
+    "weight_decay": 1e-05,
+    "dropout": 0.0,
+    "loss": "huber_delta1.0",
+    "optimizer": "AdamW",
+    "scheduler": "ReduceLROnPlateau"
+  }
+}

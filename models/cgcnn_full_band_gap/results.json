@@ -1,0 +1,31 @@
+{
+  "property": "band_gap",
+  "test_metrics": {
+    "band_gap_MAE": 0.14488455653190613,
+    "band_gap_RMSE": 0.4376654028892517,
+    "band_gap_R2": 0.8988347053527832,
+    "band_gap_MaxAE": 6.772646903991699
+  },
+  "target_mae": 0.25,
+  "cgcnn_literature_mae": 0.2,
+  "alignn_literature_mae": 0.14,
+  "passed": true,
+  "n_train": 60794,
+  "n_val": 7599,
+  "n_test": 7600,
+  "n_params": 1164289,
+  "best_epoch": 492,
+  "total_epochs": 500,
+  "training_time_minutes": 106.46798210541407,
+  "hyperparameters": {
+    "hidden_dim": 256,
+    "n_conv": 4,
+    "lr": 0.001,
+    "batch_size": 128,
+    "weight_decay": 1e-05,
+    "dropout": 0.0,
+    "loss": "huber_delta1.0",
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingWarmRestarts"
+  }
+}

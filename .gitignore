@@ -1,0 +1,48 @@
+# Large binary caches (regeneratable)
+data/raw/jarvis_cache/
+data/processed/
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+
+# Gemini / Agent
+.gemini/
+.agent/

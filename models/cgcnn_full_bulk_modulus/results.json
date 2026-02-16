@@ -1,0 +1,31 @@
+{
+  "property": "bulk_modulus",
+  "test_metrics": {
+    "bulk_modulus_MAE": 10.350372314453125,
+    "bulk_modulus_RMSE": 26.034908294677734,
+    "bulk_modulus_R2": 0.8376799821853638,
+    "bulk_modulus_MaxAE": 712.6043090820312
+  },
+  "target_mae": 12.0,
+  "cgcnn_literature_mae": 10.5,
+  "alignn_literature_mae": 8.3,
+  "passed": true,
+  "n_train": 19059,
+  "n_val": 2382,
+  "n_test": 2383,
+  "n_params": 1164289,
+  "best_epoch": 116,
+  "total_epochs": 196,
+  "training_time_minutes": 9.45651172399521,
+  "hyperparameters": {
+    "hidden_dim": 256,
+    "n_conv": 4,
+    "lr": 0.001,
+    "batch_size": 128,
+    "weight_decay": 1e-05,
+    "dropout": 0.0,
+    "loss": "huber_delta1.0",
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingWarmRestarts"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "iteration": 5,
+  "timestamp": 1771174099.3006804,
+  "n_candidates": 3,
+  "candidates": [
+    {
+      "formula": "U7Rh",
+      "method": "mix",
+      "parent": "Cu1 Pt7 \u00d7 U1 Rh3",
+      "mutations": "{'Cu': np.str_('Rh'), 'Pt': np.str_('U')}",
+      "topo_probability": 0.8325301204819278,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.8325301204819278,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.7828915662650602,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 5
+    },
+    {
+      "formula": "HfOs3",
+      "method": "mix",
+      "parent": "Y3 Os1 \u00d7 Hf3 Os1",
+      "mutations": "{'Os': np.str_('Hf'), 'Y': np.str_('Os')}",
+      "topo_probability": 1.0,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 1.0,
+      "novelty_score": 0.2,
+      "acquisition_value": 0.7150000000000001,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 5
+    },
+    {
+      "formula": "Hf3Os",
+      "method": "mix",
+      "parent": "Pt3 Rh1 \u00d7 Hf4 Os8",
+      "mutations": "{'Pt': np.str_('Hf'), 'Rh': np.str_('Os')}",
+      "topo_probability": 1.0,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 1.0,
+      "novelty_score": 0.2,
+      "acquisition_value": 0.7150000000000001,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 5
+    }
+  ]
+}

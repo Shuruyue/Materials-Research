@@ -1,0 +1,91 @@
+{
+  "iteration": 1,
+  "timestamp": 1771174099.224145,
+  "n_candidates": 6,
+  "candidates": [
+    {
+      "formula": "PtRh2",
+      "method": "mix",
+      "parent": "Pu2 Ni4 \u00d7 Pt3 Rh1",
+      "mutations": "{'Ni': np.str_('Rh'), 'Pu': np.str_('Pt')}",
+      "topo_probability": 0.6819277108433734,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.6819277108433734,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.7000602409638554,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    },
+    {
+      "formula": "Na6Cd2Sn",
+      "method": "mix",
+      "parent": "Rh1 O2 F6 \u00d7 Na4 Cd2 Sn2",
+      "mutations": "{'F': np.str_('Na'), 'O': np.str_('Cd'), 'Rh': np.str_('Sn')}",
+      "topo_probability": 0.5807228915662651,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.5807228915662651,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.6443975903614458,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    },
+    {
+      "formula": "Pu24Ni5",
+      "method": "mix",
+      "parent": "Ti5 Re24 \u00d7 Pu2 Ni4",
+      "mutations": "{'Re': np.str_('Pu'), 'Ti': np.str_('Ni')}",
+      "topo_probability": 0.5397590361445783,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.5397590361445783,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.6218674698795181,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    },
+    {
+      "formula": "YOs3",
+      "method": "mix",
+      "parent": "Pt3 Rh1 \u00d7 Y4 Os8",
+      "mutations": "{'Pt': np.str_('Os'), 'Rh': np.str_('Y')}",
+      "topo_probability": 0.4746987951807229,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.4746987951807229,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.5860843373493976,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    },
+    {
+      "formula": "Ti3Re",
+      "method": "mix",
+      "parent": "U1 Rh3 \u00d7 Ti5 Re24",
+      "mutations": "{'Rh': np.str_('Ti'), 'U': np.str_('Re')}",
+      "topo_probability": 0.4710843373493976,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.4710843373493976,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.5840963855421687,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    },
+    {
+      "formula": "Y2FeO",
+      "method": "mix",
+      "parent": "Na4 Cd2 Sn2 \u00d7 Y4 Fe4 O14",
+      "mutations": "{'Cd': np.str_('Fe'), 'Na': np.str_('Y'), 'Sn': np.str_('O')}",
+      "topo_probability": 0.3,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.3,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.49,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 1
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "property": "formation_energy",
+  "model": "EquivariantGNN",
+  "test_metrics": {
+    "formation_energy_MAE": 0.3351902663707733,
+    "formation_energy_RMSE": 0.48992395401000977,
+    "formation_energy_R2": 0.80040442943573,
+    "formation_energy_MaxAE": 2.3832473754882812
+  },
+  "target_mae": 0.05,
+  "cgcnn_literature_mae": 0.063,
+  "alignn_literature_mae": 0.033,
+  "passed": false,
+  "n_train": 1600,
+  "n_val": 200,
+  "n_test": 200,
+  "n_params": 959889,
+  "best_epoch": 18,
+  "total_epochs": 20,
+  "training_time_minutes": 2.1205999851226807,
+  "hyperparameters": {
+    "irreps": "32x0e + 16x1o + 8x2e",
+    "max_ell": 2,
+    "n_layers": 3,
+    "n_radial": 8,
+    "radial_hidden": 64,
+    "lr": 0.002,
+    "batch_size": 32,
+    "weight_decay": 1e-05,
+    "loss": "huber_delta1.0",
+    "optimizer": "AdamW",
+    "scheduler": "ReduceLROnPlateau"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "iteration": 3,
+  "timestamp": 1771174099.2669957,
+  "n_candidates": 6,
+  "candidates": [
+    {
+      "formula": "Li2Pt",
+      "method": "mix",
+      "parent": "Pu4 Ni8 \u00d7 Li5 Pt24",
+      "mutations": "{'Ni': np.str_('Li'), 'Pu': np.str_('Pt')}",
+      "topo_probability": 0.9819277108433735,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.9819277108433735,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.8650602409638555,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    },
+    {
+      "formula": "Li3Pt",
+      "method": "mix",
+      "parent": "Hf1 Os3 \u00d7 Li1 Pt7",
+      "mutations": "{'Hf': np.str_('Pt'), 'Os': np.str_('Li')}",
+      "topo_probability": 0.6819277108433734,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.6819277108433734,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.7000602409638554,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    },
+    {
+      "formula": "CuPt3",
+      "method": "mix",
+      "parent": "Ti3 Re1 \u00d7 Cu1 Pt7",
+      "mutations": "{'Re': np.str_('Cu'), 'Ti': np.str_('Pt')}",
+      "topo_probability": 0.6819277108433734,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.6819277108433734,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.7000602409638554,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    },
+    {
+      "formula": "Li8MnSn2O3",
+      "method": "mix",
+      "parent": "Li2 Fe3 Te1 O8 \u00d7 Li4 Mn3 Sn5 O16",
+      "mutations": "{'Fe': np.str_('O'), 'Li': np.str_('Sn'), 'O': np.str_('Li'), 'Te': np.str_('Mn')}",
+      "topo_probability": 0.6807228915662651,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.6807228915662651,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.6993975903614458,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    },
+    {
+      "formula": "PuNi3",
+      "method": "mix",
+      "parent": "Pt3 Rh1 \u00d7 Pu24 Ni5",
+      "mutations": "{'Pt': np.str_('Ni'), 'Rh': np.str_('Pu')}",
+      "topo_probability": 0.5397590361445783,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.5397590361445783,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.6218674698795181,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    },
+    {
+      "formula": "URh3",
+      "method": "mix",
+      "parent": "Pt3 Rh1 \u00d7 U1 Rh3",
+      "mutations": "{'Pt': np.str_('Rh'), 'Rh': np.str_('U')}",
+      "topo_probability": 0.5325301204819277,
+      "stability_score": 0.5,
+      "heuristic_topo_score": 0.5325301204819277,
+      "novelty_score": 1.0,
+      "acquisition_value": 0.6178915662650603,
+      "energy_per_atom": null,
+      "converged": false,
+      "iteration": 3
+    }
+  ]
+}
