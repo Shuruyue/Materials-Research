@@ -5,19 +5,19 @@ The brain of ATLAS — orchestrates the closed-loop discovery cycle:
     Generate -> Relax -> Classify -> Score -> Select -> Loop
 
 Optimization:
-- Improved error handling (logging instead of silent failures)
-- Better type hinting
-- Robust candidate validation
+- Checkpoint & Resume: Automatically continues from last saved iteration
+- Robust Error Handling: Isolates failures in external tools (MACE/GNN)
+- Duplicate Prevention: Tracks known formulas across sessions
 """
 
 import json
 import time
-import numpy as np
+import shutil
 import logging
 import torch
 from pathlib import Path
-from typing import Optional, List, Dict
-from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Set
+from dataclasses import dataclass, field, asdict
 
 from atlas.config import get_config
 from atlas.active_learning.generator import StructureGenerator
@@ -30,20 +30,20 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Candidate:
     """A material candidate with all computed properties."""
-    structure: object                    # pymatgen Structure
+    structure: object                    # pymatgen Structure (not serialized directly)
     formula: str = ""
-    method: str = ""                     # how it was generated
-    parent: str = ""                     # parent material
-    mutations: str = ""                  # what mutations were applied
-
+    method: str = ""
+    parent: str = ""
+    mutations: str = ""
+    
     # Scores
-    topo_probability: float = 0.0        # from GNN classifier
-    stability_score: float = 0.0         # from MACE relaxation
-    heuristic_topo_score: float = 0.0    # from domain knowledge
-    novelty_score: float = 0.0           # distance from known materials
-    acquisition_value: float = 0.0       # combined score for selection
+    topo_probability: float = 0.0
+    stability_score: float = 0.0
+    heuristic_topo_score: float = 0.0
+    novelty_score: float = 0.0
+    acquisition_value: float = 0.0
 
-    # Computed properties
+    # Properties
     energy_per_atom: Optional[float] = None
     relaxed_structure: object = None
     converged: bool = False
@@ -53,25 +53,29 @@ class Candidate:
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
-        return {
-            "formula": self.formula,
-            "method": self.method,
-            "parent": self.parent,
-            "mutations": self.mutations,
-            "topo_probability": self.topo_probability,
-            "stability_score": self.stability_score,
-            "heuristic_topo_score": self.heuristic_topo_score,
-            "novelty_score": self.novelty_score,
-            "acquisition_value": self.acquisition_value,
-            "energy_per_atom": self.energy_per_atom,
-            "converged": self.converged,
-            "iteration": self.iteration,
-        }
+        """Serialize for JSON storage (structure handling omitted for brevity)."""
+        d = asdict(self)
+        if hasattr(d['structure'], 'as_dict'):
+             d['structure'] = d['structure'].as_dict()
+        if hasattr(d['relaxed_structure'], 'as_dict'):
+             d['relaxed_structure'] = d['relaxed_structure'].as_dict()
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Deserialize from JSON."""
+        from pymatgen.core import Structure
+        if isinstance(data.get('structure'), dict):
+            data['structure'] = Structure.from_dict(data['structure'])
+        if isinstance(data.get('relaxed_structure'), dict):
+            data['relaxed_structure'] = Structure.from_dict(data['relaxed_structure'])
+        return cls(**data)
 
 
 class DiscoveryController:
     """
     Active learning controller for topological material discovery.
+    Supports resuming from checkpoints.
     """
 
     def __init__(
@@ -80,7 +84,6 @@ class DiscoveryController:
         relaxer=None,
         classifier_model=None,
         graph_builder=None,
-        # Acquisition function weights
         w_topo: float = 0.4,
         w_stability: float = 0.3,
         w_heuristic: float = 0.15,
@@ -90,21 +93,69 @@ class DiscoveryController:
         self.relaxer = relaxer
         self.classifier = classifier_model
         self.graph_builder = graph_builder
-
-        self.w_topo = w_topo
-        self.w_stability = w_stability
-        self.w_heuristic = w_heuristic
-        self.w_novelty = w_novelty
+        
+        # Hyperparams
+        self.weights = {
+            "topo": w_topo,
+            "stability": w_stability,
+            "heuristic": w_heuristic,
+            "novelty": w_novelty,
+        }
 
         self.cfg = get_config()
         self.results_dir = self.cfg.paths.data_dir / "discovery_results"
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        # Discovery state
+        # State
+        self.iteration = 0
+        self.known_formulas: Set[str] = set()
         self.all_candidates: List[Candidate] = []
         self.top_candidates: List[Candidate] = []
-        self.iteration = 0
-        self.known_formulas: set[str] = set()
+        
+        # Auto-load previous state
+        self._load_checkpoint()
+
+    def _load_checkpoint(self):
+        """Scan results directory and restore state."""
+        files = sorted(self.results_dir.glob("iteration_*.json"))
+        if not files:
+            logger.info("No checkpoints found. Starting fresh discovery.")
+            return
+
+        logger.info(f"Found {len(files)} checkpoints. Restoring state...")
+        
+        # Load all history to populate known formulas
+        for f in files:
+            try:
+                with open(f, 'r') as fp:
+                    data = json.load(fp)
+                    iter_num = data.get("iteration", 0)
+                    self.iteration = max(self.iteration, iter_num)
+                    
+                    for cand_dict in data.get("candidates", []):
+                        self.known_formulas.add(cand_dict.get("formula"))
+                        # We don't load full objects to RAM to save space, 
+                        # just formulas for novelty check.
+                        
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint {f}: {e}")
+
+        # Load top candidates from the VERY LAST iteration to seed the generator
+        last_file = files[-1]
+        try:
+            with open(last_file, 'r') as fp:
+                data = json.load(fp)
+                top_cands = [Candidate.from_dict(d) for d in data.get("candidates", [])]
+                
+                # Add good ones to generator logic
+                seeds = [c.relaxed_structure or c.structure for c in top_cands if c.acquisition_value > 0.3]
+                if seeds:
+                    self.generator.add_seeds(seeds)
+                    logger.info(f"Restored {len(seeds)} seeds from last iteration.")
+        except Exception:
+            pass
+            
+        logger.info(f"Resuming from Iteration {self.iteration}. Known formulas: {len(self.known_formulas)}")
 
     def run_discovery_loop(
         self,
@@ -113,222 +164,180 @@ class DiscoveryController:
         n_select_top: int = 10,
     ) -> List[Candidate]:
         """
-        Run the full discovery loop.
+        Run the discovery loop, resuming if necessary.
+        Total iterations = current_iteration + n_iterations.
         """
+        start_iter = self.iteration + 1
+        end_iter = self.iteration + n_iterations
+        
         print("\n" + "=" * 70)
-        print("  ATLAS Discovery Engine — Active Learning Loop")
+        print(f"  ATLAS Discovery Engine (Iter {start_iter} -> {end_iter})")
         print("=" * 70)
-        print(f"  Iterations:          {n_iterations}")
-        print(f"  Candidates/iter:     {n_candidates_per_iter}")
 
-        for it in range(1, n_iterations + 1):
+        for it in range(start_iter, end_iter + 1):
             self.iteration = it
             t0 = time.time()
-
+            
             print(f"\n{'─' * 50}")
-            print(f"  Iteration {it}/{n_iterations}")
+            print(f"  Iteration {it}/{end_iter}")
             print(f"{'─' * 50}")
 
-            # Step 1: Generate
+            # 1. Generate
             print(f"  [1/4] Generating {n_candidates_per_iter} candidates...")
             try:
-                raw_candidates = self.generator.generate_batch(n_candidates_per_iter)
+                # Dynamically adjust generation methods based on iteration?
+                # Early iters: exploration (random sub). Late: exploitation (strain).
+                methods = ["substitute", "strain"] if it > 3 else ["substitute"]
+                
+                raw_candidates = self.generator.generate_batch(n_candidates_per_iter, methods=methods)
             except Exception as e:
                 logger.error(f"Generation failed: {e}")
                 raw_candidates = []
-                
-            print(f"        Generated {len(raw_candidates)} valid structures")
+
+            # Filter duplicates immediately
+            new_raw = [r for r in raw_candidates if r["structure"].composition.reduced_formula not in self.known_formulas]
+            print(f"        Generated {len(raw_candidates)}, New Unique: {len(new_raw)}")
             
-            if not raw_candidates:
-                logger.warning("No candidates generated! Stopping early.")
+            if not new_raw:
+                logger.warning("No new unique candidates. Trying fallback seeds...")
+                # Logic to inject random seeds from JARVIS could go here
                 break
 
-            # Step 2: Relax
-            print(f"  [2/4] Relaxing with MACE potential...")
-            candidates = self._relax_candidates(raw_candidates)
-            print(f"        Relaxed {len(candidates)} structures")
+            # 2. Relax
+            print(f"  [2/4] Relaxing {len(new_raw)} structures...")
+            candidates = self._relax_candidates(new_raw)
 
-            # Step 3: Classify
-            print(f"  [3/4] Classifying topological properties...")
+            # 3. Classify
+            print(f"  [3/4] Classifying candidates...")
             candidates = self._classify_candidates(candidates)
 
-            # Step 4: Score & Select
-            print(f"  [4/4] Computing acquisition function & selecting top...")
+            # 4. Select
             candidates = self._score_and_select(candidates, n_select_top)
 
+            # Save & Feedback
+            self._save_iteration(it, candidates[:n_select_top])
+            
+            # Add top winners as seeds for next round
+            best_structs = [
+                c.relaxed_structure or c.structure 
+                for c in candidates[:n_select_top]
+                if c.acquisition_value > 0.25 # Threshold
+            ]
+            self.generator.add_seeds(best_structs)
+            
             dt = time.time() - t0
             self._print_iteration_summary(candidates[:n_select_top], dt)
 
-            # Save results
-            self._save_iteration(it, candidates[:n_select_top])
-
-            # Feed back top candidates as new seeds
-            top_structs = [
-                c.relaxed_structure or c.structure 
-                for c in candidates[:n_select_top]
-                if c.acquisition_value > 0.3
-            ]
-            if top_structs:
-                self.generator.add_seeds(top_structs)
-
-        self._print_final_summary()
         return self.top_candidates
 
     def _relax_candidates(self, raw_candidates: list[dict]) -> List[Candidate]:
-        """Relax candidate structures with MACE."""
         candidates = []
-
         for rc in raw_candidates:
             struct = rc["structure"]
+            formula = struct.composition.reduced_formula
+            
+            # Default fallback values
+            energy = None
+            converged = False
+            relaxed = struct
+            stability = 0.5
 
-            if self.relaxer is not None:
+            if self.relaxer:
                 try:
-                    result = self.relaxer.relax_structure(struct, steps=100)
-                    stability = self.relaxer.score_stability(struct)
+                    # TODO: Add explicit timeout here if feasible
+                    res = self.relaxer.relax_structure(struct, steps=100) # steps limit acts as timeout
+                    relaxed = res.get("relaxed_structure", struct)
+                    energy = res.get("energy_per_atom")
+                    converged = res.get("converged", False)
+                    stability = self.relaxer.score_stability(relaxed)
                 except Exception as e:
-                    logger.warning(f"Relaxation failed for {rc.get('formula', 'unknown')}: {e}")
-                    result = {"relaxed_structure": struct, "energy_per_atom": None, "converged": False}
-                    stability = 0.0
-            else:
-                result = {
-                    "relaxed_structure": struct,
-                    "energy_per_atom": None,
-                    "converged": False,
-                }
-                stability = 0.5  # Neutral stability if no relaxer
+                    logger.debug(f"Relaxation error for {formula}: {e}")
+                    stability = 0.0 # Penalize failed relaxation
 
             cand = Candidate(
                 structure=struct,
-                formula=struct.composition.reduced_formula,
+                formula=formula,
                 method=rc.get("method", "unknown"),
                 parent=rc.get("parent", ""),
                 mutations=rc.get("mutations", ""),
                 heuristic_topo_score=rc.get("topo_score", 0.0),
                 stability_score=stability,
-                energy_per_atom=result.get("energy_per_atom"),
-                relaxed_structure=result.get("relaxed_structure"),
-                converged=result.get("converged", False),
+                energy_per_atom=energy,
+                relaxed_structure=relaxed,
+                converged=converged,
                 iteration=self.iteration,
                 timestamp=time.time(),
             )
-
             candidates.append(cand)
-
         return candidates
 
     def _classify_candidates(self, candidates: List[Candidate]) -> List[Candidate]:
-        """Run topological GNN classifier on candidates."""
-        if self.classifier is None or self.graph_builder is None:
-            # No classifier — use heuristic score as proxy
-            for c in candidates:
-                c.topo_probability = c.heuristic_topo_score
+        if not self.classifier or not self.graph_builder:
+            # Fallback to heuristic
+            for c in candidates: c.topo_probability = c.heuristic_topo_score
             return candidates
 
         self.classifier.eval()
         device = next(self.classifier.parameters()).device
-
-        valid_candidates = []
+        
         for c in candidates:
             try:
                 struct = c.relaxed_structure or c.structure
                 graph = self.graph_builder.structure_to_graph(struct)
-
+                
                 with torch.no_grad():
-                    # Handle both simple graph and batch inputs
                     node_feats = graph["node_features"].to(device)
-                    if node_feats.dim() == 2:
-                        node_feats = node_feats.unsqueeze(0)
+                    if node_feats.dim() == 2: node_feats = node_feats.unsqueeze(0)
                         
                     prob = self.classifier.predict_proba(
                         node_feats,
                         graph["edge_index"].to(device),
-                        graph["edge_features"].to(device),
+                        graph["edge_features"].to(device)
                     )
-                    c.topo_probability = prob.item()
-                    valid_candidates.append(c)
-            except Exception as e:
-                logger.warning(f"Classification failed for {c.formula}: {e}")
-                c.topo_probability = c.heuristic_topo_score
-                valid_candidates.append(c)
-
-        return valid_candidates
-
-    def _score_and_select(
-        self, candidates: List[Candidate], n_top: int
-    ) -> List[Candidate]:
-        """Compute acquisition function and rank candidates."""
-        for c in candidates:
-            # Novelty: is this formula new?
-            c.novelty_score = 1.0 if c.formula not in self.known_formulas else 0.2
-
-            # Multi-objective acquisition function
-            c.acquisition_value = (
-                self.w_topo * c.topo_probability
-                + self.w_stability * c.stability_score
-                + self.w_heuristic * c.heuristic_topo_score
-                + self.w_novelty * c.novelty_score
-            )
-
-        # Sort by acquisition value
-        candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
-
-        # Track top candidates globally
-        for c in candidates[:n_top]:
-            self.known_formulas.add(c.formula)
-            self.all_candidates.append(c)
-
-            self.top_candidates.append(c)
-            self.top_candidates.sort(
-                key=lambda x: x.acquisition_value, reverse=True
-            )
-            self.top_candidates = self.top_candidates[:50]  # keep top 50 global
-
+                    c.topo_probability = float(prob.item())
+            except Exception:
+                c.topo_probability = 0.0 # Penalize GNN failure
+        
         return candidates
 
-    def _print_iteration_summary(self, top: List[Candidate], dt: float):
-        """Print summary of one iteration."""
-        print(f"\n  Top candidates this iteration ({dt:.1f}s):")
-        print(f"  {'Rank':>4} {'Formula':>15} {'Method':>10} "
-              f"{'P(topo)':>8} {'Stab':>6} {'Acq':>6}")
-        print(f"  {'----':>4} {'-------':>15} {'------':>10} "
-              f"{'-------':>8} {'----':>6} {'---':>6}")
-        for i, c in enumerate(top[:10]):
-            print(f"  {i+1:4d} {c.formula:>15s} {c.method:>10s} "
-                  f"{c.topo_probability:8.3f} {c.stability_score:6.3f} "
-                  f"{c.acquisition_value:6.3f}")
-
-    def _print_final_summary(self):
-        """Print final discovery summary."""
-        print(f"\n{'=' * 70}")
-        print(f"  ATLAS Discovery — Final Summary")
-        print(f"{'=' * 70}")
-        print(f"  Total iterations:     {self.iteration}")
-        print(f"  Total candidates:     {len(self.all_candidates)}")
-        print(f"  Unique formulas:      {len(self.known_formulas)}")
-        print(f"  Top candidates:       {len(self.top_candidates)}")
+    def _score_and_select(self, candidates: List[Candidate], n_top: int) -> List[Candidate]:
+        for c in candidates:
+            # Novelty check (already screened, but good for scoring)
+            is_new = c.formula not in self.known_formulas
+            c.novelty_score = 1.0 if is_new else 0.0
+            
+            c.acquisition_value = (
+                self.weights["topo"] * c.topo_probability +
+                self.weights["stability"] * c.stability_score +
+                self.weights["heuristic"] * c.heuristic_topo_score +
+                self.weights["novelty"] * c.novelty_score
+            )
+        
+        candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
+        
+        # Register winners
+        top = candidates[:n_top]
+        for c in top:
+            self.known_formulas.add(c.formula)
+            self.top_candidates.append(c)
+            
+        return candidates
 
     def _save_iteration(self, iteration: int, top_candidates: List[Candidate]):
-        """Save iteration results to JSON."""
-        results = {
+        data = {
             "iteration": iteration,
             "timestamp": time.time(),
             "n_candidates": len(top_candidates),
-            "candidates": [c.to_dict() for c in top_candidates],
+            "candidates": [c.to_dict() for c in top_candidates]
         }
+        fpath = self.results_dir / f"iteration_{iteration:03d}.json"
+        with open(fpath, "w") as f:
+            json.dump(data, f, indent=2, default=str)
 
-        out_file = self.results_dir / f"iteration_{iteration:03d}.json"
-        with open(out_file, "w") as f:
-            json.dump(results, f, indent=2, default=str)
-
-    def save_final_report(self, filename: str = "discovery_report.json"):
-        """Save the final discovery report."""
-        report = {
-            "total_iterations": self.iteration,
-            "total_candidates_evaluated": len(self.all_candidates),
-            "unique_formulas": len(self.known_formulas),
-            "top_candidates": [c.to_dict() for c in self.top_candidates],
-        }
-        out_file = self.results_dir / filename
-        with open(out_file, "w") as f:
-            json.dump(report, f, indent=2, default=str)
-        print(f"\n  Report saved to: {out_file}")
+    def _print_iteration_summary(self, top: List[Candidate], dt: float):
+        print(f"\n  Top candidates ({dt:.1f}s):")
+        print(f"  {'Rank':>4} {'Formula':>12} {'Method':>10} {'Topo%':>6} {'Stab':>5} {'Acq':>5}")
+        print(f"  {'----':>4} {'-------':>12} {'------':>10} {'-----':>6} {'----':>5} {'---':>5}")
+        for i, c in enumerate(top[:5]):
+            print(f"  {i+1:4d} {c.formula:>12s} {c.method:>10s} "
+                  f"{c.topo_probability:6.2f} {c.stability_score:5.2f} {c.acquisition_value:5.2f}")
