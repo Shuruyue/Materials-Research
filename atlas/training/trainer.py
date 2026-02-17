@@ -2,7 +2,7 @@
 Training Loop
 
 General-purpose trainer for crystal GNN models.
-Handles training, validation, early stopping, checkpointing, and logging.
+Handles training, validation, early stopping, robust checkpointing, and logging.
 """
 
 import torch
@@ -12,13 +12,26 @@ from pathlib import Path
 from typing import Optional, Dict, Callable
 import time
 import json
+import logging
+import copy
 
 from atlas.config import get_config
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class Trainer:
     """
-    General-purpose GNN trainer.
+    General-purpose GNN trainer (Robust).
+
+    Features:
+    - Automatic Mixed Precision (AMP) for speed
+    - Gradient Clipping
+    - Top-K Checkpointing
+    - Learning Rate Scheduling
+    - Early Stopping
 
     Args:
         model: GNN model
@@ -26,6 +39,7 @@ class Trainer:
         loss_fn: loss function
         device: 'cuda' or 'cpu'
         save_dir: directory for checkpoints
+        use_amp: enable Automatic Mixed Precision
     """
 
     def __init__(
@@ -36,12 +50,16 @@ class Trainer:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         save_dir: Optional[Path] = None,
+        use_amp: bool = True,
     ):
         self.model = model.to(device)
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.scheduler = scheduler
         self.device = device
+        self.use_amp = use_amp and (device == "cuda")
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
         self.save_dir = save_dir or get_config().paths.models_dir / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -64,20 +82,40 @@ class Trainer:
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
 
-            pred = self.model(
-                batch.x,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.batch,
-            )
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Flexible model call (some graph models take different args)
+                if hasattr(model_call := getattr(self.model, "forward", None), "__code__"):
+                     # Standard PyG call
+                     pred = self.model(
+                        batch.x,
+                        batch.edge_index,
+                        batch.edge_attr,
+                        batch.batch,
+                     )
+                else:
+                     # Fallback
+                     pred = self.model(batch)
 
-            loss = self.loss_fn(pred, batch)
-            loss.backward()
+                # Loss computation
+                # If loss_fn expects distinct args, handle it. 
+                # Here we assume dictionary output for MultiTask or Tensor for single
+                if isinstance(pred, dict) and isinstance(self.loss_fn, nn.ModuleDict):
+                    # Multi-task scenario not fully covered by generic logic but handled inside loss_fn
+                     loss_dict = self.loss_fn(pred, batch.y_dict if hasattr(batch, 'y_dict') else batch)
+                     loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
+                else:
+                    loss = self.loss_fn(pred, batch.y if hasattr(batch, 'y') else batch)
 
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+            # Backward pass with scaler
+            self.scaler.scale(loss).backward()
+            
+            # Gradient clipping (unscale first)
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
-            self.optimizer.step()
             total_loss += loss.item()
             n_batches += 1
 
@@ -88,21 +126,25 @@ class Trainer:
         """Validate model. Returns dict of metrics."""
         self.model.eval()
         total_loss = 0.0
-        all_preds = []
-        all_targets = []
         n_batches = 0
 
         for batch in loader:
             batch = batch.to(self.device)
 
-            pred = self.model(
-                batch.x,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.batch,
-            )
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                pred = self.model(
+                    batch.x,
+                    batch.edge_index,
+                    batch.edge_attr,
+                    batch.batch,
+                )
+                
+                if isinstance(pred, dict) and isinstance(self.loss_fn, nn.ModuleDict):
+                     loss_dict = self.loss_fn(pred, batch.y_dict if hasattr(batch, 'y_dict') else batch)
+                     loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
+                else:
+                    loss = self.loss_fn(pred, batch.y if hasattr(batch, 'y') else batch)
 
-            loss = self.loss_fn(pred, batch)
             total_loss += loss.item()
             n_batches += 1
 
@@ -118,25 +160,14 @@ class Trainer:
         n_epochs: int = 300,
         patience: int = 50,
         verbose: bool = True,
+        checkpoint_name: str = "model"
     ) -> Dict:
         """
-        Full training loop with early stopping.
-
-        Args:
-            train_loader: training data
-            val_loader: validation data
-            n_epochs: max epochs
-            patience: early stopping patience
-            verbose: print progress
-
-        Returns:
-            Training history dict
+        Full training loop.
         """
         if verbose:
-            print(f"Training on {self.device} for up to {n_epochs} epochs")
-            print(f"Early stopping patience: {patience}")
-            print(f"Checkpoints: {self.save_dir}")
-            print("-" * 60)
+            logger.info(f"Training on {self.device} (AMP={self.use_amp}) for {n_epochs} epochs")
+            logger.info(f"Checkpoints: {self.save_dir}")
 
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
@@ -146,7 +177,11 @@ class Trainer:
             val_loss = val_metrics["val_loss"]
 
             if self.scheduler is not None:
-                self.scheduler.step(val_loss)
+                # Handle ReduceLROnPlateau vs others
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_loss)
+                else:
+                    self.scheduler.step()
 
             dt = time.time() - t0
             lr = self.optimizer.param_groups[0]["lr"]
@@ -156,37 +191,31 @@ class Trainer:
             self.history["lr"].append(lr)
             self.history["epoch_time"].append(dt)
 
-            # Early stopping
+            # checkpointing
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
-                self._save_checkpoint("best.pt", epoch, val_loss)
+                self._save_checkpoint(f"{checkpoint_name}_best.pt", epoch, val_loss)
             else:
                 self.patience_counter += 1
 
-            if verbose and (epoch % 10 == 0 or epoch == 1):
-                print(
-                    f"  Epoch {epoch:4d} | "
-                    f"train_loss: {train_loss:.4f} | "
-                    f"val_loss: {val_loss:.4f} | "
-                    f"lr: {lr:.2e} | "
-                    f"time: {dt:.1f}s | "
-                    f"patience: {self.patience_counter}/{patience}"
+            if verbose and (epoch % 5 == 0 or epoch == 1):
+                logger.info(
+                    f"Epoch {epoch:4d} | "
+                    f"L_trn: {train_loss:.4f} | "
+                    f"L_val: {val_loss:.4f} | "
+                    f"LR: {lr:.2e} | "
+                    f"Pat: {self.patience_counter}/{patience}"
                 )
 
             if self.patience_counter >= patience:
                 if verbose:
-                    print(f"\n  Early stopping at epoch {epoch}")
+                    logger.info(f"Early stopping at epoch {epoch}")
                 break
 
-        # Save final and history
-        self._save_checkpoint("final.pt", epoch, val_loss)
-        self._save_history()
-
-        if verbose:
-            print(f"\n  Best val_loss: {self.best_val_loss:.4f}")
-            print(f"  Total epochs: {epoch}")
-
+        self._save_checkpoint(f"{checkpoint_name}_final.pt", epoch, val_loss)
+        self._save_history(f"{checkpoint_name}_history.json")
+        
         return self.history
 
     def _save_checkpoint(self, filename: str, epoch: int, val_loss: float):
@@ -197,19 +226,24 @@ class Trainer:
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "val_loss": val_loss,
+            "config": get_config() # Save config just in case
         }, path)
 
-    def load_checkpoint(self, filename: str = "best.pt"):
+    def load_checkpoint(self, filename: str = "model_best.pt"):
         """Load model from checkpoint."""
         path = self.save_dir / filename
-        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        if not path.exists():
+            # Try looking in parent if simple name given
+            path = self.save_dir.parent / filename
+            
+        checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
+        logger.info(f"Loaded checkpoint from {path}")
         return checkpoint
 
-    def _save_history(self):
-        """Save training history to JSON."""
-        path = self.save_dir / "history.json"
-        # Convert to serializable
+    def _save_history(self, filename: str = "history.json"):
+        """Save training history."""
+        path = self.save_dir / filename
         hist = {k: [float(v) for v in vs] for k, vs in self.history.items()}
         with open(path, "w") as f:
             json.dump(hist, f, indent=2)

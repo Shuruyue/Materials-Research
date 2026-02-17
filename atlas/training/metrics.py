@@ -3,13 +3,14 @@ Evaluation Metrics
 
 Metrics for evaluating crystal property predictions:
 - Scalar: MAE, RMSE, R², MaxAE
+- Classification: Accuracy, Precision, Recall, F1, ROC-AUC
 - Tensor: Frobenius norm error, eigenvalue agreement, symmetry violation
 """
 
 import torch
 import numpy as np
 from typing import Dict, Optional
-
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 def mae(pred: torch.Tensor, target: torch.Tensor) -> float:
     """Mean Absolute Error."""
@@ -23,8 +24,9 @@ def rmse(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 def r2_score(pred: torch.Tensor, target: torch.Tensor) -> float:
     """Coefficient of determination (R²)."""
+    if len(target) < 2: return 0.0
     ss_res = ((target - pred) ** 2).sum()
-    ss_tot = ((target - target.mean()) ** 2).sum()
+    ss_tot = ((target - target.mean()) ** 2).sum() + 1e-8
     return (1 - ss_res / ss_tot).item()
 
 
@@ -38,9 +40,6 @@ def scalar_metrics(
 ) -> Dict[str, float]:
     """
     Compute all scalar metrics.
-
-    Returns:
-        Dict with MAE, RMSE, R², MaxAE
     """
     p = prefix + "_" if prefix else ""
     return {
@@ -51,16 +50,39 @@ def scalar_metrics(
     }
 
 
+def classification_metrics(
+    logits: torch.Tensor, target: torch.Tensor, prefix: str = ""
+) -> Dict[str, float]:
+    """
+    Compute classification metrics.
+    
+    Args:
+        logits: (N,) raw logits
+        target: (N,) binary targets (0 or 1)
+    """
+    probs = torch.sigmoid(logits).cpu().numpy()
+    preds = (probs > 0.5).astype(int)
+    y_true = target.cpu().numpy().astype(int)
+    
+    p = prefix + "_" if prefix else ""
+    
+    try:
+        auc = roc_auc_score(y_true, probs)
+    except ValueError:
+        auc = 0.5 # If only one class present
+
+    return {
+        f"{p}Accuracy": accuracy_score(y_true, preds),
+        f"{p}Precision": precision_score(y_true, preds, zero_division=0),
+        f"{p}Recall": recall_score(y_true, preds, zero_division=0),
+        f"{p}F1": f1_score(y_true, preds, zero_division=0),
+        f"{p}AUC": auc
+    }
+
+
 def frobenius_error(pred: torch.Tensor, target: torch.Tensor) -> float:
     """
     Frobenius norm of tensor prediction error.
-
-    Args:
-        pred: (B, M, N) predicted tensor
-        target: (B, M, N) target tensor
-
-    Returns:
-        Average Frobenius norm error
     """
     diff = pred - target
     frob = torch.linalg.norm(diff.reshape(diff.size(0), -1), dim=-1)
@@ -70,12 +92,6 @@ def frobenius_error(pred: torch.Tensor, target: torch.Tensor) -> float:
 def symmetry_violation(C: torch.Tensor) -> float:
     """
     Measure how much a predicted tensor violates symmetry (Cij = Cji).
-
-    Args:
-        C: (B, N, N) predicted tensor
-
-    Returns:
-        Average asymmetry magnitude
     """
     asym = C - C.transpose(-1, -2)
     return asym.abs().mean().item()
@@ -84,23 +100,19 @@ def symmetry_violation(C: torch.Tensor) -> float:
 def eigenvalue_agreement(pred: torch.Tensor, target: torch.Tensor) -> float:
     """
     Compare eigenvalue ordering between predicted and target tensors.
-
-    Args:
-        pred: (B, N, N)
-        target: (B, N, N)
-
-    Returns:
-        Spearman rank correlation of eigenvalues (averaged over batch)
     """
     from scipy.stats import spearmanr
 
     scores = []
     for i in range(pred.size(0)):
-        ev_pred = torch.linalg.eigvalsh(pred[i]).cpu().numpy()
-        ev_target = torch.linalg.eigvalsh(target[i]).cpu().numpy()
-        corr, _ = spearmanr(ev_pred, ev_target)
-        if not np.isnan(corr):
-            scores.append(corr)
+        try:
+            ev_pred = torch.linalg.eigvalsh(pred[i]).cpu().numpy()
+            ev_target = torch.linalg.eigvalsh(target[i]).cpu().numpy()
+            corr, _ = spearmanr(ev_pred, ev_target)
+            if not np.isnan(corr):
+                scores.append(corr)
+        except RuntimeError:
+            pass # Eigendecomposition failed
 
     return np.mean(scores) if scores else 0.0
 
@@ -110,9 +122,6 @@ def tensor_metrics(
 ) -> Dict[str, float]:
     """
     Compute all tensor metrics.
-
-    Returns:
-        Dict with Frobenius error, symmetry violation, eigenvalue agreement
     """
     p = prefix + "_" if prefix else ""
     return {
