@@ -1,16 +1,16 @@
 {
   "property": "formation_energy",
   "test_metrics": {
-    "formation_energy_MAE": 0.07722184807062149,
-    "formation_energy_RMSE": 0.12864752113819122,
-    "formation_energy_R2": 0.9822880029678345,
-    "formation_energy_MaxAE": 1.1948833465576172
+    "formation_energy_MAE": 1.6535431146621704,
+    "formation_energy_RMSE": 2.044128894805908,
+    "formation_energy_R2": -0.7828325033187866,
+    "formation_energy_MaxAE": 3.78190279006958
   },
   "target_mae": 0.063,
   "passed": false,
-  "n_train": 4000,
-  "n_val": 500,
-  "n_test": 500,
-  "n_params": 234881,
-  "best_epoch": 90
+  "n_train": 80,
+  "n_val": 10,
+  "n_test": 10,
+  "n_params": 46209,
+  "best_epoch": 1
 }

@@ -9,9 +9,8 @@ This validates that the data pipeline and model architecture work correctly
 before proceeding to multi-task learning (Phase 2).
 
 Usage:
-    python scripts/10_train_cgcnn_baseline.py --property formation_energy
-    python scripts/10_train_cgcnn_baseline.py --property band_gap
-    python scripts/10_train_cgcnn_baseline.py --property formation_energy --max-samples 5000
+    python scripts/phase1_baseline/10_train_cgcnn_lite.py
+    python scripts/phase1_baseline/10_train_cgcnn_lite.py --property band_gap
 """
 
 import argparse
@@ -21,13 +20,23 @@ import json
 from pathlib import Path
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathlib import Path
 
-from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset
-from atlas.models.cgcnn import CGCNN
-from atlas.models.graph_builder import CrystalGraphBuilder
-from atlas.training.metrics import scalar_metrics
+# Enhance module discovery (if not installed via pip -e .)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from atlas.config import get_config
+    from atlas.data.crystal_dataset import CrystalPropertyDataset
+    from atlas.models.cgcnn import CGCNN
+    from atlas.models.graph_builder import CrystalGraphBuilder
+    from atlas.training.metrics import scalar_metrics
+except ImportError as e:
+    print(f"Error: Could not import atlas package. ({e})")
+    print("Please install the package in editable mode: pip install -e .")
+    sys.exit(1)
 
 
 def train_epoch(model, loader, optimizer, property_name, device):
@@ -82,28 +91,33 @@ def evaluate(model, loader, property_name, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CGCNN Baseline Training (Phase 1)")
+    parser = argparse.ArgumentParser(description="CGCNN Lite Training (Fast Debug)")
     parser.add_argument(
         "--property", type=str, default="formation_energy",
         choices=["formation_energy", "band_gap", "bulk_modulus", "shear_modulus"],
         help="Property to predict",
     )
-    parser.add_argument("--max-samples", type=int, default=None,
-                        help="Max samples (for quick testing)")
-    parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--patience", type=int, default=50)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--n-conv", type=int, default=3)
+    # Lite Default: 1000 samples max
+    parser.add_argument("--max-samples", type=int, default=1000,
+                        help="Max samples (default: 1000 for Lite)")
+    # Lite Default: 10 epochs
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=0.005)
+    parser.add_argument("--patience", type=int, default=5)
+    # Lite Default: Small model
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--n-conv", type=int, default=2)
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     config = get_config()
 
     print("=" * 60)
-    print(f"  CGCNN Baseline — Predicting: {args.property}")
+    print(f"  🟢 CGCNN LITE (Debug Mode)")
+    print(f"  Predicting: {args.property}")
     print(f"  Device: {device}")
+    print(f"  Settings: {args.epochs} epochs, {args.max_samples} samples, {args.hidden_dim} dim")
     print("=" * 60)
 
     # ── Data ──
@@ -155,7 +169,7 @@ def main():
     print(f"  Early stopping patience: {args.patience}")
     print("-" * 60)
 
-    save_dir = config.paths.models_dir / f"cgcnn_{args.property}"
+    save_dir = config.paths.models_dir / f"cgcnn_lite_{args.property}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     best_val_mae = float("inf")

@@ -53,7 +53,6 @@ class ScalarHead(nn.Module):
     def __init__(self, embed_dim: int, hidden_dim: int = 64, output_dim: int = 1):
         super().__init__()
         self.net = nn.Sequential(
-        self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim // 2),

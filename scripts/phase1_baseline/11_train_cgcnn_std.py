@@ -10,7 +10,7 @@ Full-scale training with all accuracy optimizations and STABILITY fixes:
 - Outlier filtering (4-sigma)
 
 Usage:
-    python scripts/11_train_cgcnn_full.py
+    python scripts/phase1_baseline/11_train_cgcnn_std.py
 """
 
 import argparse
@@ -22,13 +22,23 @@ import time
 from pathlib import Path
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathlib import Path
 
-from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset
-from atlas.models.cgcnn import CGCNN
-from atlas.models.graph_builder import CrystalGraphBuilder
-from atlas.training.metrics import scalar_metrics
+# Enhance module discovery
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from atlas.config import get_config
+    from atlas.data.crystal_dataset import CrystalPropertyDataset
+    from atlas.models.cgcnn import CGCNN
+    from atlas.models.graph_builder import CrystalGraphBuilder
+    from atlas.training.metrics import scalar_metrics
+except ImportError as e:
+    print(f"Error: Could not import atlas package. ({e})")
+    print("Please install the package in editable mode: pip install -e .")
+    sys.exit(1)
 
 import numpy as np
 
@@ -44,33 +54,59 @@ BENCHMARKS = {
 }
 
 
-def filter_outliers(dataset, property_name, n_sigma=4.0):
+def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     """
-    Remove extreme outliers from dataset.
+    Remove extreme outliers from dataset and save them for inspection.
     Filters samples where |value - mean| > n_sigma * std.
     Strict filtering (4.0 sigma) removes physical non-sense.
     """
     values = []
+    ids = []
+    
+    # Extract values and JIDs
     for data in dataset:
         if hasattr(data, property_name):
             values.append(getattr(data, property_name).item())
+            ids.append(getattr(data, "jid", "unknown"))
+            
     if not values:
         return dataset
 
     import numpy as np
+    import pandas as pd
+    
     arr = np.array(values)
     mean, std = arr.mean(), arr.std()
+    
     if std < 1e-8:
         return dataset
 
     mask = np.abs(arr - mean) <= n_sigma * std
     n_removed = (~mask).sum()
+    
     if n_removed > 0:
         print(f"    Outlier filter: removed {n_removed} samples "
               f"(|val - {mean:.2f}| > {n_sigma}σ = {n_sigma*std:.2f})")
-        indices = np.where(mask)[0].tolist()
+        
+        # Save outliers for inspection (Critical for discovery)
+        outlier_indices = np.where(~mask)[0]
+        outlier_data = []
+        for idx in outlier_indices:
+            outlier_data.append({
+                "jid": ids[idx],
+                "value": values[idx],
+                "distance_sigma": (values[idx] - mean) / std
+            })
+        
+        outlier_df = pd.DataFrame(outlier_data)
+        outlier_file = save_dir / "outliers.csv"
+        outlier_df.to_csv(outlier_file, index=False)
+        print(f"    ⚠️ Saved {n_removed} outliers to {outlier_file} for review")
+
         from torch.utils.data import Subset
+        indices = np.where(mask)[0].tolist()
         dataset = Subset(dataset, indices)
+        
     return dataset
 
 
@@ -219,10 +255,25 @@ def train_single_property(args, property_name: str):
     print(f"    Data loading: {data_time:.1f}s")
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
-    print("    Applying strict outlier filter (4.0 sigma)...")
-    train_data = filter_outliers(datasets["train"], property_name, n_sigma=4.0)
-    val_data = filter_outliers(datasets["val"], property_name, n_sigma=4.0)
-    test_data = filter_outliers(datasets["test"], property_name, n_sigma=4.0)
+    # ── Output Directory ──
+    save_dir = config.paths.models_dir / f"cgcnn_std_{property_name}"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Filter extreme outliers from all splits (Strict 4.0 sigma)
+    if not args.no_filter:
+        print("    Applying strict outlier filter (4.0 sigma)...")
+        # Pass save_dir to save outliers.csv
+        train_data = filter_outliers(datasets["train"], property_name, save_dir, n_sigma=4.0)
+        # Validation/Test should represent reality, but for stability we filter extreme physics errors
+        # In production discovery, we might want to keep them.
+        val_data = filter_outliers(datasets["val"], property_name, save_dir, n_sigma=4.0)
+        test_data = filter_outliers(datasets["test"], property_name, save_dir, n_sigma=4.0)
+    else:
+        print("    ⚠️ Outlier filter DISABLED (--no-filter active)")
+        print("    Training on raw data including extreme values.")
+        train_data = datasets["train"]
+        val_data = datasets["val"]
+        test_data = datasets["test"]
 
     # Target normalization (compute from training set ONLY)
     print("    Computing target normalization...")
@@ -275,15 +326,33 @@ def train_single_property(args, property_name: str):
     print(f"    Loss: Huber (delta=0.2) — robust to outliers")
     print("-" * 70)
 
-    save_dir = config.paths.models_dir / f"cgcnn_full_{property_name}"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
     best_val_mae = float("inf")
     patience_counter = 0
     history = {"train_loss": [], "val_mae": [], "lr": []}
+    start_epoch = 1
+
+    # Resume logic
+    checkpoint_path = save_dir / "checkpoint.pt"
+    if args.resume and checkpoint_path.exists():
+        print(f"  🟡 Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        normalizer_state = checkpoint.get("normalizer")
+        if normalizer_state:
+            normalizer.mean = normalizer_state["mean"]
+            normalizer.std = normalizer_state["std"]
+        
+        start_epoch = checkpoint["epoch"] + 1
+        history = checkpoint.get("history", history)
+        best_val_mae = checkpoint.get("best_val_mae", float("inf"))
+        patience_counter = checkpoint.get("patience_counter", 0)
+        print(f"  ➜ Resuming at epoch {start_epoch}")
+
     t_train = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t_ep = time.time()
 
         train_loss = train_epoch(
@@ -322,6 +391,18 @@ def train_single_property(args, property_name: str):
             }, save_dir / "best.pt")
         else:
             patience_counter += 1
+
+        # Save latest checkpoint
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "normalizer": normalizer.state_dict(),
+            "history": history,
+            "best_val_mae": best_val_mae,
+            "patience_counter": patience_counter,
+        }, checkpoint_path)
 
         dt_ep = time.time() - t_ep
 
@@ -414,32 +495,32 @@ def train_single_property(args, property_name: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CGCNN Maximum Accuracy Training (Stable Version)"
+        description="CGCNN Standard Training (Dev/Tuning)"
     )
     parser.add_argument(
         "--property", type=str, default="formation_energy",
         choices=list(BENCHMARKS.keys()),
     )
-    # parser.add_argument("--all-properties", action="store_true",
-    #                     help="Train all properties sequentially")
+    # Std Default: Use all data, but smaller model/epochs than Pro
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Cap on samples (None = use all ~76k)")
-    parser.add_argument("--epochs", type=int, default=2000)
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=0.001,
-                        help="Max LR for OneCycle (default: 0.001)")
+    parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=200)
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--n-conv", type=int, default=5)
+    parser.add_argument("--patience", type=int, default=50)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--n-conv", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.0)
-    # Removed AMP argument to enforce float32
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume training from latest checkpoint")
+    parser.add_argument("--no-filter", action="store_true",
+                        help="Disable outlier filtering (use all data)")
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║        CGCNN Baseline — Maximum Accuracy (Stable)                ║")
-    print("║        PhD Thesis Phase 1: Robust Validation                     ║")
-    print("║        Target Property: Formation Energy Only                    ║")
+    print("║        🟡 CGCNN STANDARD (Dev Mode)                              ║")
+    print("║        Balanced for Development & Tuning                         ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
 
     train_single_property(args, args.property)

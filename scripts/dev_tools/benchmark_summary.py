@@ -1,7 +1,13 @@
 """Quick Phase 1 results check."""
 import json, os
 
-results_dir = "models"
+from pathlib import Path
+import sys
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+results_dir = PROJECT_ROOT / "models"
 props = ["formation_energy", "band_gap", "bulk_modulus", "shear_modulus"]
 
 print("=" * 80)
@@ -21,7 +27,7 @@ for p in props:
     r2 = r["test_metrics"].get(f"{p}_R2", 0)
     target = r["target_mae"]
     unit = r.get("unit", "")
-    passed = "✅" if r["passed"] else "❌"
+    passed = "[PASS]" if r["passed"] else "[FAIL]"
     best_ep = r["best_epoch"]
     total_ep = r["total_epochs"]
     n_train = r["n_train"]

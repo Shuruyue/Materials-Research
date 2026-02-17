@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
 from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES

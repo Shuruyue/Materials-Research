@@ -17,10 +17,21 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import sys
+from pathlib import Path
 
-from atlas.config import get_config
-from atlas.data.jarvis_client import JARVISClient
+# Enhance module discovery
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from atlas.config import get_config
+    from atlas.data.jarvis_client import JARVISClient
+except ImportError as e:
+    print(f"Error: Could not import atlas package. ({e})")
+    print("Please install the package in editable mode: pip install -e .")
+    sys.exit(1)
 
 
 def main():
@@ -71,7 +82,7 @@ def main():
         data["trivial"].to_pickle(output_dir / "trivial_materials.pkl")
         print(f"\n  Saved to: {output_dir}")
 
-    print("\n✓ Done!")
+    print("\n[OK] Done!")
 
 
 if __name__ == "__main__":

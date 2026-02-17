@@ -36,9 +36,17 @@ env/
 Thumbs.db
 .DS_Store
 
+
+# Models (User local only)
+models/
+models/cgcnn_lite_formation_energy/
+models/cgcnn_std_formation_energy/
+models/cgcnn_pro_formation_energy/
+
 # Logs
 *.log
 logs/
+outliers.csv
 
 # Testing
 .pytest_cache/
