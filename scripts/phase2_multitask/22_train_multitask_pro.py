@@ -35,8 +35,20 @@ from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.metrics import scalar_metrics
 
 # ── Pro Tier Config ──
-# Full discovery mode can be enabled by adding more properties to this list
-PROPERTIES = DEFAULT_PROPERTIES 
+# Full discovery mode activated by --all-properties
+CORE_PROPERTIES = DEFAULT_PROPERTIES
+
+ALL_PROPERTIES = [
+    "formation_energy",
+    "band_gap",
+    "band_gap_mbj",
+    "bulk_modulus",
+    "shear_modulus",
+    "dielectric",
+    "piezoelectric",
+    "spillage",
+    "ehull",
+]
 
 PRO_PRESET = {
     "irreps": "128x0e + 64x1o + 32x2e + 16x3o", # High capacity
@@ -223,21 +235,34 @@ def evaluate(model, loader, device, normalizer=None):
     return metrics
 
 
+
+# ── Main ──
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--no-filter", action="store_true", help="Disable outlier filter")
+    parser.add_argument("--all-properties", action="store_true", help="Train on ALL 9 properties (Discovery Mode)")
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=16) # Reduced for Pro size
     parser.add_argument("--lr", type=float, default=0.0005)
     args = parser.parse_args()
+
+    # Dynamic Property Selection
+    global PROPERTIES
+    if args.all_properties:
+        PROPERTIES = ALL_PROPERTIES
+        print("🌍 DISCOVERY MODE: Training on ALL 9 properties!")
+    else:
+        PROPERTIES = CORE_PROPERTIES
+        print("🔹 STANDARD MODE: Training on core 4 properties.")
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("╔══════════════════════════════════════════════════════════════════╗")
     print("║     🔴 E3NN PRO (Production Mode)                              ║")
-    print("║     SOTA Architecture / Full Discovery Support                 ║")
+    print(f"║     Tasks: {len(PROPERTIES)} Properties                                      ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     
     save_dir = config.paths.models_dir / "multitask_pro_e3nn"
