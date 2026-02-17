@@ -2,30 +2,29 @@
 Active Learning Discovery Controller
 
 The brain of ATLAS — orchestrates the closed-loop discovery cycle:
+    Generate -> Relax -> Classify -> Score -> Select -> Loop
 
-    ┌──────────────────────────────────────────────────────────┐
-    │                                                          │
-    │   Generate → Relax → Classify → Score → Select → Loop   │
-    │                                                          │
-    └──────────────────────────────────────────────────────────┘
-
-Uses a multi-objective acquisition function that balances:
-    1. Topological probability (from GNN classifier)
-    2. Thermodynamic stability (from MACE energy)
-    3. Exploration (novelty / uncertainty)
-
-This is the core innovation of ATLAS — no existing platform
-combines all three in a single closed-loop framework.
+Optimization:
+- Improved error handling (logging instead of silent failures)
+- Better type hinting
+- Robust candidate validation
 """
 
 import json
 import time
 import numpy as np
+import logging
+import torch
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 from dataclasses import dataclass, field
 
 from atlas.config import get_config
+from atlas.active_learning.generator import StructureGenerator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,30 +72,19 @@ class Candidate:
 class DiscoveryController:
     """
     Active learning controller for topological material discovery.
-    
-    Orchestrates the full discovery loop:
-    1. Generate candidate structures (from StructureGenerator)
-    2. Relax with MACE potential (from MACERelaxer)
-    3. Classify topology (from TopoGNN)
-    4. Compute acquisition function
-    5. Select top candidates for next iteration
-    6. Update models with new data
-    
-    The acquisition function balances exploitation (high topo probability)
-    with exploration (novel compositions/structures).
     """
 
     def __init__(
         self,
-        generator=None,
+        generator: StructureGenerator,
         relaxer=None,
         classifier_model=None,
         graph_builder=None,
         # Acquisition function weights
-        w_topo: float = 0.4,           # weight for topological probability
-        w_stability: float = 0.3,      # weight for stability
-        w_heuristic: float = 0.15,     # weight for domain heuristic
-        w_novelty: float = 0.15,       # weight for novelty/exploration
+        w_topo: float = 0.4,
+        w_stability: float = 0.3,
+        w_heuristic: float = 0.15,
+        w_novelty: float = 0.15,
     ):
         self.generator = generator
         self.relaxer = relaxer
@@ -113,8 +101,8 @@ class DiscoveryController:
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         # Discovery state
-        self.all_candidates: list[Candidate] = []
-        self.top_candidates: list[Candidate] = []
+        self.all_candidates: List[Candidate] = []
+        self.top_candidates: List[Candidate] = []
         self.iteration = 0
         self.known_formulas: set[str] = set()
 
@@ -123,31 +111,15 @@ class DiscoveryController:
         n_iterations: int = 10,
         n_candidates_per_iter: int = 50,
         n_select_top: int = 10,
-    ) -> list[Candidate]:
+    ) -> List[Candidate]:
         """
         Run the full discovery loop.
-
-        Args:
-            n_iterations: number of active learning iterations
-            n_candidates_per_iter: candidates generated per iteration
-            n_select_top: top candidates selected per iteration
-
-        Returns:
-            List of all top candidates found across iterations
         """
-        import torch
-
         print("\n" + "=" * 70)
         print("  ATLAS Discovery Engine — Active Learning Loop")
         print("=" * 70)
         print(f"  Iterations:          {n_iterations}")
         print(f"  Candidates/iter:     {n_candidates_per_iter}")
-        print(f"  Top selected/iter:   {n_select_top}")
-        print(f"  Acquisition weights: topo={self.w_topo}, "
-              f"stability={self.w_stability}, "
-              f"heuristic={self.w_heuristic}, "
-              f"novelty={self.w_novelty}")
-        print("=" * 70)
 
         for it in range(1, n_iterations + 1):
             self.iteration = it
@@ -159,8 +131,17 @@ class DiscoveryController:
 
             # Step 1: Generate
             print(f"  [1/4] Generating {n_candidates_per_iter} candidates...")
-            raw_candidates = self.generator.generate_batch(n_candidates_per_iter)
-            print(f"        Generated {len(raw_candidates)} structures")
+            try:
+                raw_candidates = self.generator.generate_batch(n_candidates_per_iter)
+            except Exception as e:
+                logger.error(f"Generation failed: {e}")
+                raw_candidates = []
+                
+            print(f"        Generated {len(raw_candidates)} valid structures")
+            
+            if not raw_candidates:
+                logger.warning("No candidates generated! Stopping early.")
+                break
 
             # Step 2: Relax
             print(f"  [2/4] Relaxing with MACE potential...")
@@ -181,7 +162,7 @@ class DiscoveryController:
             # Save results
             self._save_iteration(it, candidates[:n_select_top])
 
-            # Feed back top candidates as new seeds for generator
+            # Feed back top candidates as new seeds
             top_structs = [
                 c.relaxed_structure or c.structure 
                 for c in candidates[:n_select_top]
@@ -190,12 +171,10 @@ class DiscoveryController:
             if top_structs:
                 self.generator.add_seeds(top_structs)
 
-        # Final summary
         self._print_final_summary()
-
         return self.top_candidates
 
-    def _relax_candidates(self, raw_candidates: list[dict]) -> list[Candidate]:
+    def _relax_candidates(self, raw_candidates: list[dict]) -> List[Candidate]:
         """Relax candidate structures with MACE."""
         candidates = []
 
@@ -203,15 +182,20 @@ class DiscoveryController:
             struct = rc["structure"]
 
             if self.relaxer is not None:
-                result = self.relaxer.relax_structure(struct, steps=100)
-                stability = self.relaxer.score_stability(struct)
+                try:
+                    result = self.relaxer.relax_structure(struct, steps=100)
+                    stability = self.relaxer.score_stability(struct)
+                except Exception as e:
+                    logger.warning(f"Relaxation failed for {rc.get('formula', 'unknown')}: {e}")
+                    result = {"relaxed_structure": struct, "energy_per_atom": None, "converged": False}
+                    stability = 0.0
             else:
                 result = {
                     "relaxed_structure": struct,
                     "energy_per_atom": None,
                     "converged": False,
                 }
-                stability = 0.5
+                stability = 0.5  # Neutral stability if no relaxer
 
             cand = Candidate(
                 structure=struct,
@@ -232,10 +216,8 @@ class DiscoveryController:
 
         return candidates
 
-    def _classify_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
+    def _classify_candidates(self, candidates: List[Candidate]) -> List[Candidate]:
         """Run topological GNN classifier on candidates."""
-        import torch
-
         if self.classifier is None or self.graph_builder is None:
             # No classifier — use heuristic score as proxy
             for c in candidates:
@@ -245,28 +227,35 @@ class DiscoveryController:
         self.classifier.eval()
         device = next(self.classifier.parameters()).device
 
+        valid_candidates = []
         for c in candidates:
             try:
                 struct = c.relaxed_structure or c.structure
                 graph = self.graph_builder.structure_to_graph(struct)
 
                 with torch.no_grad():
+                    # Handle both simple graph and batch inputs
+                    node_feats = graph["node_features"].to(device)
+                    if node_feats.dim() == 2:
+                        node_feats = node_feats.unsqueeze(0)
+                        
                     prob = self.classifier.predict_proba(
-                        graph["node_features"].unsqueeze(0).to(device)
-                        if graph["node_features"].dim() == 2
-                        else graph["node_features"].to(device),
+                        node_feats,
                         graph["edge_index"].to(device),
                         graph["edge_features"].to(device),
                     )
                     c.topo_probability = prob.item()
-            except Exception:
+                    valid_candidates.append(c)
+            except Exception as e:
+                logger.warning(f"Classification failed for {c.formula}: {e}")
                 c.topo_probability = c.heuristic_topo_score
+                valid_candidates.append(c)
 
-        return candidates
+        return valid_candidates
 
     def _score_and_select(
-        self, candidates: list[Candidate], n_top: int
-    ) -> list[Candidate]:
+        self, candidates: List[Candidate], n_top: int
+    ) -> List[Candidate]:
         """Compute acquisition function and rank candidates."""
         for c in candidates:
             # Novelty: is this formula new?
@@ -288,22 +277,21 @@ class DiscoveryController:
             self.known_formulas.add(c.formula)
             self.all_candidates.append(c)
 
-            # Maintain global top list
             self.top_candidates.append(c)
             self.top_candidates.sort(
                 key=lambda x: x.acquisition_value, reverse=True
             )
-            self.top_candidates = self.top_candidates[:50]  # keep top 50
+            self.top_candidates = self.top_candidates[:50]  # keep top 50 global
 
         return candidates
 
-    def _print_iteration_summary(self, top: list[Candidate], dt: float):
+    def _print_iteration_summary(self, top: List[Candidate], dt: float):
         """Print summary of one iteration."""
         print(f"\n  Top candidates this iteration ({dt:.1f}s):")
         print(f"  {'Rank':>4} {'Formula':>15} {'Method':>10} "
               f"{'P(topo)':>8} {'Stab':>6} {'Acq':>6}")
-        print(f"  {'────':>4} {'───────':>15} {'──────':>10} "
-              f"{'───────':>8} {'────':>6} {'───':>6}")
+        print(f"  {'----':>4} {'-------':>15} {'------':>10} "
+              f"{'-------':>8} {'----':>6} {'---':>6}")
         for i, c in enumerate(top[:10]):
             print(f"  {i+1:4d} {c.formula:>15s} {c.method:>10s} "
                   f"{c.topo_probability:8.3f} {c.stability_score:6.3f} "
@@ -319,17 +307,7 @@ class DiscoveryController:
         print(f"  Unique formulas:      {len(self.known_formulas)}")
         print(f"  Top candidates:       {len(self.top_candidates)}")
 
-        print(f"\n  🏆 Top 10 Overall Candidates:")
-        print(f"  {'Rank':>4} {'Formula':>15} {'Method':>10} "
-              f"{'P(topo)':>8} {'Stab':>6} {'Acq':>6} {'Iter':>4}")
-        for i, c in enumerate(self.top_candidates[:10]):
-            print(f"  {i+1:4d} {c.formula:>15s} {c.method:>10s} "
-                  f"{c.topo_probability:8.3f} {c.stability_score:6.3f} "
-                  f"{c.acquisition_value:6.3f} {c.iteration:4d}")
-
-        print(f"\n  Results saved to: {self.results_dir}")
-
-    def _save_iteration(self, iteration: int, top_candidates: list[Candidate]):
+    def _save_iteration(self, iteration: int, top_candidates: List[Candidate]):
         """Save iteration results to JSON."""
         results = {
             "iteration": iteration,
@@ -348,17 +326,9 @@ class DiscoveryController:
             "total_iterations": self.iteration,
             "total_candidates_evaluated": len(self.all_candidates),
             "unique_formulas": len(self.known_formulas),
-            "acquisition_weights": {
-                "topo": self.w_topo,
-                "stability": self.w_stability,
-                "heuristic": self.w_heuristic,
-                "novelty": self.w_novelty,
-            },
             "top_candidates": [c.to_dict() for c in self.top_candidates],
         }
-
         out_file = self.results_dir / filename
         with open(out_file, "w") as f:
             json.dump(report, f, indent=2, default=str)
-
         print(f"\n  Report saved to: {out_file}")
