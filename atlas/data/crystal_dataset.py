@@ -71,7 +71,11 @@ def _worker_process_row(row_data: dict, properties: List[str], rev_map: Dict[str
                     try:
                         props[prop_name] = float(val)
                     except (ValueError, TypeError):
-                        pass
+                        props[prop_name] = float('nan')
+                else:
+                    props[prop_name] = float('nan')
+            else:
+                 props[prop_name] = float('nan')
 
         if not props:
             return None

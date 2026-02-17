@@ -24,12 +24,12 @@ class MessagePassingLayer(nn.Module):
         super().__init__()
         self.msg_mlp = nn.Sequential(
             nn.Linear(node_dim + edge_dim, node_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(node_dim, node_dim),
         )
         self.update_mlp = nn.Sequential(
             nn.Linear(node_dim * 2, node_dim),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
     def forward(

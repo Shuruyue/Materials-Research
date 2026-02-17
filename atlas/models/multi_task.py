@@ -7,9 +7,44 @@ Supports both scalar (Eg, Ef, K, G) and tensor (Cij, εij) outputs.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional, Dict, List
 
 from atlas.models.cgcnn import CGCNN
+
+
+class EvidentialHead(nn.Module):
+    """
+    Evidential Deep Learning Head (Amini et al., 2020).
+    Predicts Normal-Inverse-Gamma parameters: (γ, ν, α, β).
+    """
+    def __init__(self, embed_dim: int, hidden_dim: int = 64, output_dim: int = 1):
+        super().__init__()
+        self.output_dim = output_dim
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, output_dim * 4),
+        )
+
+    def forward(self, embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Returns dictionary of NIG parameters."""
+        raw = self.net(embedding).reshape(-1, self.output_dim, 4)
+        
+        # Enforce constraints (Softplus + epsilon)
+        gamma = raw[..., 0]
+        nu = F.softplus(raw[..., 1]) + 1e-6
+        alpha = F.softplus(raw[..., 2]) + 1.0 + 1e-6
+        beta = F.softplus(raw[..., 3]) + 1e-6
+        
+        return {
+            "gamma": gamma,
+            "nu": nu,
+            "alpha": alpha,
+            "beta": beta
+        }
 
 
 class ScalarHead(nn.Module):
@@ -18,10 +53,11 @@ class ScalarHead(nn.Module):
     def __init__(self, embed_dim: int, hidden_dim: int = 64, output_dim: int = 1):
         super().__init__()
         self.net = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim // 2, output_dim),
         )
 
@@ -58,9 +94,9 @@ class TensorHead(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, self.n_out),
         )
 
@@ -85,8 +121,17 @@ class TensorHead(nn.Module):
             return self._to_elastic_tensor(components)
         elif self.tensor_type == "dielectric":
             return self._to_dielectric_tensor(components)
+        elif self.tensor_type == "dielectric":
+            return self._to_dielectric_tensor(components)
         else:
-            return components  # TODO: piezoelectric reconstruction
+            return self._to_piezoelectric_tensor(components)
+
+    @staticmethod
+    def _to_piezoelectric_tensor(components: torch.Tensor) -> torch.Tensor:
+        """Reconstruct 3x6 piezoelectric tensor from 18 components."""
+        # Just reshape (B, 18) -> (B, 3, 6)
+        B = components.size(0)
+        return components.view(B, 3, 6)
 
     @staticmethod
     def _to_elastic_tensor(components: torch.Tensor) -> torch.Tensor:
@@ -150,6 +195,8 @@ class MultiTaskGNN(nn.Module):
         for name, cfg in tasks.items():
             if cfg["type"] == "scalar":
                 self.heads[name] = ScalarHead(embed_dim)
+            elif cfg["type"] == "evidential":
+                self.heads[name] = EvidentialHead(embed_dim)
             elif cfg["type"] == "tensor":
                 tensor_type = cfg.get("tensor_type", "elastic")
                 self.heads[name] = TensorHead(embed_dim, tensor_type=tensor_type)
@@ -189,6 +236,8 @@ class MultiTaskGNN(nn.Module):
         """Dynamically add a new prediction task."""
         if task_type == "scalar":
             self.heads[name] = ScalarHead(self.embed_dim, **kwargs)
+        elif task_type == "evidential":
+            self.heads[name] = EvidentialHead(self.embed_dim, **kwargs)
         elif task_type == "tensor":
             self.heads[name] = TensorHead(self.embed_dim, **kwargs)
         self.task_names.append(name)

@@ -64,7 +64,7 @@ class CGCNN(nn.Module):
             fc_layers.extend([
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
+                nn.SiLU(),
                 nn.Dropout(dropout),
             ])
         fc_layers.append(nn.Linear(hidden_dim, output_dim))
@@ -96,7 +96,7 @@ class CGCNN(nn.Module):
         for conv, bn in zip(self.convs, self.conv_bns):
             h_new = conv(h, edge_index, edge_feats)
             h_new = bn(h_new)
-            h = F.relu(h + h_new)  # residual connection
+            h = F.silu(h + h_new)  # residual connection
             h = self.dropout(h)
 
         # Global pooling

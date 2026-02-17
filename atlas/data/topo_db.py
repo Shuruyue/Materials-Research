@@ -33,6 +33,19 @@ TSM_SEEDS = [
     {"formula": "Cd3As2", "topo_class": "Dirac", "band_gap": 0.0},
 ]
 
+TOPO_CLASSES = ["TI", "Weyl", "Dirac", "TCI", "LineNode", "Magnetic_TI"]
+
+from dataclasses import dataclass
+
+@dataclass
+class TopoMaterial:
+    formula: str
+    topo_class: str
+    band_gap: float = 0.0
+    jid: str = ""
+    space_group: int = 0
+
+
 class TopoDB:
     """
     Interface to the topological materials database.

@@ -97,14 +97,23 @@ class Trainer:
                      pred = self.model(batch)
 
                 # Loss computation
-                # If loss_fn expects distinct args, handle it. 
-                # Here we assume dictionary output for MultiTask or Tensor for single
-                if isinstance(pred, dict) and isinstance(self.loss_fn, nn.ModuleDict):
-                    # Multi-task scenario not fully covered by generic logic but handled inside loss_fn
-                     loss_dict = self.loss_fn(pred, batch.y_dict if hasattr(batch, 'y_dict') else batch)
-                     loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
+                # Handle Multi-Task (Dict output)
+                if isinstance(pred, dict):
+                    # For multi-task, we usually need keys from the batch, so pass the whole batch
+                    # explicitly as targets if 'y_dict' isn't available.
+                    # Also, carefully verify if we really should use batch.y
+                    targets = batch
+                    if hasattr(batch, 'y_dict'):
+                        targets = batch.y_dict
+                    
+                    loss_dict = self.loss_fn(pred, targets)
+                    # Extract total loss
+                    loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
                 else:
-                    loss = self.loss_fn(pred, batch.y if hasattr(batch, 'y') else batch)
+                    # Single task
+                    # Prefer batch.y if it exists and is not None
+                    targets = batch.y if (hasattr(batch, 'y') and batch.y is not None) else batch
+                    loss = self.loss_fn(pred, targets)
 
             # Backward pass with scaler
             self.scaler.scale(loss).backward()
@@ -139,11 +148,15 @@ class Trainer:
                     batch.batch,
                 )
                 
-                if isinstance(pred, dict) and isinstance(self.loss_fn, nn.ModuleDict):
-                     loss_dict = self.loss_fn(pred, batch.y_dict if hasattr(batch, 'y_dict') else batch)
+                if isinstance(pred, dict):
+                     targets = batch
+                     if hasattr(batch, 'y_dict'):
+                        targets = batch.y_dict
+                     loss_dict = self.loss_fn(pred, targets)
                      loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
                 else:
-                    loss = self.loss_fn(pred, batch.y if hasattr(batch, 'y') else batch)
+                    targets = batch.y if (hasattr(batch, 'y') and batch.y is not None) else batch
+                    loss = self.loss_fn(pred, targets)
 
             total_loss += loss.item()
             n_batches += 1

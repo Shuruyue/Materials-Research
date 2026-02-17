@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, asdict
 
 from atlas.config import get_config
 from atlas.active_learning.generator import StructureGenerator
+from atlas.active_learning.acquisition import expected_improvement, upper_confidence_bound
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -271,7 +272,6 @@ class DiscoveryController:
             candidates.append(cand)
         return candidates
 
-    def _classify_candidates(self, candidates: List[Candidate]) -> List[Candidate]:
         if not self.classifier or not self.graph_builder:
             # Fallback to heuristic
             for c in candidates: c.topo_probability = c.heuristic_topo_score
@@ -280,6 +280,7 @@ class DiscoveryController:
         self.classifier.eval()
         device = next(self.classifier.parameters()).device
         
+        # Batch processing would be better, but loop is safer for now
         for c in candidates:
             try:
                 struct = c.relaxed_structure or c.structure
@@ -289,13 +290,60 @@ class DiscoveryController:
                     node_feats = graph["node_features"].to(device)
                     if node_feats.dim() == 2: node_feats = node_feats.unsqueeze(0)
                         
-                    prob = self.classifier.predict_proba(
+                    # Predict using the model (Surrogate)
+                    pred = self.classifier(
                         node_feats,
                         graph["edge_index"].to(device),
                         graph["edge_features"].to(device)
                     )
-                    c.topo_probability = float(prob.item())
-            except Exception:
+                    
+                    # Handle Multi-Task Dictionary Output
+                    if isinstance(pred, dict):
+                        # 1. Topology (Band Gap or Classification)
+                        if "band_gap" in pred: # Regression proxy for topology?
+                            bg = pred["band_gap"]
+                            if isinstance(bg, dict): # Evidential
+                                mu = bg["gamma"].item()
+                                std = bg["total_std"].item()
+                                # Small band gap (<0.1) often indicates topology? 
+                                # Or if we predicted "is_topological" directly
+                                c.topo_probability = 1.0 if mu < 0.1 else 0.0 # Placeholder
+                            else:
+                                c.topo_probability = 1.0 if bg.item() < 0.1 else 0.0
+
+                        # 2. Stability (Formation Energy)
+                        if "formation_energy" in pred:
+                            fe = pred["formation_energy"]
+                            if isinstance(fe, dict): # Evidential
+                                mu_fe = fe["gamma"].item()
+                                std_fe = fe["total_std"].item()
+                                
+                                # Use LCB for stability (Minimize Energy) -> Maximize -Energy
+                                # But here we just store the score. 
+                                # Stability Score = UCB of Stability (to be safe? or LCB to be optimistic?)
+                                # Optimistic exploration: LCB (Lower bound of energy is very stable)
+                                # LCB = mu - kappa * std
+                                lcb = mu_fe - 2.0 * std_fe
+                                
+                                # Normalize score: < -0.5 eV/atom is good
+                                # 0.0 if > 0, 1.0 if < -1.0
+                                c.stability_score = max(0.0, min(1.0, -lcb))
+                                
+                                # Store raw for acquisition
+                                c.energy_mean = mu_fe
+                                c.energy_std = std_fe
+                            else:
+                                c.stability_score = max(0.0, min(1.0, -fe.item()))
+                                
+                    else:
+                        # Old binary classifier behavior
+                        if pred.shape[-1] == 1:
+                            c.topo_probability = torch.sigmoid(pred).item()
+                        elif pred.shape[-1] == 2:
+                             c.topo_probability = torch.softmax(pred, dim=-1)[0, 1].item()
+
+            except Exception as e:
+                # logger.warning(f"Prediction failed: {e}")
                 c.topo_probability = 0.0 # Penalize GNN failure
         
         return candidates
@@ -306,12 +354,31 @@ class DiscoveryController:
             is_new = c.formula not in self.known_formulas
             c.novelty_score = 1.0 if is_new else 0.0
             
-            c.acquisition_value = (
-                self.weights["topo"] * c.topo_probability +
-                self.weights["stability"] * c.stability_score +
-                self.weights["heuristic"] * c.heuristic_topo_score +
-                self.weights["novelty"] * c.novelty_score
-            )
+            if hasattr(c, "energy_mean") and hasattr(c, "energy_std"):
+                # Bayesian Acquisition (EI) for stability
+                # Target: Minimize Energy (Find stable phases)
+                # Best so far? Hard to define globally, assume -0.5 eV/atom
+                ei_val = expected_improvement(
+                    c.energy_mean, 
+                    c.energy_std, 
+                    best_f=-0.5, # Target
+                    maximize=False # Minimize energy
+                ).item()
+                
+                # Hybrid Score: Topo (Exploitation) + Stability (Exploration/EI)
+                c.acquisition_value = (
+                    self.weights["topo"] * c.topo_probability + 
+                    self.weights["stability"] * (ei_val * 10.0) + # Scale EI to be comparable
+                    self.weights["heuristic"] * c.heuristic_topo_score +
+                    self.weights["novelty"] * c.novelty_score
+                )
+            else:
+                c.acquisition_value = (
+                    self.weights["topo"] * c.topo_probability +
+                    self.weights["stability"] * c.stability_score +
+                    self.weights["heuristic"] * c.heuristic_topo_score +
+                    self.weights["novelty"] * c.novelty_score
+                )
         
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
         

@@ -83,9 +83,10 @@ class CrystalGraphBuilder:
         max_neighbors: max number of neighbors per atom
     """
 
-    def __init__(self, cutoff: float = 5.0, max_neighbors: int = 12):
+    def __init__(self, cutoff: float = 5.0, max_neighbors: int = 12, compute_3body: bool = True):
         self.cutoff = cutoff
         self.max_neighbors = max_neighbors
+        self.compute_3body = compute_3body
 
     @property
     def node_dim(self) -> int:
@@ -154,9 +155,55 @@ class CrystalGraphBuilder:
             dists = [0.0]
             vectors = [[0.0, 0.0, 0.0]]
 
+        # 3-Body Indices (Edge pairs sharing source)
+        # We need to map (src, dst) -> edge_idx
+        # Since we construct edges sequentially, we can track their ranges.
+        # But pymatgen neighbors are not sorted by index, so we need a mapping.
+        
         edge_index = np.array([src, dst], dtype=np.int64)
         distances = np.array(dists, dtype=np.float32)
         edge_vectors = np.array(vectors, dtype=np.float32)
+        
+        three_body_indices = np.zeros((0, 3), dtype=np.int64) # Changed from (0,2) to (0,3) to match [d1, i, d2]
+        three_body_edge_indices = np.zeros((0, 2), dtype=np.int64)
+
+        if self.compute_3body and len(src) > 0:
+            # Reconstruct adjacency for efficient triplet search
+            # Group edges by source: src_idx -> list of (dst_idx, edge_array_idx)
+            from collections import defaultdict
+            adj = defaultdict(list)
+            for e_idx, (s, d) in enumerate(zip(src, dst)):
+                adj[s].append((d, e_idx))
+            
+            tb_indices = [] # (atom_j, atom_i, atom_k)
+            tb_edge_indices = [] # (edge_ij, edge_ik)
+            # M3GNet uses: for atom i, pairs of neighbors (j, k).
+            # We want indices of edges (i->j) and (i->k).
+            
+            for i in range(n_atoms):
+                 neighbors_i = adj[i]
+                 n = len(neighbors_i)
+                 if n < 2: continue
+                 
+                 # All pairs of neighbors (j, k)
+                 # Limit to max neighbors to avoid explosion? 
+                 # We already limited max_neighbors in getting neighbors.
+                 for idx1 in range(n):
+                     for idx2 in range(n):
+                         if idx1 == idx2: continue
+                         
+                         d1, e_idx1 = neighbors_i[idx1] # d1 is neighbor j
+                         d2, e_idx2 = neighbors_i[idx2] # d2 is neighbor k
+                         
+                         # Triplet: j(d1) - i - k(d2)
+                         # We store edge indices corresponding to i->j and i->k
+                         tb_edge_indices.append([e_idx1, e_idx2])
+                         # We can also store atom indices if needed
+                         tb_indices.append([d1, i, d2])
+
+            if tb_edge_indices:
+                three_body_edge_indices = np.array(tb_edge_indices, dtype=np.int64)
+                three_body_indices = np.array(tb_indices, dtype=np.int64)
 
         # Edge features: Gaussian expansion of distances
         edge_feats = self._gaussian_expansion(distances)
@@ -165,7 +212,9 @@ class CrystalGraphBuilder:
             "node_features": node_feats,
             "edge_index": edge_index,
             "edge_features": edge_feats,
-            "edge_vectors": edge_vectors,  # NEW: for equivariant GNN
+            "edge_vectors": edge_vectors,
+            "three_body_indices": three_body_indices,          # (N_triplets, 3) [j, i, k]
+            "three_body_edge_indices": three_body_edge_indices,# (N_triplets, 2) [edge_ij, edge_ik]
             "num_nodes": n_atoms,
         }
 
@@ -199,12 +248,15 @@ class CrystalGraphBuilder:
             edge_index=torch.tensor(graph["edge_index"]),
             edge_attr=torch.tensor(graph["edge_features"]),
             edge_vec=torch.tensor(graph["edge_vectors"]),
+            edge_index_3body=torch.tensor(graph["three_body_edge_indices"].T), # (2, N_triplets)
             num_nodes=graph["num_nodes"],
         )
 
         # Attach property targets
         for key, value in properties.items():
-            if value is not None and not (isinstance(value, float) and np.isnan(value)):
+            if value is not None:
+                # Allow NaNs (they will be masked in loss function)
+                # if value is not None and not (isinstance(value, float) and np.isnan(value)):
                 setattr(data, key, torch.tensor([value], dtype=torch.float))
 
         return data

@@ -1,31 +1,29 @@
 """
 ATLAS Models Module
 
-Neural network architectures for crystal property prediction:
-- CrystalGraphBuilder: crystal structure → graph representation
-- CGCNN: Crystal Graph Convolutional Neural Network (baseline)
-- EquivariantGNN: E(3)-equivariant GNN using e3nn (Phase 2)
-- MultiTaskGNN: multi-task wrapper with shared encoder + task-specific heads
+Graph Neural Network architectures for crystal property prediction:
+- CGCNN: Baseline Crystal Graph CNN (Xie et al. 2018)
+- EquivariantGNN: E(3)-Equivariant GNN (NequIP-inspired)
+- MultiTaskGNN: Shared encoder with multi-head prediction
+- GraphBuilder: Crystal structure to graph conversion
 """
 
+from atlas.models.cgcnn import CGCNN
+from atlas.models.equivariant import EquivariantGNN
+from atlas.models.m3gnet import M3GNet
+from atlas.models.multi_task import MultiTaskGNN, ScalarHead, TensorHead, EvidentialHead
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.layers import MessagePassingLayer, GatedEquivariantBlock
-from atlas.models.cgcnn import CGCNN
-from atlas.models.multi_task import MultiTaskGNN, ScalarHead, TensorHead
-
-# EquivariantGNN requires e3nn — import lazily to avoid hard dependency
-try:
-    from atlas.models.equivariant import EquivariantGNN
-except ImportError:
-    EquivariantGNN = None  # e3nn not installed
 
 __all__ = [
-    "CrystalGraphBuilder",
-    "MessagePassingLayer",
-    "GatedEquivariantBlock",
     "CGCNN",
     "EquivariantGNN",
+    "M3GNet",
     "MultiTaskGNN",
     "ScalarHead",
     "TensorHead",
+    "EvidentialHead",
+    "CrystalGraphBuilder",
+    "MessagePassingLayer",
+    "GatedEquivariantBlock",
 ]

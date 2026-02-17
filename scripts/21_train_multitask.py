@@ -45,6 +45,48 @@ BENCHMARKS = {
 }
 
 
+# ── Model Presets ──
+
+MODEL_PRESETS = {
+    "small": {
+        "description": "Fast debugging model (Speed: ~10x Medium)",
+        "irreps": "32x0e + 16x1o",
+        "max-ell": 1,
+        "n-layers": 2,
+        "n-radial": 16,
+        "radial-hidden": 64,
+        "head-hidden": 32,
+    },
+    "medium": {
+        "description": "Balanced model (Default)",
+        "irreps": "64x0e + 32x1o + 16x2e",
+        "max-ell": 2,
+        "n-layers": 3,
+        "n-radial": 20,
+        "radial-hidden": 128,
+        "head-hidden": 64,
+    },
+    "large": {
+        "description": "High performance model",
+        "irreps": "128x0e + 64x1o + 32x2e + 16x3o",
+        "max-ell": 3,
+        "n-layers": 4,
+        "n-radial": 32,
+        "radial-hidden": 256,
+        "head-hidden": 128,
+    },
+    "ultra": {
+        "description": "Max precision (No time limit)",
+        "irreps": "256x0e + 128x1o + 64x2e + 32x3o",
+        "max-ell": 3,
+        "n-layers": 6,
+        "n-radial": 64,
+        "radial-hidden": 512,
+        "head-hidden": 256,
+    },
+}
+
+
 # ── Target Normalization ──
 
 # ── Ensure all Data objects have all properties (NaN for missing) ──
@@ -318,7 +360,9 @@ def main():
     parser.add_argument("--outlier-sigma", type=float, default=8.0)
 
     # Model architecture
-    parser.add_argument("--irreps", type=str, default="32x0e + 16x1o + 8x2e")
+    parser.add_argument("--preset", type=str, choices=MODEL_PRESETS.keys(),
+                        help="Model size preset (overrides other model args)")
+    parser.add_argument("--irreps", type=str, default="64x0e + 32x1o + 16x2e")
     parser.add_argument("--max-ell", type=int, default=2)
     parser.add_argument("--n-layers", type=int, default=3)
     parser.add_argument("--n-radial", type=int, default=20)
@@ -327,6 +371,16 @@ def main():
                         help="Hidden dim of per-task prediction heads")
 
     args = parser.parse_args()
+
+    # Apply preset if specified
+    if args.preset:
+        preset = MODEL_PRESETS[args.preset]
+        print(f"\n  [Config] Applying preset '{args.preset}': {preset['description']}")
+        for k, v in preset.items():
+            if k != "description":
+                arg_name = k.replace("-", "_")
+                setattr(args, arg_name, v)
+                print(f"    - {arg_name}: {v}")
 
     print("=" * 70)
     print("  Multi-Task E(3)-Equivariant GNN — Phase 2")
