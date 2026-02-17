@@ -2,25 +2,26 @@
 Topological Materials Database Interface
 
 Manages a database of topological materials (Topological Insulators,
-Weyl Semimetals, etc.) with search capabilities.
+Weyl Semimetals, etc.) with search and SQL capabilities.
 
 Optimization:
-- Added fuzzy search for chemical formulas (finds "Bi2Se3" from "BiSe")
-- Robust CSV handling
-- Enhanced query capabilities
+- Fuzzy search for flexible chemical formula matching
+- SQLite integration for scalable storage and complex queries
+- Robust CSV/SQL loading
 """
 
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List, Union
+import sqlite3
 import difflib
 import logging
+from pathlib import Path
+from typing import Optional, List, Union
 
 from atlas.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Default topological seeds (if DB missing)
+# Default topological seeds
 TI_SEEDS = [
     {"formula": "Bi2Se3", "topo_class": "TI", "band_gap": 0.3},
     {"formula": "Bi2Te3", "topo_class": "TI", "band_gap": 0.15},
@@ -35,37 +36,81 @@ TSM_SEEDS = [
 class TopoDB:
     """
     Interface to the topological materials database.
+    Supports CSV (default) and SQLite backends.
     """
 
-    def __init__(self):
+    def __init__(self, use_sql: bool = False):
         self.cfg = get_config()
         self.db_path = self.cfg.paths.raw_dir / "topological_materials.csv"
-        self._df = self._load_or_create()
+        self.sql_path = self.cfg.paths.raw_dir / "topological_materials.db"
+        self.use_sql = use_sql
+        
+        # Load data
+        if use_sql and self.sql_path.exists():
+            self._df = self._load_from_sql()
+        else:
+            self._df = self._load_or_create_csv()
 
-    def _load_or_create(self) -> pd.DataFrame:
+    def _load_or_create_csv(self) -> pd.DataFrame:
         if self.db_path.exists():
             try:
                 return pd.read_csv(self.db_path)
             except Exception as e:
-                logger.warning(f"Failed to load TopoDB: {e}. Creating new.")
+                logger.warning(f"Failed to load CSV TopoDB: {e}. Creating new.")
         
-        # Create default
         df = pd.DataFrame(TI_SEEDS + TSM_SEEDS)
-        self.save(df)
+        self.save_csv(df)
         return df
 
-    def save(self, df: Optional[pd.DataFrame] = None):
-        if df is None:
-            df = self._df
-        
-        # Ensure directory exists
+    def _load_from_sql(self) -> pd.DataFrame:
+        try:
+            conn = sqlite3.connect(self.sql_path)
+            df = pd.read_sql("SELECT * FROM materials", conn)
+            conn.close()
+            return df
+        except Exception as e:
+            logger.error(f"Failed to load SQL TopoDB: {e}")
+            return self._load_or_create_csv()
+
+    def save_csv(self, df: Optional[pd.DataFrame] = None):
+        if df is None: df = self._df
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(self.db_path, index=False)
+
+    def to_sql(self, db_path: Optional[Path] = None):
+        """Export current DB to SQLite."""
+        path = db_path or self.sql_path
+        try:
+            conn = sqlite3.connect(path)
+            self._df.to_sql("materials", conn, if_exists="replace", index=False)
+            
+            # Create indices for speed
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_formula ON materials (formula)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_topo ON materials (topo_class)")
+            conn.commit()
+            conn.close()
+            logger.info(f"Saved TopoDB to SQL: {path}")
+        except Exception as e:
+            logger.error(f"SQL export failed: {e}")
+
+    def query_sql(self, sql_query: str) -> pd.DataFrame:
+        """Execute raw SQL query."""
+        if not self.sql_path.exists():
+            self.to_sql() # Sync first
+            
+        try:
+            conn = sqlite3.connect(self.sql_path)
+            df = pd.read_sql(sql_query, conn)
+            conn.close()
+            return df
+        except Exception as e:
+            logger.error(f"SQL query failed: {e}")
+            return pd.DataFrame()
 
     def fuzzy_search(self, query: str, cutoff: float = 0.6) -> pd.DataFrame:
         """
         Search for materials with formulas similar to the query.
-        Useful for typos or partial matches (e.g. 'BiSe' -> 'Bi2Se3').
+        Works on in-memory DataFrame (hybrid approach).
         """
         if "formula" not in self._df.columns:
             return pd.DataFrame()
@@ -86,7 +131,7 @@ class TopoDB:
         exact_formula: Optional[str] = None,
     ) -> pd.DataFrame:
         """
-        Filter database by multiple criteria.
+        Filter database by multiple criteria (Pandas backend).
         """
         df = self._df.copy()
 
@@ -98,14 +143,13 @@ class TopoDB:
 
         if band_gap_range:
             lo, hi = band_gap_range
-            # Ensure column is numeric
             if "band_gap" in df.columns:
                 df["band_gap"] = pd.to_numeric(df["band_gap"], errors="coerce")
                 df = df[(df["band_gap"] >= lo) & (df["band_gap"] <= hi)]
 
         if elements:
-            # Filter rows where formula contains ALL elements
-            # This is a simple string check, ideally use pymatgen Composition
+            # Vectorized element check?
+            # Creating a set column is slow but accurate
             def has_elements(formula):
                 return all(el in formula for el in elements)
             
@@ -117,5 +161,7 @@ class TopoDB:
         """Add a new material to the database."""
         new_row = {"formula": formula, "topo_class": topo_class, **properties}
         self._df = pd.concat([self._df, pd.DataFrame([new_row])], ignore_index=True)
-        self.save()
+        self.save_csv()
+        if self.use_sql:
+            self.to_sql()
         logger.info(f"Added {formula} ({topo_class}) to TopoDB")
