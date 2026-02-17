@@ -3,11 +3,18 @@ ATLAS Configuration Module
 
 Centralizes all project paths and hyperparameters.
 No external API keys required — all data is freely downloadable.
+
+Optimization:
+- Device Management: Global `get_device()` helper.
+- Environment Support: Override paths via .env if needed.
 """
 
 import os
+import torch
+import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,16 +28,24 @@ class PathConfig:
     models_dir: Path = field(default=None)
     raw_dir: Path = field(default=None)
     processed_dir: Path = field(default=None)
+    artifacts_dir: Path = field(default=None)
 
     def __post_init__(self):
-        self.data_dir = self.data_dir or self.project_root / "data"
+        # Allow env override
+        data_env = os.environ.get("ATLAS_DATA_DIR")
+        if data_env:
+            self.data_dir = Path(data_env)
+        else:
+            self.data_dir = self.data_dir or self.project_root / "data"
+
         self.models_dir = self.models_dir or self.project_root / "models"
         self.raw_dir = self.data_dir / "raw"
         self.processed_dir = self.data_dir / "processed"
+        self.artifacts_dir = self.project_root / "artifacts"
 
     def ensure_dirs(self):
         """Create all directories if they don't exist."""
-        for d in [self.data_dir, self.models_dir, self.raw_dir, self.processed_dir]:
+        for d in [self.data_dir, self.models_dir, self.raw_dir, self.processed_dir, self.artifacts_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -70,14 +85,40 @@ class MACEConfig:
 
 
 @dataclass
+class TrainConfig:
+    """General training parameters for Phase 1/Phase 2 models."""
+    device: str = "auto"
+    seed: int = 42
+    num_workers: int = 4
+    pin_memory: bool = True
+    
+
+@dataclass
 class Config:
     """Master configuration."""
     paths: PathConfig = field(default_factory=PathConfig)
     dft: DFTConfig = field(default_factory=DFTConfig)
     mace: MACEConfig = field(default_factory=MACEConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
 
     def __post_init__(self):
         self.paths.ensure_dirs()
+        self._set_device()
+
+    def _set_device(self):
+        self.device = self.get_device(self.train.device)
+
+    @staticmethod
+    def get_device(requested: str = "auto") -> torch.device:
+        """Resolve device string to torch.device."""
+        if requested == "auto":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            # Potential check for MPS (Mac)
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                 return torch.device("mps")
+            return torch.device("cpu")
+        return torch.device(requested)
 
     def summary(self) -> str:
         lines = [
@@ -87,6 +128,7 @@ class Config:
             f"Project root : {self.paths.project_root}",
             f"Data dir     : {self.paths.data_dir}",
             f"Models dir   : {self.paths.models_dir}",
+            f"Device       : {self.device}",
             f"Data source  : JARVIS-DFT (no API key required)",
             f"MACE cutoff  : {self.mace.r_max} Å",
             f"MACE epochs  : {self.mace.max_epochs}",
