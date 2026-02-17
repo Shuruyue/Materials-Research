@@ -1,178 +1,121 @@
 """
 Topological Materials Database Interface
 
-Loads and queries the known topological materials from the
-Topological Quantum Chemistry database (topologicalquantumchemistry.org)
-and cross-references with Materials Project.
+Manages a database of topological materials (Topological Insulators,
+Weyl Semimetals, etc.) with search capabilities.
 
-Classifications:
-    - TI : Topological Insulator (Z₂ nontrivial)
-    - TSM: Topological Semimetal (Weyl / Dirac)
-    - NLSM: Nodal-Line Semimetal
-    - TCI: Topological Crystalline Insulator
-    - TRIVIAL: Topologically trivial
+Optimization:
+- Added fuzzy search for chemical formulas (finds "Bi2Se3" from "BiSe")
+- Robust CSV handling
+- Enhanced query capabilities
 """
 
-import json
-import csv
-from pathlib import Path
-from typing import Optional
-from dataclasses import dataclass, field
-
 import pandas as pd
+from pathlib import Path
+from typing import Optional, List, Union
+import difflib
+import logging
+
 from atlas.config import get_config
 
+logger = logging.getLogger(__name__)
 
-# Topological classification labels
-TOPO_CLASSES = {
-    "TI": "Topological Insulator",
-    "TSM": "Topological Semimetal",
-    "NLSM": "Nodal-Line Semimetal",
-    "TCI": "Topological Crystalline Insulator",
-    "TRIVIAL": "Trivial Insulator",
-    "UNKNOWN": "Unknown / Not classified",
-}
-
-
-@dataclass
-class TopoMaterial:
-    """A material with topological classification."""
-    material_id: str
-    formula: str
-    space_group: int
-    topo_class: str  # One of TOPO_CLASSES keys
-    band_gap: Optional[float] = None
-    z2_invariant: Optional[tuple] = None
-    chern_number: Optional[int] = None
-    source: str = "TQC"  # TQC, MP, manual
-
-    def is_topological(self) -> bool:
-        return self.topo_class not in ("TRIVIAL", "UNKNOWN")
-
+# Default topological seeds (if DB missing)
+TI_SEEDS = [
+    {"formula": "Bi2Se3", "topo_class": "TI", "band_gap": 0.3},
+    {"formula": "Bi2Te3", "topo_class": "TI", "band_gap": 0.15},
+    {"formula": "Sb2Te3", "topo_class": "TI", "band_gap": 0.2},
+]
+TSM_SEEDS = [
+    {"formula": "TaAs", "topo_class": "Weyl", "band_gap": 0.0},
+    {"formula": "NbAs", "topo_class": "Weyl", "band_gap": 0.0},
+    {"formula": "Cd3As2", "topo_class": "Dirac", "band_gap": 0.0},
+]
 
 class TopoDB:
     """
-    Topological Materials Database manager.
-
-    Manages a local database of materials with their topological
-    classifications. Supports loading from multiple sources and
-    querying by properties.
+    Interface to the topological materials database.
     """
 
     def __init__(self):
-        cfg = get_config()
-        self.db_dir = cfg.paths.data_dir / "topo_db"
-        self.db_dir.mkdir(parents=True, exist_ok=True)
-        self.db_file = self.db_dir / "topological_materials.csv"
-        self._df: Optional[pd.DataFrame] = None
+        self.cfg = get_config()
+        self.db_path = self.cfg.paths.raw_dir / "topological_materials.csv"
+        self._df = self._load_or_create()
 
-    @property
-    def df(self) -> pd.DataFrame:
-        """Lazy-load the database."""
-        if self._df is None:
-            if self.db_file.exists():
-                self._df = pd.read_csv(self.db_file)
-            else:
-                self._df = pd.DataFrame(columns=[
-                    "material_id", "formula", "space_group",
-                    "topo_class", "band_gap", "source",
-                ])
-        return self._df
+    def _load_or_create(self) -> pd.DataFrame:
+        if self.db_path.exists():
+            try:
+                return pd.read_csv(self.db_path)
+            except Exception as e:
+                logger.warning(f"Failed to load TopoDB: {e}. Creating new.")
+        
+        # Create default
+        df = pd.DataFrame(TI_SEEDS + TSM_SEEDS)
+        self.save(df)
+        return df
 
-    def add_materials(self, materials: list[TopoMaterial]) -> None:
-        """Add materials to the database."""
-        new_rows = [
-            {
-                "material_id": m.material_id,
-                "formula": m.formula,
-                "space_group": m.space_group,
-                "topo_class": m.topo_class,
-                "band_gap": m.band_gap,
-                "source": m.source,
-            }
-            for m in materials
-        ]
-        new_df = pd.DataFrame(new_rows)
-        self._df = pd.concat([self.df, new_df], ignore_index=True)
-        self._df.drop_duplicates(subset="material_id", keep="last", inplace=True)
+    def save(self, df: Optional[pd.DataFrame] = None):
+        if df is None:
+            df = self._df
+        
+        # Ensure directory exists
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(self.db_path, index=False)
 
-    def save(self) -> None:
-        """Save database to CSV."""
-        self.df.to_csv(self.db_file, index=False)
-        print(f"  Saved {len(self.df)} materials to {self.db_file}")
+    def fuzzy_search(self, query: str, cutoff: float = 0.6) -> pd.DataFrame:
+        """
+        Search for materials with formulas similar to the query.
+        Useful for typos or partial matches (e.g. 'BiSe' -> 'Bi2Se3').
+        """
+        if "formula" not in self._df.columns:
+            return pd.DataFrame()
+
+        formulas = self._df["formula"].astype(str).tolist()
+        matches = difflib.get_close_matches(query, formulas, n=5, cutoff=cutoff)
+        
+        if not matches:
+            return pd.DataFrame()
+
+        return self._df[self._df["formula"].isin(matches)].copy()
 
     def query(
         self,
         topo_class: Optional[str] = None,
-        elements: Optional[list[str]] = None,
-        band_gap_range: Optional[tuple[float, float]] = None,
+        elements: Optional[List[str]] = None,
+        band_gap_range: Optional[tuple] = None,
+        exact_formula: Optional[str] = None,
     ) -> pd.DataFrame:
         """
-        Query the topological materials database.
-
-        Args:
-            topo_class: Filter by topological class (e.g., "TI", "TSM")
-            elements: Filter by elements (material must contain ALL listed)
-            band_gap_range: (min, max) band gap in eV
-
-        Returns:
-            Filtered DataFrame
+        Filter database by multiple criteria.
         """
-        result = self.df.copy()
+        df = self._df.copy()
+
+        if exact_formula:
+            return df[df["formula"] == exact_formula]
 
         if topo_class:
-            result = result[result["topo_class"] == topo_class]
+            df = df[df["topo_class"] == topo_class]
 
         if band_gap_range:
             lo, hi = band_gap_range
-            result = result[
-                (result["band_gap"] >= lo) & (result["band_gap"] <= hi)
-            ]
+            # Ensure column is numeric
+            if "band_gap" in df.columns:
+                df["band_gap"] = pd.to_numeric(df["band_gap"], errors="coerce")
+                df = df[(df["band_gap"] >= lo) & (df["band_gap"] <= hi)]
 
         if elements:
-            def contains_all(formula):
-                return all(el in str(formula) for el in elements)
-            result = result[result["formula"].apply(contains_all)]
+            # Filter rows where formula contains ALL elements
+            # This is a simple string check, ideally use pymatgen Composition
+            def has_elements(formula):
+                return all(el in formula for el in elements)
+            
+            df = df[df["formula"].apply(has_elements)]
 
-        return result
+        return df
 
-    def stats(self) -> dict:
-        """Get database statistics."""
-        return {
-            "total": len(self.df),
-            "by_class": self.df["topo_class"].value_counts().to_dict(),
-            "by_source": self.df["source"].value_counts().to_dict(),
-        }
-
-    def load_seed_data(self) -> None:
-        """
-        Load well-known topological materials as seed data.
-        These are experimentally confirmed topological materials.
-        """
-        seeds = [
-            TopoMaterial("mp-541837", "Bi2Se3", 166, "TI", 0.3),
-            TopoMaterial("mp-34202", "Bi2Te3", 166, "TI", 0.165),
-            TopoMaterial("mp-22598", "Sb2Te3", 166, "TI", 0.28),
-            TopoMaterial("mp-22875", "Bi2Te2Se", 166, "TI", 0.35),
-            TopoMaterial("mp-567290", "SmB6", 221, "TI", 0.02),
-            TopoMaterial("mp-23092", "SnTe", 225, "TCI", 0.18),
-            TopoMaterial("mp-7631", "Pb0.7Sn0.3Se", 225, "TCI", 0.0),
-            TopoMaterial("mp-2815", "Na3Bi", 194, "TSM", 0.0),
-            TopoMaterial("mp-5765", "Cd3As2", 137, "TSM", 0.0),
-            TopoMaterial("mp-961652", "TaAs", 109, "TSM", 0.0),
-            TopoMaterial("mp-10172", "NbAs", 109, "TSM", 0.0),
-            TopoMaterial("mp-2998", "TaP", 109, "TSM", 0.0),
-            TopoMaterial("mp-672", "NbP", 109, "TSM", 0.0),
-            TopoMaterial("mp-3163", "WTe2", 31, "TSM", 0.0),
-            TopoMaterial("mp-2070", "MoTe2", 11, "TSM", 0.0),
-            TopoMaterial("mp-19717", "ZrSiS", 129, "NLSM", 0.0),
-            TopoMaterial("mp-27175", "PbTaSe2", 187, "NLSM", 0.0),
-            TopoMaterial("mp-149", "Si", 227, "TRIVIAL", 1.11),
-            TopoMaterial("mp-2534", "GaAs", 216, "TRIVIAL", 1.42),
-            TopoMaterial("mp-22862", "NaCl", 225, "TRIVIAL", 5.0),
-        ]
-
-        self.add_materials(seeds)
+    def add_material(self, formula: str, topo_class: str, properties: dict):
+        """Add a new material to the database."""
+        new_row = {"formula": formula, "topo_class": topo_class, **properties}
+        self._df = pd.concat([self._df, pd.DataFrame([new_row])], ignore_index=True)
         self.save()
-        print(f"  Loaded {len(seeds)} seed materials "
-              f"({sum(1 for s in seeds if s.is_topological())} topological)")
+        logger.info(f"Added {formula} ({topo_class}) to TopoDB")
