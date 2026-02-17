@@ -8,16 +8,22 @@ Architecture:
     Crystal Structure → Graph (atoms=nodes, bonds=edges)
     → Message Passing (3 layers) → Global Pooling → MLP → P(topological)
 
-Uses JARVIS spillage data as ground truth labels:
-    spillage > 0.5 → topological
-    spillage ≤ 0.5 → trivial
+Improved:
+- Model Persistence: save_model/load_model methods.
+- Uncertainty: Monte Carlo Dropout for Bayesian approximation.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, Union
+from pathlib import Path
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class CrystalGraphBuilder:
@@ -48,9 +54,6 @@ class CrystalGraphBuilder:
     def element_features(self, symbol: str) -> np.ndarray:
         """
         Get element features: one-hot encoding + physical properties.
-        
-        Features: [one_hot(64), atomic_number, electronegativity, 
-                   atomic_radius, is_metal, is_heavy(Z≥50)]
         """
         idx = self.ELEMENT_TO_IDX.get(symbol, len(self.ELEMENTS) - 1)
         one_hot = np.zeros(len(self.ELEMENTS))
@@ -80,9 +83,6 @@ class CrystalGraphBuilder:
     def structure_to_graph(self, structure) -> dict:
         """
         Convert pymatgen Structure to graph dict.
-
-        Returns:
-            dict with keys: node_features, edge_index, edge_features, num_nodes
         """
         n_atoms = len(structure)
 
@@ -139,10 +139,6 @@ class CrystalGraphBuilder:
 class TopoGNN(nn.Module):
     """
     Graph Neural Network for topological material classification.
-    
-    Architecture:
-        Node features → 3× GNN layers (message passing) 
-        → Global mean/max pooling → MLP → sigmoid → P(topological)
     """
 
     def __init__(
@@ -154,6 +150,11 @@ class TopoGNN(nn.Module):
         dropout: float = 0.2,
     ):
         super().__init__()
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.dropout_rate = dropout
 
         self.node_embed = nn.Linear(node_dim, hidden_dim)
         self.edge_embed = nn.Linear(edge_dim, hidden_dim)
@@ -177,16 +178,7 @@ class TopoGNN(nn.Module):
         )
 
     def forward(self, node_feats, edge_index, edge_feats, batch=None):
-        """
-        Args:
-            node_feats: (N, node_dim) node features
-            edge_index: (2, E) edge indices
-            edge_feats: (E, edge_dim) edge features
-            batch: (N,) batch assignment for each node
-        
-        Returns:
-            (B,) logits for topological classification
-        """
+        """Forward pass."""
         h = self.node_embed(node_feats)
         e = self.edge_embed(edge_feats)
 
@@ -205,7 +197,7 @@ class TopoGNN(nn.Module):
         h_max = torch.zeros(n_graphs, h.size(1), device=h.device)
 
         h_mean.scatter_reduce_(0, batch.unsqueeze(1).expand_as(h), h, reduce="mean")
-
+        
         h_max_vals = torch.full_like(h_max, float("-inf"))
         h_max_vals.scatter_reduce_(0, batch.unsqueeze(1).expand_as(h), h, reduce="amax")
         h_max = h_max_vals
@@ -214,10 +206,74 @@ class TopoGNN(nn.Module):
 
         return self.readout(h_global).squeeze(-1)
 
-    def predict_proba(self, node_feats, edge_index, edge_feats, batch=None):
-        """Get probability of being topological."""
-        logits = self.forward(node_feats, edge_index, edge_feats, batch)
-        return torch.sigmoid(logits)
+    def predict_proba(
+        self, 
+        node_feats, 
+        edge_index, 
+        edge_feats, 
+        batch=None, 
+        mc_dropout: bool = False, 
+        n_samples: int = 10
+    ) -> Union[float, Tuple[float, float]]:
+        """
+        Get probability of being topological.
+        
+        Args:
+            mc_dropout: Enable Monte Carlo Dropout for uncertainty estimation.
+            n_samples: Number of MC samples if enabled.
+            
+        Returns:
+            prob (float) or (mean_prob, std_prob)
+        """
+        if not mc_dropout:
+            self.eval()
+            with torch.no_grad():
+                logits = self.forward(node_feats, edge_index, edge_feats, batch)
+                return torch.sigmoid(logits).item()
+        else:
+            # MC Dropout: keep dropout active during inference
+            self.train() # Enable dropout
+            probs = []
+            with torch.no_grad():
+                for _ in range(n_samples):
+                    logits = self.forward(node_feats, edge_index, edge_feats, batch)
+                    probs.append(torch.sigmoid(logits).item())
+            
+            probs = np.array(probs)
+            return float(probs.mean()), float(probs.std())
+
+    def save_model(self, path: Union[str, Path]):
+        """Save model weights and config."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Save state dict along with init params to easy reconstruction
+        state = {
+            'state_dict': self.state_dict(),
+            'config': {
+                'node_dim': self.node_dim,
+                'edge_dim': self.edge_dim,
+                'hidden_dim': self.hidden_dim,
+                'n_layers': self.n_layers,
+                'dropout': self.dropout_rate
+            }
+        }
+        torch.save(state, path)
+        logger.info(f"Model saved to {path}")
+
+    @classmethod
+    def load_model(cls, path: Union[str, Path], device: str = "cpu") -> "TopoGNN":
+        """Load model from file."""
+        checkpoint = torch.load(path, map_location=device)
+        config = checkpoint.get('config', {})
+        
+        # Instantiate with saved config
+        model = cls(**config)
+        model.load_state_dict(checkpoint['state_dict'])
+        model.to(device)
+        model.eval()
+        
+        logger.info(f"Model loaded from {path}")
+        return model
 
 
 class MessagePassingLayer(nn.Module):
