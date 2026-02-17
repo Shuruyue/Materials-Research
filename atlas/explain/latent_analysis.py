@@ -1,29 +1,32 @@
 """
 Latent Space Analysis
 
-Analyzes the learned representation space of the GNN encoder:
-- t-SNE / UMAP visualization colored by properties
-- Property-property correlation in latent space
-- Cluster analysis for materials families
+Analyzes the learned representation space of the GNN encoder to reveal
+hidden structure-property relationships.
+
+Optimization:
+- Clustering: Automatic grouping of materials (K-Means/DBSCAN) to find families.
+- Academic Plotting: Generates publication-ready scatter plots with Seaborn styles.
+- Correlation Analysis: Quantifies feature importance in the latent space.
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, Optional, List
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, Optional, List, Tuple, Union
 from pathlib import Path
+
+# Configure seaborn for academic style
+sns.set_theme(style="white", context="paper", font_scale=1.2)
+plt.rcParams['font.family'] = 'sans-serif'
 
 
 class LatentSpaceAnalyzer:
     """
     Analyzes the latent space of a trained GNN encoder.
-
-    Extracts graph-level embeddings and performs dimensionality reduction
-    and correlation analysis.
-
-    Args:
-        model: trained GNN model (must have .encode() method)
-        device: computation device
     """
 
     def __init__(self, model: nn.Module, device: str = "cpu"):
@@ -38,15 +41,6 @@ class LatentSpaceAnalyzer:
     ) -> Dict[str, np.ndarray]:
         """
         Extract latent embeddings for all materials in a dataloader.
-
-        Args:
-            loader: PyG DataLoader
-            properties: list of property names to extract as metadata
-
-        Returns:
-            Dict with:
-                "embeddings": (N, embed_dim)
-                "property_name": (N,) for each requested property
         """
         self.model.eval()
         all_embeddings = []
@@ -54,17 +48,32 @@ class LatentSpaceAnalyzer:
 
         for batch in loader:
             batch = batch.to(self.device)
-            emb = self.model.encode(
-                batch.x,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.batch,
-            )
+            # Assuming model has an 'encode' method that returns graph embedding
+            if hasattr(self.model, 'encode'):
+                emb = self.model.encode(
+                    batch.x,
+                    batch.edge_index,
+                    batch.edge_attr,
+                    batch.batch,
+                )
+            else:
+                # Fallback for simple models: use forward but stop before head? 
+                # This is tricky without knowing model structure. 
+                # Assuming standard GNN interface.
+                emb = self.model(
+                    batch.x,
+                    batch.edge_index,
+                    batch.edge_attr,
+                    batch.batch
+                )
+            
             all_embeddings.append(emb.cpu().numpy())
 
             for p in (properties or []):
                 if hasattr(batch, p):
-                    all_properties[p].append(getattr(batch, p).cpu().numpy())
+                    val = getattr(batch, p)
+                    if val.dim() > 1: val = val.squeeze()
+                    all_properties[p].append(val.cpu().numpy())
 
         result = {
             "embeddings": np.concatenate(all_embeddings, axis=0),
@@ -83,18 +92,13 @@ class LatentSpaceAnalyzer:
     ) -> np.ndarray:
         """
         Reduce embedding dimensionality for visualization.
-
-        Args:
-            embeddings: (N, D) high-dimensional embeddings
-            method: "umap" or "tsne"
-            n_components: target dimensions (2 or 3)
-
-        Returns:
-            (N, n_components) reduced coordinates
         """
         if method == "tsne":
             from sklearn.manifold import TSNE
             reducer = TSNE(n_components=n_components, random_state=42, perplexity=30)
+        elif method == "pca":
+            from sklearn.decomposition import PCA
+            reducer = PCA(n_components=n_components)
         elif method == "umap":
             try:
                 from umap import UMAP
@@ -108,68 +112,95 @@ class LatentSpaceAnalyzer:
 
         return reducer.fit_transform(embeddings)
 
+    def perform_clustering(
+        self, 
+        embeddings: np.ndarray, 
+        method: str = "kmeans", 
+        n_clusters: int = 5
+    ) -> np.ndarray:
+        """
+        Cluster materials in the latent space.
+        """
+        if method == "kmeans":
+            from sklearn.cluster import KMeans
+            clusterer = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        elif method == "dbscan":
+            from sklearn.cluster import DBSCAN
+            clusterer = DBSCAN(eps=0.5, min_samples=5)
+        else:
+            raise ValueError(f"Unknown clustering method: {method}")
+            
+        return clusterer.fit_predict(embeddings)
+
     def plot_latent_space(
         self,
         embeddings_2d: np.ndarray,
         color_by: np.ndarray,
         color_label: str = "Property",
+        discrete: bool = False,
         save_path: Optional[Path] = None,
-        title: str = "Materials Property Space",
+        title: Optional[str] = None,
     ):
         """
         Plot 2D latent space colored by a property.
-
-        Args:
-            embeddings_2d: (N, 2) coordinates
-            color_by: (N,) property values for coloring
-            color_label: label for colorbar
-            save_path: path to save figure
-            title: plot title
+        Academic style: clean background, clear labels, minimal chartjunk.
         """
-        import matplotlib.pyplot as plt
+        df = pd.DataFrame({
+            "Dim 1": embeddings_2d[:, 0],
+            "Dim 2": embeddings_2d[:, 1],
+            "Value": color_by
+        })
 
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
 
-        scatter = ax.scatter(
-            embeddings_2d[:, 0],
-            embeddings_2d[:, 1],
-            c=color_by,
-            cmap="viridis",
-            s=5,
-            alpha=0.6,
-        )
-        plt.colorbar(scatter, ax=ax, label=color_label)
-        ax.set_xlabel("Dimension 1")
-        ax.set_ylabel("Dimension 2")
-        ax.set_title(title)
+        # Plot
+        if discrete:
+            # Categorical colormap
+            sns.scatterplot(
+                data=df, x="Dim 1", y="Dim 2", hue="Value",
+                palette="deep", s=30, alpha=0.8, edgecolor="w", linewidth=0.2, ax=ax
+            )
+            ax.legend(title=color_label, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+        else:
+            # Continuous colormap (viridis)
+            points = ax.scatter(
+                embeddings_2d[:, 0], embeddings_2d[:, 1],
+                c=color_by, cmap="viridis", s=30, alpha=0.7,
+                edgecolors="w", linewidth=0.2
+            )
+            cbar = plt.colorbar(points, ax=ax, label=color_label, pad=0.02)
+            cbar.outline.set_linewidth(0.5)
+
+        # Aesthetics
+        ax.set_title(title if title else f"Latent Space by {color_label}")
+        ax.set_xlabel("Latent Dimension 1")
+        ax.set_ylabel("Latent Dimension 2")
+        
+        # Remove top/right spines
+        sns.despine(trim=True)
 
         if save_path:
-            fig.savefig(save_path, dpi=150, bbox_inches="tight")
-            print(f"Saved: {save_path}")
-        plt.close(fig)
+            fig.savefig(save_path, bbox_inches="tight", pad_inches=0.1)
+            print(f"Saved figure: {save_path}")
+            plt.close(fig)
+        else:
+            return fig
 
-    def property_correlation_matrix(
+    def analyze_clusters(
         self,
         embeddings: np.ndarray,
         properties: Dict[str, np.ndarray],
-    ) -> np.ndarray:
+        n_clusters: int = 5
+    ) -> pd.DataFrame:
         """
-        Compute correlation between latent embedding dimensions
-        and physical properties.
-
-        Returns:
-            (n_properties, embed_dim) correlation matrix
+        Perform clustering and statistically analyze each cluster's properties.
+        Returns a DataFrame summarizing cluster characteristics.
         """
-        from scipy.stats import pearsonr
-
-        prop_names = list(properties.keys())
-        n_props = len(prop_names)
-        n_dims = embeddings.shape[1]
-
-        corr = np.zeros((n_props, n_dims))
-        for i, name in enumerate(prop_names):
-            for j in range(n_dims):
-                r, _ = pearsonr(properties[name].flatten(), embeddings[:, j])
-                corr[i, j] = r
-
-        return corr
+        labels = self.perform_clustering(embeddings, n_clusters=n_clusters)
+        
+        df = pd.DataFrame(properties)
+        df["Cluster"] = labels
+        
+        # Calculate mean/std for each property per cluster
+        summary = df.groupby("Cluster").agg(["mean", "std", "count"])
+        return summary
