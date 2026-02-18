@@ -10,6 +10,9 @@ cpp_source = """
 // Simple pairwise distance calculation + radius cutoff (Naive O(N^2))
 // For small crystals (N < 200), O(N^2) is faster than KD-Tree overhead.
 // Output: (edge_index, edge_vec, edge_dist)
+// WARNING: This implementation DOES NOT support Periodic Boundary Conditions (PBC).
+// Do NOT use for crystal structures where atoms interact across boundaries.
+// TODO(Phase 3): Add PBC support or replace with torch_cluster.radius_graph + shift vectors.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> radius_graph_cpp(
     torch::Tensor pos, 
     torch::Tensor batch, 
@@ -117,7 +120,11 @@ def fast_radius_graph(pos, batch, r_max=5.0, max_num_neighbors=100):
     """
     Python wrapper for the C++ function.
     Falls back to PyTorch native implementation if C++ fails.
+    WARNING: This op does not support Periodic Boundary Conditions.
     """
+    import warnings
+    warnings.warn("fast_radius_graph does not support PBC. Use with caution on crystals.", RuntimeWarning)
+    
     module = get_cpp_module()
     if module:
         return module.radius_graph_cpp(pos, batch, r_max, max_num_neighbors)
