@@ -292,8 +292,14 @@ def main():
     
     # Loaders
     from torch_geometric.loader import DataLoader
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=args.batch_size)
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                              num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_data, batch_size=args.batch_size,
+                            num_workers=0, pin_memory=True)
+    
+    print(f"\n[INFO] Device: {device}")
+    if device == "cuda":
+        print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
     
     # 4. Model
     print("\n[4/5] Building E3NN (Large)...")

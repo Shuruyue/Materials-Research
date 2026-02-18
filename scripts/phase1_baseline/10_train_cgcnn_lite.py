@@ -117,6 +117,8 @@ def main():
     print(f"  🟢 CGCNN LITE (Debug Mode)")
     print(f"  Predicting: {args.property}")
     print(f"  Device: {device}")
+    if device == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name()}")
     print(f"  Settings: {args.epochs} epochs, {args.max_samples} samples, {args.hidden_dim} dim")
     print("=" * 60)
 
@@ -141,9 +143,18 @@ def main():
               f"mean={s['mean']:.3f}, std={s['std']:.3f}, "
               f"range=[{s['min']:.3f}, {s['max']:.3f}]")
 
-    train_loader = datasets["train"].to_pyg_loader(batch_size=args.batch_size, shuffle=True)
-    val_loader = datasets["val"].to_pyg_loader(batch_size=args.batch_size, shuffle=False)
-    test_loader = datasets["test"].to_pyg_loader(batch_size=args.batch_size, shuffle=False)
+    train_loader = datasets["train"].to_pyg_loader(
+        batch_size=args.batch_size, shuffle=True,
+        num_workers=0, pin_memory=True
+    )
+    val_loader = datasets["val"].to_pyg_loader(
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
+    )
+    test_loader = datasets["test"].to_pyg_loader(
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
+    )
 
     # ── Model ──
     print("\n  [2/3] Building CGCNN...")

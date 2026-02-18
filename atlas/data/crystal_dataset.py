@@ -226,12 +226,13 @@ class CrystalPropertyDataset:
             raise RuntimeError("Call .prepare() first")
         return self._data_list[idx]
 
-    def to_pyg_loader(self, batch_size: int = 32, shuffle: bool = True):
+    def to_pyg_loader(self, batch_size: int = 32, shuffle: bool = True, **kwargs):
         from torch_geometric.loader import DataLoader
         return DataLoader(
             self._data_list,
             batch_size=batch_size,
             shuffle=shuffle,
+            **kwargs
         )
 
     def property_statistics(self) -> Dict[str, Dict[str, float]]:

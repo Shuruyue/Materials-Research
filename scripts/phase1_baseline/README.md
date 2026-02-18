@@ -24,13 +24,13 @@ python scripts/phase1_baseline/01_download_data.py
 Choose the appropriate tier for your task:
 
 ```bash
-# 🟢 Lite: Debug run (1 min)
+# Lite: Debug run (1 min)
 python scripts/phase1_baseline/10_train_cgcnn_lite.py
 
-# 🟡 Std: Development run (45 min)
+# Std: Development run (45 min)
 python scripts/phase1_baseline/11_train_cgcnn_std.py
 
-# 🔴 Pro: Production run (>12 hr)
+# Pro: Production run (>12 hr)
 # Use this for final PhD-level results
 python scripts/phase1_baseline/12_train_cgcnn_pro.py
 ```
@@ -60,3 +60,40 @@ All training scripts support the following common arguments:
 # Example: Resume interrupted Pro training
 python scripts/phase1_baseline/12_train_cgcnn_pro.py --resume
 ```
+##  Hardware & Estimated Performance
+
+**Reference System:**
+- **GPU:** NVIDIA GeForce RTX 3060
+- **CPU:** 16 Logical Processors (10 Cores)
+- **RAM:** Optimal for `pin_memory=True`
+
+**Estimated Training Times (`num_workers=0`):**
+
+| Tier | Script | Est. Time | Device |
+| :--- | :--- | :--- | :--- |
+| **Lite** | `10_train_cgcnn_lite.py` | ~1 min | GPU (Fast) |
+| **Std** | `11_train_cgcnn_std.py` | ~15-20 mins | GPU (Stable) |
+| **Pro** | `12_train_cgcnn_pro.py` | ~45-60 mins | GPU (Reliable) |
+
+
+> **Note:** Actual times may vary based on system load. We use `num_workers=0` to ensure stability on Windows.
+
+## 4. Inference & Analysis
+
+Run the provided inference script to make predictions with your trained model:
+
+```bash
+# 1. Verification (Random Test Sample)
+python scripts/phase1_baseline/13_inference_demo.py --test-random
+
+# 2. Single File Prediction
+python scripts/phase1_baseline/13_inference_demo.py --cif structure.cif
+
+# 3. Batch Processing (Entire Folder)
+python scripts/phase1_baseline/13_inference_demo.py --dir my_structures/ --output results.csv
+```
+
+Results are saved in `models/cgcnn_pro_formation_energy/`.
+- `results.json`: Final test metrics
+- `history.json`: Loss/MAE curves
+- `best.pt`: PyTorch model weights

@@ -280,9 +280,12 @@ def train_single_property(args, property_name: str):
     normalizer = TargetNormalizer(train_data, property_name)
 
     from torch_geometric.loader import DataLoader as PyGLoader
-    train_loader = PyGLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = PyGLoader(val_data, batch_size=args.batch_size, shuffle=False)
-    test_loader = PyGLoader(test_data, batch_size=args.batch_size, shuffle=False)
+    train_loader = PyGLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                             num_workers=0, pin_memory=True)
+    val_loader = PyGLoader(val_data, batch_size=args.batch_size, shuffle=False,
+                           num_workers=0, pin_memory=True)
+    test_loader = PyGLoader(test_data, batch_size=args.batch_size, shuffle=False,
+                            num_workers=0, pin_memory=True)
 
     # ── Model (maximum accuracy config) ──
     print("\n  [2/3] Building CGCNN (max accuracy)...")

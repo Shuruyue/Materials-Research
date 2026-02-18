@@ -275,6 +275,8 @@ def main():
             
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+    if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name()}")
     
     # Data
     print("\n[1/5] Loading multi-property dataset...")
@@ -293,10 +295,14 @@ def main():
     normalizer = MultiTargetNormalizer(train_data, PROPERTIES)
     
     # Loaders
+    # Loaders
     from torch_geometric.loader import DataLoader
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(datasets["val"], batch_size=args.batch_size)
-    test_loader = DataLoader(datasets["test"], batch_size=args.batch_size)
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                             num_workers=0, pin_memory=True)
+    val_loader = DataLoader(datasets["val"], batch_size=args.batch_size,
+                           num_workers=0, pin_memory=True)
+    test_loader = DataLoader(datasets["test"], batch_size=args.batch_size,
+                            num_workers=0, pin_memory=True)
     
     # Model
     print("\n[3/5] Building Multi-Task CGCNN...")

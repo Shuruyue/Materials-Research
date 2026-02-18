@@ -51,7 +51,9 @@ def main():
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    print(f"\n[INFO] Device: {device}")
+    if device == "cuda":
+        print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
     
     # ── 1. Data (Lite: 100 samples) ──
     print("\n[1/4] Loading Lite Dataset (100 samples)...")
@@ -96,7 +98,8 @@ def main():
     model.train()
     
     from torch_geometric.loader import DataLoader
-    loader = DataLoader(datasets["train"], batch_size=4, shuffle=True)
+    loader = DataLoader(datasets["train"], batch_size=4, shuffle=True,
+                        num_workers=0, pin_memory=True)
     
     for epoch in range(1, 3):
         total_loss = 0

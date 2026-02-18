@@ -1,5 +1,9 @@
 """
-Phase 2: E(3)-Equivariant GNN Training — Maximum Precision
+Phase 2: Single-Task E(3)-Equivariant GNN — PRO Tier (Deep Dive)
+
+The "Single-Task Laser" for high-precision, specific property prediction.
+- Ideal for benchmarking a single property (e.g., band_gap) with maximum accuracy.
+- Can be used when Multi-Task learning encounters negative transfer (one task hurting another).
 
 Full-scale training with NequIP-inspired equivariant architecture:
 - Spherical harmonics edge features (respects SO(3) symmetry)
@@ -10,7 +14,6 @@ Full-scale training with NequIP-inspired equivariant architecture:
 - Conservative learning rate with gradual decay
 
 Usage:
-    python scripts/20_train_equivariant.py --property shear_modulus
     python scripts/20_train_equivariant.py --all-properties
     python scripts/20_train_equivariant.py --max-samples 5000  # quick test
 """
@@ -357,14 +360,21 @@ def train_single_property(args, property_name: str):
     print(f"\n  [3/5] Computing target normalization...")
     normalizer = TargetNormalizer(datasets["train"], property_name)
 
+    print(f"\n[INFO] Device: {device}")
+    if device == "cuda":
+        print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
+
     train_loader = datasets["train"].to_pyg_loader(
         batch_size=args.batch_size, shuffle=True,
+        num_workers=0, pin_memory=True
     )
     val_loader = datasets["val"].to_pyg_loader(
         batch_size=args.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
     )
     test_loader = datasets["test"].to_pyg_loader(
         batch_size=args.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
     )
 
     n_batches = len(train_loader)

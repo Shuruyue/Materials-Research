@@ -139,6 +139,86 @@ class TargetNormalizer:
         return {"mean": self.mean, "std": self.std}
 
 
+
+# ── Checkpointing ──
+
+class CheckpointManager:
+    """
+    Manages top-k best models and last-k checkpoints.
+    1. Keeps 'best.pt' as the absolute best.
+    2. Keeps 'best_2.pt', 'best_3.pt' as runners-up.
+    3. Keeps 'checkpoint.pt' as latest.
+    4. Keeps 'checkpoint_prev_1.pt', 'checkpoint_prev_2.pt' as history.
+    """
+    def __init__(self, save_dir, top_k=3, keep_last_k=3):
+        self.save_dir = Path(save_dir)
+        self.top_k = top_k
+        self.keep_last_k = keep_last_k
+        self.best_models = []  # List of (mae, epoch, filename)
+        
+        # Load existing best.pt if exists to init list
+        if (self.save_dir / "best.pt").exists():
+            # We don't read the file, just assume it's the only one for now
+            # To be robust, we start fresh or need better tracking.
+            # Simplified: We only track *new* improvements in this run.
+            pass
+
+    def save_best(self, state, mae, epoch):
+        """Handle saving best models."""
+        filename = f"best_epoch_{epoch}_mae_{mae:.4f}.pt"
+        path = self.save_dir / filename
+        
+        # Always save the new candidate first
+        torch.save(state, path)
+        self.best_models.append((mae, epoch, filename))
+        self.best_models.sort(key=lambda x: x[0])  # Sort by MAE (asc)
+        
+        # Keep top-k
+        if len(self.best_models) > self.top_k:
+            worst = self.best_models.pop()
+            worst_path = self.save_dir / worst[2]
+            if worst_path.exists():
+                worst_path.unlink()
+                
+        # Update 'best.pt' symlink/copy (The #1 model)
+        # We physically copy it to be safe on Windows
+        if self.best_models[0][1] == epoch:
+            # Current is the new #1
+            import shutil
+            shutil.copy(path, self.save_dir / "best.pt")
+
+        # Cleanup: Ensure we only have the tracked files in directory
+        # (Optional, but good for hygiene)
+
+    def save_checkpoint(self, state, epoch):
+        """Handle saving rotating checkpoints."""
+        # Shift previous checkpoints
+        # checkpoint_prev_1 -> checkpoint_prev_2
+        # checkpoint -> checkpoint_prev_1
+        # current -> checkpoint
+        
+        # Delete oldest (last_k - 1)
+        oldest = self.save_dir / f"checkpoint_prev_{self.keep_last_k-1}.pt"
+        if oldest.exists():
+            oldest.unlink()
+            
+        # Shift others
+        import shutil
+        for i in range(self.keep_last_k - 2, 0, -1):
+            src = self.save_dir / f"checkpoint_prev_{i}.pt"
+            dst = self.save_dir / f"checkpoint_prev_{i+1}.pt"
+            if src.exists():
+                shutil.move(src, dst)
+                
+        # Move current 'checkpoint.pt' to 'prev_1'
+        current = self.save_dir / "checkpoint.pt"
+        if current.exists():
+            shutil.move(current, self.save_dir / "checkpoint_prev_1.pt")
+            
+        # Save new
+        torch.save(state, current)
+
+
 def train_epoch(model, loader, optimizer, scheduler, property_name, device,
                 normalizer=None):
     """Train for one epoch with OneCycleLR and Gradient Clipping."""
@@ -256,8 +336,31 @@ def train_single_property(args, property_name: str):
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
     # ── Output Directory ──
-    save_dir = config.paths.models_dir / f"cgcnn_pro_{property_name}"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # Create timestamped run folder to preserve history of experiments
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Base model folder
+    base_dir = config.paths.models_dir / f"cgcnn_pro_{property_name}"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Specific run folder (e.g. run_20231027_153000)
+    # If resuming, use the EXISTING latest run folder unless specified
+    if args.resume:
+        # Resume from latest run directory
+        runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
+        if runs:
+            save_dir = runs[-1]
+            print(f"  🟡 Resuming in existing run folder: {save_dir.name}")
+        else:
+            # Fallback if no runs found
+            save_dir = base_dir / f"run_{timestamp}"
+            save_dir.mkdir()
+    else:
+        # Start new run
+        save_dir = base_dir / f"run_{timestamp}"
+        save_dir.mkdir()
+        print(f"  🔵 Starting new experiment run: {save_dir.name}")
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
     if not args.no_filter:
@@ -280,9 +383,12 @@ def train_single_property(args, property_name: str):
     normalizer = TargetNormalizer(train_data, property_name)
 
     from torch_geometric.loader import DataLoader as PyGLoader
-    train_loader = PyGLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = PyGLoader(val_data, batch_size=args.batch_size, shuffle=False)
-    test_loader = PyGLoader(test_data, batch_size=args.batch_size, shuffle=False)
+    train_loader = PyGLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                             num_workers=0, pin_memory=True)
+    val_loader = PyGLoader(val_data, batch_size=args.batch_size, shuffle=False,
+                           num_workers=0, pin_memory=True)
+    test_loader = PyGLoader(test_data, batch_size=args.batch_size, shuffle=False,
+                            num_workers=0, pin_memory=True)
 
     # ── Model (maximum accuracy config) ──
     print("\n  [2/3] Building CGCNN (max accuracy)...")
@@ -352,6 +458,9 @@ def train_single_property(args, property_name: str):
 
     t_train = time.time()
 
+
+    manager = CheckpointManager(save_dir, top_k=3, keep_last_k=3)
+
     for epoch in range(start_epoch, args.epochs + 1):
         t_ep = time.time()
 
@@ -378,22 +487,7 @@ def train_single_property(args, property_name: str):
                 break
             continue
 
-        if val_mae < best_val_mae:
-            best_val_mae = val_mae
-            patience_counter = 0
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_mae": val_mae,
-                "property": property_name,
-                "normalizer": normalizer.state_dict(),
-            }, save_dir / "best.pt")
-        else:
-            patience_counter += 1
-
-        # Save latest checkpoint
-        torch.save({
+        state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -401,8 +495,21 @@ def train_single_property(args, property_name: str):
             "normalizer": normalizer.state_dict(),
             "history": history,
             "best_val_mae": best_val_mae,
+            "val_mae": val_mae,
+            "property": property_name,
             "patience_counter": patience_counter,
-        }, checkpoint_path)
+        }
+
+        # Save Best
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
+            patience_counter = 0
+            manager.save_best(state, val_mae, epoch)
+        else:
+            patience_counter += 1
+
+        # Save Checkpoint (Rotating last-k)
+        manager.save_checkpoint(state, epoch)
 
         dt_ep = time.time() - t_ep
 
