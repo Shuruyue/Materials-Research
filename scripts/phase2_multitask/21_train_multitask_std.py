@@ -157,11 +157,78 @@ class MultiTargetNormalizer:
         for p, s in state.items(): self.normalizers[p].load_state_dict(s)
 
 
+# ── Checkpointing Logic ──
+
+class CheckpointManager:
+    """
+    Manages top-k best models and last-k checkpoints.
+    1. Keeps 'best.pt' as the absolute best.
+    2. Keeps 'best_2.pt', 'best_3.pt' as runners-up.
+    3. Keeps 'checkpoint.pt' as latest.
+    4. Keeps 'checkpoint_prev_1.pt', 'checkpoint_prev_2.pt' as history.
+    """
+    def __init__(self, save_dir, top_k=3, keep_last_k=3):
+        self.save_dir = Path(save_dir)
+        self.top_k = top_k
+        self.keep_last_k = keep_last_k
+        self.best_models = []  # List of (mae, epoch, filename)
+
+    def save_best(self, state, mae, epoch):
+        """Handle saving best models."""
+        filename = f"best_epoch_{epoch}_mae_{mae:.4f}.pt"
+        path = self.save_dir / filename
+        
+        # Always save the new candidate first
+        torch.save(state, path)
+        self.best_models.append((mae, epoch, filename))
+        self.best_models.sort(key=lambda x: x[0])  # Sort by MAE (asc)
+        
+        # Keep top-k
+        if len(self.best_models) > self.top_k:
+            worst = self.best_models.pop()
+            worst_path = self.save_dir / worst[2]
+            if worst_path.exists():
+                worst_path.unlink()
+                
+        # Update 'best.pt' symlink/copy (The #1 model)
+        if self.best_models[0][1] == epoch:
+            import shutil
+            shutil.copy(path, self.save_dir / "best.pt")
+
+    def save_checkpoint(self, state, epoch):
+        """Handle saving rotating checkpoints."""
+        # Delete oldest (last_k - 1)
+        oldest = self.save_dir / f"checkpoint_prev_{self.keep_last_k-1}.pt"
+        if oldest.exists():
+            oldest.unlink()
+            
+        # Shift others
+        import shutil
+        for i in range(self.keep_last_k - 2, 0, -1):
+            src = self.save_dir / f"checkpoint_prev_{i}.pt"
+            dst = self.save_dir / f"checkpoint_prev_{i+1}.pt"
+            if src.exists():
+                shutil.move(src, dst)
+                
+        # Move current 'checkpoint.pt' to 'prev_1'
+        current = self.save_dir / "checkpoint.pt"
+        if current.exists():
+            shutil.move(current, self.save_dir / "checkpoint_prev_1.pt")
+            
+        # Save new
+        torch.save(state, current)
+
+
 def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad_clip=0.5):
     model.train()
     total_loss = 0
     n = 0
-    for batch in loader:
+    
+    # Add tqdm for progress tracking
+    from tqdm import tqdm
+    pbar = tqdm(loader, desc="   Training", leave=False)
+    
+    for batch in pbar:
         batch = batch.to(device)
         optimizer.zero_grad()
         preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
@@ -200,6 +267,10 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
         optimizer.step()
         total_loss += loss.item()
         n += 1
+        
+        # Update progress bar
+        current_loss = total_loss / max(n, 1)
+        pbar.set_postfix({"loss": f"{current_loss:.4f}"})
     return total_loss / max(n, 1)
 
 @torch.no_grad()
@@ -238,7 +309,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=16) # Reduced from 32 for VRAM safety
     parser.add_argument("--lr", type=float, default=0.001)
     args = parser.parse_args()
 
@@ -250,9 +321,28 @@ def main():
     print("║     Balanced Performance / Resume Capability                   ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     
-    # Save Dir
-    save_dir = config.paths.models_dir / "multitask_std_e3nn"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # ── Output Directory ──
+    # Create timestamped run folder to preserve history of experiments
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    base_dir = config.paths.models_dir / "multitask_std_e3nn"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Specific run folder (e.g. run_20231027_153000)
+    if args.resume:
+        # Resume from latest run directory
+        runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
+        if runs:
+            save_dir = runs[-1]
+            print(f"  🟡 Resuming in existing run folder: {save_dir.name}")
+        else:
+            save_dir = base_dir / f"run_{timestamp}"
+            save_dir.mkdir()
+    else:
+        save_dir = base_dir / f"run_{timestamp}"
+        save_dir.mkdir()
+        print(f"  🔵 Starting new experiment run: {save_dir.name}")
 
     # 1. Data
     print("\n[1/5] Loading Dataset...")
@@ -264,7 +354,6 @@ def main():
 
     # 2. Outlier Filter (Discovery Mode)
     print("\n[2/5] Filtering Outliers (Std: 4.0 sigma)...")
-    # CRITICAL: Pass save_dir
     train_data = filter_outliers(datasets["train"], PROPERTIES, save_dir, n_sigma=4.0)
     val_data = filter_outliers(datasets["val"], PROPERTIES, save_dir, n_sigma=4.0)
     
@@ -275,9 +364,9 @@ def main():
     # Loaders
     from torch_geometric.loader import DataLoader
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                             num_workers=0, pin_memory=True)
+                              num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_data, batch_size=args.batch_size,
-                           num_workers=0, pin_memory=True)
+                            num_workers=0, pin_memory=True)
     
     print(f"\n[INFO] Device: {device}")
     if device == "cuda":
@@ -294,7 +383,7 @@ def main():
         n_radial_basis=STD_PRESET["n_radial"],
         radial_hidden=STD_PRESET["radial_hidden"],
         output_dim=1
-    )
+    ).to(device)
     model = MultiTaskGNN(
         encoder=encoder,
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
@@ -321,11 +410,14 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         best_val_mae = ckpt["best_val_mae"]
         history = ckpt["history"]
+        normalizer.load_state_dict(ckpt["normalizer"]) # Load normalizer state
         print(f"       Resumed at Epoch {start_epoch}")
 
     # 5. Train
     print(f"\n[5/5] Training for {args.epochs} epochs...")
     
+    manager = CheckpointManager(save_dir, top_k=3, keep_last_k=3)
+
     for epoch in range(start_epoch, args.epochs + 1):
         loss = train_epoch(model, loss_fn, train_loader, optimizer, device, normalizer)
         
@@ -339,23 +431,27 @@ def main():
         # Print
         print(f"Epoch {epoch:3d} | Loss: {loss:.4f} | Val Avg MAE: {avg_val_mae:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         
-        # Save Checkpoint
+        # Save History
         history["train_loss"].append(loss)
         history["val_mae"].append(avg_val_mae)
         
-        if avg_val_mae < best_val_mae:
-            best_val_mae = avg_val_mae
-            torch.save(model.state_dict(), save_dir / "best_model.pt")
-            
-        torch.save({
+        state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "loss_fn_state_dict": loss_fn.state_dict(),
             "best_val_mae": best_val_mae,
-            "history": history
-        }, checkpoint_path)
+            "val_mae": avg_val_mae,
+            "history": history,
+            "normalizer": normalizer.state_dict(), # Critical for inference
+        }
 
+        if avg_val_mae < best_val_mae:
+            best_val_mae = avg_val_mae
+            print(f"    ⭐ New Best! ({best_val_mae:.4f})")
+            manager.save_best(state, best_val_mae, epoch)
+            
+        manager.save_checkpoint(state, epoch)
 if __name__ == "__main__":
     main()
