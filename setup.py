@@ -9,24 +9,34 @@ setup(
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=[
-        "numpy>=1.26.0",
+        "numpy>=1.24.0",
         "scipy>=1.11.0",
-        "pandas>=2.1.0",
-        "pymatgen>=2024.1.27",
-        "ase>=3.23.0",
-        "torch>=2.2.0",
-        "torch-geometric>=2.5.0",
+        "pandas>=2.0.0",
+        "matplotlib>=3.7.0",
+        "scikit-learn>=1.3.0",
+        "pymatgen>=2024.1.1",
+        "ase>=3.22.0",
+        "torch>=2.1.0",
+        "torch-geometric>=2.4.0",
         "jarvis-tools>=2024.1.25",
         "tqdm>=4.65",
-        "e3nn>=0.5.1",
-        "botorch>=0.10.0",
+        "joblib>=1.3.0",
+        "e3nn>=0.5.0",
+        "botorch>=0.9.0",
         "gpytorch>=1.11.0",
     ],
     extras_require={
-        "test": [  # Explicit test extras
+        "mace": [
+            "mace-torch>=0.3.0",
+        ],
+        "test": [
             "pytest>=8.0.0",
             "pytest-cov>=4.1.0",
             "mock>=5.1.0",
+        ],
+        "jupyter": [
+            "jupyter>=1.0",
+            "ipywidgets>=8.0",
         ],
     },
 )

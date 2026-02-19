@@ -30,7 +30,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TDB_DIR = Path(__file__).parent

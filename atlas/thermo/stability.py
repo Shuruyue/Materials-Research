@@ -14,7 +14,6 @@ from pymatgen.analysis.phase_diagram import PhaseDiagram, PDEntry, GrandPotentia
 from pymatgen.entries.computed_entries import ComputedEntry
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

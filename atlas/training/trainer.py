@@ -13,12 +13,9 @@ from typing import Optional, Dict, Callable
 import time
 import json
 import logging
-import copy
 
 from atlas.config import get_config
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +55,7 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.use_amp = use_amp and (device == "cuda")
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
         self.save_dir = save_dir or get_config().paths.models_dir / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +79,7 @@ class Trainer:
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
                 # Flexible model call (some graph models take different args)
                 if hasattr(model_call := getattr(self.model, "forward", None), "__code__"):
                      # Standard PyG call
@@ -140,7 +137,7 @@ class Trainer:
         for batch in loader:
             batch = batch.to(self.device)
 
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
                 pred = self.model(
                     batch.x,
                     batch.edge_index,

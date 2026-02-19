@@ -65,9 +65,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> radius_graph_cpp(
     auto options_long = torch::TensorOptions().dtype(torch::kLong).device(pos.device());
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(pos.device());
 
-    torch::Tensor edge_index = torch.empty({2, n_edges}, options_long);
-    torch::Tensor edge_dist = torch.empty({n_edges, 1}, options_float);
-    torch::Tensor edge_vec = torch.empty({n_edges, 3}, options_float);
+    torch::Tensor edge_index = torch::empty({2, n_edges}, options_long);
+    torch::Tensor edge_dist = torch::empty({n_edges, 1}, options_float);
+    torch::Tensor edge_vec = torch::empty({n_edges, 3}, options_float);
     
     // Fill tensors (could be optimized with memcpy but this is safe)
     auto edge_index_a = edge_index.accessor<int64_t, 2>();

@@ -71,6 +71,18 @@ _ELEM_TO_IDX = {e: i for i, e in enumerate(_ELEMENTS)}
 _N_ELEMENTS = len(_ELEMENTS)
 
 
+def gaussian_expansion(distances: np.ndarray, cutoff: float, n_gaussians: int = 20) -> np.ndarray:
+    """
+    Expand distances into Gaussian basis functions.
+    Shared implementation for graph builders.
+    """
+    centers = np.linspace(0, cutoff, n_gaussians)
+    width = 0.5 * (centers[1] - centers[0])
+    return np.exp(-((distances[:, None] - centers[None, :]) ** 2) / width**2).astype(
+        np.float32
+    )
+
+
 class CrystalGraphBuilder:
     """
     Converts a crystal structure to a graph representation.
@@ -222,11 +234,7 @@ class CrystalGraphBuilder:
         self, distances: np.ndarray, n_gaussians: int = 20
     ) -> np.ndarray:
         """Expand distances into Gaussian basis functions."""
-        centers = np.linspace(0, self.cutoff, n_gaussians)
-        width = 0.5 * (centers[1] - centers[0])
-        return np.exp(-((distances[:, None] - centers[None, :]) ** 2) / width**2).astype(
-            np.float32
-        )
+        return gaussian_expansion(distances, self.cutoff, n_gaussians)
 
     def structure_to_pyg(self, structure, **properties) -> "torch_geometric.data.Data":
         """

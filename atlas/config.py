@@ -10,7 +10,6 @@ Optimization:
 """
 
 import os
-import torch
 import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -106,11 +105,15 @@ class Config:
         self._set_device()
 
     def _set_device(self):
-        self.device = self.get_device(self.train.device)
+        try:
+            self.device = self.get_device(self.train.device)
+        except ImportError:
+            self.device = "cpu"
 
     @staticmethod
-    def get_device(requested: str = "auto") -> torch.device:
+    def get_device(requested: str = "auto"):
         """Resolve device string to torch.device."""
+        import torch
         if requested == "auto":
             if torch.cuda.is_available():
                 return torch.device("cuda")

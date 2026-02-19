@@ -1,6 +1,7 @@
 # Large binary caches (regeneratable)
 data/raw/jarvis_cache/
 data/processed/
+data/discovery_results/
 *.pt
 *.pth
 *.ckpt
@@ -36,17 +37,19 @@ env/
 Thumbs.db
 .DS_Store
 
-
 # Models (User local only)
 models/
-models/cgcnn_lite_formation_energy/
-models/cgcnn_std_formation_energy/
-models/cgcnn_pro_formation_energy/
 
-# Logs
+# Artifacts & Results
+artifacts/
 *.log
 logs/
 outliers.csv
+*.xlsx
+*.csv
+
+# Personal notes & learning materials
+new/
 
 # Testing
 .pytest_cache/
@@ -54,3 +57,6 @@ outliers.csv
 # Gemini / Agent
 .gemini/
 .agent/
+# Temporary verification scripts
+verify_*.py
+test_structure.cif

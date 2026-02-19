@@ -56,15 +56,7 @@ ALL_PROPERTIES = [
     "ehull",
 ]
 
-class MultiTargetNormalizer:
-    def __init__(self, state_dict):
-        self.stats = state_dict # {prop: {"mean": x, "std": y}}
 
-    def denormalize(self, prop, y):
-        if prop not in self.stats: return y
-        mean = self.stats[prop]["mean"]
-        std = self.stats[prop]["std"]
-        return y * std + mean
 
 class AtlasMultitaskPredictor:
     def __init__(self, model_dir):
@@ -326,7 +318,7 @@ def main():
             try:
                 df.to_excel(args.output, index=False)
                 print(f"Saved to {args.output}")
-            except:
+            except Exception:
                 df.to_csv(args.output.with_suffix(".csv"), index=False)
         else:
             df.to_csv(args.output, index=False)

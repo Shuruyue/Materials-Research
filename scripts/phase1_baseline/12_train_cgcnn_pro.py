@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 import sys
-from pathlib import Path
 
 # Enhance module discovery
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -35,6 +34,8 @@ try:
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
     from atlas.training.metrics import scalar_metrics
+    from atlas.training.normalizers import TargetNormalizer
+    from atlas.training.checkpoint import CheckpointManager
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -110,113 +111,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     return dataset
 
 
-# ── Target Normalization ──
 
-class TargetNormalizer:
-    """Z-score normalization using training set statistics."""
-
-    def __init__(self, dataset, property_name: str):
-        values = []
-        for i in range(len(dataset)):
-            data = dataset[i]
-            if hasattr(data, property_name):
-                values.append(getattr(data, property_name).item())
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std())
-        if self.std < 1e-8:
-            self.std = 1.0
-        print(f"    Target normalizer: mean={self.mean:.4f}, std={self.std:.4f}")
-        print(f"    Raw range: [{arr.min():.2f}, {arr.max():.2f}]")
-
-    def normalize(self, y):
-        return (y - self.mean) / self.std
-
-    def denormalize(self, y):
-        return y * self.std + self.mean
-
-    def state_dict(self):
-        return {"mean": self.mean, "std": self.std}
-
-
-
-# ── Checkpointing ──
-
-class CheckpointManager:
-    """
-    Manages top-k best models and last-k checkpoints.
-    1. Keeps 'best.pt' as the absolute best.
-    2. Keeps 'best_2.pt', 'best_3.pt' as runners-up.
-    3. Keeps 'checkpoint.pt' as latest.
-    4. Keeps 'checkpoint_prev_1.pt', 'checkpoint_prev_2.pt' as history.
-    """
-    def __init__(self, save_dir, top_k=3, keep_last_k=3):
-        self.save_dir = Path(save_dir)
-        self.top_k = top_k
-        self.keep_last_k = keep_last_k
-        self.best_models = []  # List of (mae, epoch, filename)
-        
-        # Load existing best.pt if exists to init list
-        if (self.save_dir / "best.pt").exists():
-            # We don't read the file, just assume it's the only one for now
-            # To be robust, we start fresh or need better tracking.
-            # Simplified: We only track *new* improvements in this run.
-            pass
-
-    def save_best(self, state, mae, epoch):
-        """Handle saving best models."""
-        filename = f"best_epoch_{epoch}_mae_{mae:.4f}.pt"
-        path = self.save_dir / filename
-        
-        # Always save the new candidate first
-        torch.save(state, path)
-        self.best_models.append((mae, epoch, filename))
-        self.best_models.sort(key=lambda x: x[0])  # Sort by MAE (asc)
-        
-        # Keep top-k
-        if len(self.best_models) > self.top_k:
-            worst = self.best_models.pop()
-            worst_path = self.save_dir / worst[2]
-            if worst_path.exists():
-                worst_path.unlink()
-                
-        # Update 'best.pt' symlink/copy (The #1 model)
-        # We physically copy it to be safe on Windows
-        if self.best_models[0][1] == epoch:
-            # Current is the new #1
-            import shutil
-            shutil.copy(path, self.save_dir / "best.pt")
-
-        # Cleanup: Ensure we only have the tracked files in directory
-        # (Optional, but good for hygiene)
-
-    def save_checkpoint(self, state, epoch):
-        """Handle saving rotating checkpoints."""
-        # Shift previous checkpoints
-        # checkpoint_prev_1 -> checkpoint_prev_2
-        # checkpoint -> checkpoint_prev_1
-        # current -> checkpoint
-        
-        # Delete oldest (last_k - 1)
-        oldest = self.save_dir / f"checkpoint_prev_{self.keep_last_k-1}.pt"
-        if oldest.exists():
-            oldest.unlink()
-            
-        # Shift others
-        import shutil
-        for i in range(self.keep_last_k - 2, 0, -1):
-            src = self.save_dir / f"checkpoint_prev_{i}.pt"
-            dst = self.save_dir / f"checkpoint_prev_{i+1}.pt"
-            if src.exists():
-                shutil.move(src, dst)
-                
-        # Move current 'checkpoint.pt' to 'prev_1'
-        current = self.save_dir / "checkpoint.pt"
-        if current.exists():
-            shutil.move(current, self.save_dir / "checkpoint_prev_1.pt")
-            
-        # Save new
-        torch.save(state, current)
 
 
 def train_epoch(model, loader, optimizer, scheduler, property_name, device,

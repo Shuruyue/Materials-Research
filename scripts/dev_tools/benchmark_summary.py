@@ -22,7 +22,7 @@ for p in props:
     if not os.path.exists(path):
         print(f"  {p:<20s}  [NOT FOUND]")
         continue
-    r = json.load(open(path))
+    r = json.loads(Path(path).read_text())
     mae = r["test_metrics"].get(f"{p}_MAE", float("inf"))
     r2 = r["test_metrics"].get(f"{p}_R2", 0)
     target = r["target_mae"]
@@ -50,7 +50,7 @@ for p in props:
     path = os.path.join(results_dir, f"equivariant_{p}", "results.json")
     if not os.path.exists(path):
         continue
-    r = json.load(open(path))
+    r = json.loads(Path(path).read_text())
     mae = r["test_metrics"].get(f"{p}_MAE", float("inf"))
     r2 = r["test_metrics"].get(f"{p}_R2", 0)
     n_train = r["n_train"]

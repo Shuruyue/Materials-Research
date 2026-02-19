@@ -11,7 +11,6 @@ Loss functions that embed physical constraints:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.functional as F
 import sys
 from typing import Dict, Optional, List
 

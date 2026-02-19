@@ -22,8 +22,9 @@ from pathlib import Path
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+from atlas.models.graph_builder import gaussian_expansion
 
 
 class CrystalGraphBuilder:
@@ -130,10 +131,7 @@ class CrystalGraphBuilder:
         self, distances: np.ndarray, n_gaussians: int = 20
     ) -> np.ndarray:
         """Expand distances into Gaussian basis functions."""
-        centers = np.linspace(0, self.cutoff, n_gaussians)
-        width = 0.5 * (centers[1] - centers[0])
-        expanded = np.exp(-((distances[:, None] - centers[None, :]) ** 2) / (2 * width ** 2))
-        return expanded.astype(np.float32)
+        return gaussian_expansion(distances, self.cutoff, n_gaussians)
 
 
 class TopoGNN(nn.Module):

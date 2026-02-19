@@ -7,7 +7,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 print("Testing imports...")
 try:
     import torch
-    print(f"Torhc: {torch.__version__}")
+    print(f"Torch: {torch.__version__}")
     import torch_geometric
     print(f"PyG: {torch_geometric.__version__}")
     from atlas.models.cgcnn import CGCNN

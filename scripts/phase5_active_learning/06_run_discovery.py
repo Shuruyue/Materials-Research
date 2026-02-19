@@ -131,7 +131,7 @@ def main():
     if not args.no_mace:
         try:
             from atlas.potentials.mace_relaxer import MACERelaxer
-            relaxer = MACERelaxer(use_foundation=True)
+            relaxer = MACERelaxer(use_foundation=True, model_size="large")
             # Trigger lazy loading
             _ = relaxer.calculator
             print(f"  MACE relaxer: ready")

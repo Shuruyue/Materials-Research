@@ -25,7 +25,6 @@ from atlas.config import get_config
 from atlas.models.graph_builder import CrystalGraphBuilder
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

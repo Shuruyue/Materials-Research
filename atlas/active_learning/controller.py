@@ -24,7 +24,6 @@ from atlas.active_learning.generator import StructureGenerator
 from atlas.active_learning.acquisition import expected_improvement, upper_confidence_bound
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -270,8 +269,10 @@ class DiscoveryController:
                 timestamp=time.time(),
             )
             candidates.append(cand)
-        return candidates
+        return self._classify_candidates(candidates)
 
+    def _classify_candidates(self, candidates):
+        """Use GNN classifier to predict topological probability for each candidate."""
         if not self.classifier or not self.graph_builder:
             # Fallback to heuristic
             for c in candidates: c.topo_probability = c.heuristic_topo_score
@@ -300,14 +301,11 @@ class DiscoveryController:
                     # Handle Multi-Task Dictionary Output
                     if isinstance(pred, dict):
                         # 1. Topology (Band Gap or Classification)
-                        if "band_gap" in pred: # Regression proxy for topology?
+                        if "band_gap" in pred:
                             bg = pred["band_gap"]
                             if isinstance(bg, dict): # Evidential
                                 mu = bg["gamma"].item()
-                                std = bg["total_std"].item()
-                                # Small band gap (<0.1) often indicates topology? 
-                                # Or if we predicted "is_topological" directly
-                                c.topo_probability = 1.0 if mu < 0.1 else 0.0 # Placeholder
+                                c.topo_probability = 1.0 if mu < 0.1 else 0.0
                             else:
                                 c.topo_probability = 1.0 if bg.item() < 0.1 else 0.0
 
@@ -317,19 +315,8 @@ class DiscoveryController:
                             if isinstance(fe, dict): # Evidential
                                 mu_fe = fe["gamma"].item()
                                 std_fe = fe["total_std"].item()
-                                
-                                # Use LCB for stability (Minimize Energy) -> Maximize -Energy
-                                # But here we just store the score. 
-                                # Stability Score = UCB of Stability (to be safe? or LCB to be optimistic?)
-                                # Optimistic exploration: LCB (Lower bound of energy is very stable)
-                                # LCB = mu - kappa * std
                                 lcb = mu_fe - 2.0 * std_fe
-                                
-                                # Normalize score: < -0.5 eV/atom is good
-                                # 0.0 if > 0, 1.0 if < -1.0
                                 c.stability_score = max(0.0, min(1.0, -lcb))
-                                
-                                # Store raw for acquisition
                                 c.energy_mean = mu_fe
                                 c.energy_std = std_fe
                             else:
@@ -343,8 +330,8 @@ class DiscoveryController:
                              c.topo_probability = torch.softmax(pred, dim=-1)[0, 1].item()
 
             except Exception as e:
-                # logger.warning(f"Prediction failed: {e}")
-                c.topo_probability = 0.0 # Penalize GNN failure
+                logger.warning(f"Classification failed for {c.formula}: {e}")
+                c.topo_probability = 0.0
         
         return candidates
 

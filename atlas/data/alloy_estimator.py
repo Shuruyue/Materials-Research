@@ -18,7 +18,6 @@ from typing import List, Dict, Optional, Union
 from dataclasses import dataclass
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Try to import pycalphad

@@ -12,7 +12,7 @@ try:
     from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
     from atlas.models.equivariant import EquivariantGNN
     from atlas.models.multi_task import MultiTaskGNN
-    # from atlas.data.normalizer import MultiTargetNormalizer # Deleted because it's inline in std script
+    from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 except ImportError as e:
     print(f"❌ ImportError: {e}")
     print(f"   sys.path: {sys.path}")
@@ -20,46 +20,7 @@ except ImportError as e:
 
 import numpy as np
 
-# ── Copied from 21_train_multitask_std.py ──
-class TargetNormalizer:
-    def __init__(self, dataset=None, property_name=None):
-        if dataset is None: # Allow empty init for loading state_dict
-            self.mean = 0.0
-            self.std = 1.0
-            return
-            
-        values = []
-        for i in range(len(dataset)):
-            try:
-                val = getattr(dataset[i], property_name).item()
-                if not np.isnan(val): values.append(val)
-            except: continue
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std()) if arr.std() > 1e-8 else 1.0
 
-    def normalize(self, y): return (y - self.mean) / self.std
-    def denormalize(self, y): return y * self.std + self.mean
-    def state_dict(self): return {"mean": self.mean, "std": self.std}
-    def load_state_dict(self, state): 
-        self.mean = state["mean"] 
-        self.std = state["std"]
-
-class MultiTargetNormalizer:
-    def __init__(self, dataset, properties):
-        # We allow dataset=None if we are going to load state_dict immediately
-        if dataset is None:
-            self.normalizers = {p: TargetNormalizer(None, p) for p in properties}
-        else:
-            self.normalizers = {p: TargetNormalizer(dataset, p) for p in properties}
-            
-    def normalize(self, prop, y): return self.normalizers[prop].normalize(y)
-    def denormalize(self, prop, y): return self.normalizers[prop].denormalize(y)
-    def state_dict(self): return {p: n.state_dict() for p, n in self.normalizers.items()}
-    def load_state_dict(self, state):
-        for p, s in state.items(): 
-            if p in self.normalizers:
-                self.normalizers[p].load_state_dict(s)
 
 # Define STD_PRESET locally to avoid script import issues
 STD_PRESET = {

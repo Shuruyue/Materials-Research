@@ -23,86 +23,124 @@ python -m venv .venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Install ATLAS in development mode
+# Install ATLAS in development mode (using pyproject.toml)
 pip install -e .
 ```
 
-### 2. Initialize Database
+### 2. Phase 1 — Baseline Training
 
 ```bash
-# Seed the topological materials database (no API key needed)
-python scripts/02_init_topo_db.py
-
 # Download JARVIS-DFT data (~76,000 materials, free)
-python scripts/01_download_data.py
+python scripts/phase1_baseline/01_download_data.py
+
+# Train CGCNN baseline (lite / std / pro tiers)
+python scripts/phase1_baseline/10_train_cgcnn_lite.py
+python scripts/phase1_baseline/13_inference_demo.py
 ```
 
-### 3. Run the Discovery Pipeline
+### 3. Phase 2 — Multi-Task Equivariant GNN
 
 ```bash
-# Prepare MACE training data
-python scripts/03_prepare_mace_data.py
+# Pre-compute 3-body graph data
+python scripts/phase2_multitask/process_data_phase2.py
 
-# Train MACE potential (requires GPU)
-python scripts/04_train_mace.py
+# Train multi-task model (lite / std / pro tiers)
+python scripts/phase2_multitask/20_train_multitask_lite.py
+python scripts/phase2_multitask/23_inference_multitask.py
+```
 
-# Train topological GNN classifier
-python scripts/05_train_topo_classifier.py
+### 4. Phase 3–6 — Potentials, Topology, Discovery, Analysis
 
-# Run full discovery loop
-python scripts/06_run_discovery.py
+```bash
+# Phase 3: MACE potential
+python scripts/phase3_potentials/03_prepare_mace_data.py
+python scripts/phase3_potentials/04_train_mace.py
+python scripts/phase3_potentials/05_run_relaxation.py
 
-# Search materials by properties
-python scripts/07_search_materials.py --help
+# Phase 4: Topological classifier
+python scripts/phase4_topology/02_init_topo_db.py
+python scripts/phase4_topology/05_train_topo_classifier.py
+
+# Phase 5: Active learning discovery
+python scripts/phase5_active_learning/06_run_discovery.py
+python scripts/phase5_active_learning/07_search_materials.py --help
+
+# Phase 6: Analysis
+python scripts/phase6_analysis/08_alloy_properties.py
+python scripts/phase6_analysis/09_phase_diagram.py
 ```
 
 ## Project Structure
 
 ```
-atlas/                          # Main Python package
-├── __init__.py                 # Package root, version info
-├── config.py                   # Centralized configuration & paths
-├── data/                       # Data loading & databases
-│   ├── jarvis_client.py        # JARVIS-DFT API (76K materials, no key)
-│   ├── topo_db.py              # Topological materials database
-│   └── property_estimator.py   # Physics-based property estimation
-├── potentials/                 # ML interatomic potentials
-│   └── mace_relaxer.py         # MACE structure relaxation & stability
-├── topology/                   # Topological invariant calculators
-│   └── classifier.py           # GNN classifier (TopoGNN)
-├── active_learning/            # Bayesian optimization loop
-│   ├── controller.py           # Discovery engine (closed-loop)
-│   └── generator.py            # Structure mutation & generation
-└── utils/                      # Utilities
-    └── structure.py            # pymatgen ↔ ASE conversion
+atlas/                              # Main Python package
+├── __init__.py                     # Package root, version info
+├── config.py                       # Centralized configuration & paths
+├── data/                           # Data loading & databases
+│   ├── jarvis_client.py            # JARVIS-DFT API (76K materials, no key)
+│   ├── crystal_dataset.py          # PyG dataset with multi-property support
+│   ├── topo_db.py                  # Topological materials database
+│   └── property_estimator.py       # Physics-based property estimation
+├── models/                         # Neural network architectures
+│   ├── cgcnn.py                    # Crystal Graph Convolutional NN (Phase 1)
+│   ├── equivariant.py              # E(3)-Equivariant GNN encoder (Phase 2)
+│   ├── multi_task.py               # Multi-task wrapper with per-task heads
+│   ├── m3gnet.py                   # M3GNet encoder with 3-body interactions
+│   ├── evidential.py               # Evidential uncertainty head
+│   ├── graph_builder.py            # Crystal → PyG graph conversion
+│   └── layers.py                   # Shared layers (message passing, etc.)
+├── training/                       # Training infrastructure
+│   ├── trainer.py                  # Generic training loop
+│   ├── losses.py                   # Multi-task & evidential losses
+│   └── metrics.py                  # MAE, R², classification metrics
+├── active_learning/                # Bayesian optimization loop
+│   ├── controller.py               # Discovery engine (closed-loop)
+│   └── generator.py               # Structure mutation & generation
+├── topology/                       # Topological invariant calculators
+│   └── classifier.py              # GNN classifier (TopoGNN)
+├── potentials/                     # ML interatomic potentials
+│   └── mace_relaxer.py            # MACE structure relaxation & stability
+├── explain/                        # Model interpretability
+│   ├── gnn_explainer.py           # GNNExplainer wrapper
+│   └── integrated_gradients.py    # Integrated gradients attribution
+├── thermo/                         # Thermodynamic analysis
+│   ├── stability.py               # Phase stability analyst
+│   └── calphad.py                 # CALPHAD phase diagrams
+├── ops/                            # Performance optimizations
+│   └── cpp_ops.py                 # C++ JIT-compiled graph ops
+└── utils/                          # Utilities
+    └── structure.py               # pymatgen ↔ ASE conversion
 
-scripts/                        # Executable pipeline scripts
-├── 01_download_data.py         # Download JARVIS-DFT database
-├── 02_init_topo_db.py          # Seed known topological materials
-├── 03_prepare_mace_data.py     # Convert to MACE training format
-├── 04_train_mace.py            # Train MACE neural network potential
-├── 05_train_topo_classifier.py # Train topological GNN classifier
-├── 06_run_discovery.py         # Run active learning discovery
-└── 07_search_materials.py      # Multi-property materials search
+scripts/                            # Executable pipeline scripts
+├── phase1_baseline/                # CGCNN training (lite/std/pro)
+├── phase2_multitask/               # E(3)-Equivariant multi-task training
+├── phase3_potentials/              # MACE potential training & relaxation
+├── phase3_singletask/              # Single-task specialist training
+├── phase4_topology/                # Topological classifier
+├── phase5_active_learning/         # Discovery loop & search
+├── phase6_analysis/                # Alloy properties & phase diagrams
+└── dev_tools/                      # Environment checks & monitoring
 
-tests/                          # Unit tests
-data/                           # Runtime data (gitignored)
-models/                         # Trained models (gitignored)
+tests/                              # Unit tests
+data/                               # Runtime data (gitignored)
+models/                             # Trained models (gitignored)
 ```
 
 ## Roadmap
 
 - [x] **Phase 0**: Project infrastructure
-- [ ] **Phase 1**: Data foundation (DFT database + initial MACE model)
-- [ ] **Phase 2**: Topological classifier (Z₂/Chern from band structure)
-- [ ] **Phase 3**: Closed-loop active learning integration
-- [ ] **Phase 4**: Discovery and experimental validation
+- [x] **Phase 1**: Data foundation + CGCNN baseline
+- [x] **Phase 2**: Multi-task E(3)-Equivariant GNN
+- [x] **Phase 3**: MACE potential (Dynamic Relaxation with Foundation Models)
+- [x] **Phase 4**: Topological GNN classifier
+- [x] **Phase 5**: Closed-loop active learning discovery (Ready)
+- [ ] **Phase 6**: Analysis and experimental validation
 
 ## Requirements
 
 - Python ≥ 3.10
 - PyTorch ≥ 2.1 with CUDA
-- GPU: NVIDIA RTX 4060 or better (for MACE training)
+- GPU: NVIDIA RTX 4060 or better (for training)
 - No API key required — JARVIS-DFT data is freely downloadable
 
 ## References

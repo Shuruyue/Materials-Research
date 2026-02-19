@@ -32,24 +32,20 @@ class MACERelaxer:
     2. The pre-trained MACE-MP-0 foundation model (zero-shot, covers all elements)
     """
 
-    def __init__(
-        self,
-        model_path: Optional[str] = None,
-        device: str = "auto",
-        use_foundation: bool = True,
-        default_dtype: str = "float64",
     ):
         """
         Args:
             model_path: path to trained MACE model (.pt file)
             device: "cuda", "cpu", or "auto"
             use_foundation: if True and no model_path, use MACE-MP-0 foundation model
+            model_size: "small", "medium", or "large" (default: "large")
             default_dtype: precision for calculation
         """
         self.cfg = get_config()
         self.model_path = model_path
         self._calculator = None
         self.use_foundation = use_foundation
+        self.model_size = model_size
         self.dtype = default_dtype
         
         # Device resolution
@@ -89,9 +85,9 @@ class MACERelaxer:
                 logger.info("Loading MACE-MP-0 foundation model (universal)...")
                 try:
                     from mace.calculators import mace_mp
-                    # "medium" is a good balance of speed/accuracy
+                    # "large" is most accurate (MACE-MP-0)
                     self._calculator = mace_mp(
-                        model="medium", 
+                        model=self.model_size, 
                         device=self.device,
                         default_dtype=self.dtype,
                     )

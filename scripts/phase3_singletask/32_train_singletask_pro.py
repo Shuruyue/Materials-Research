@@ -31,6 +31,7 @@ from atlas.config import get_config
 from atlas.data.crystal_dataset import CrystalPropertyDataset
 from atlas.models.equivariant import EquivariantGNN, LARGE_PRESET
 from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import TargetNormalizer
 
 
 # ── Literature benchmarks ──
@@ -133,38 +134,7 @@ def filter_outliers(dataset, property_name, n_sigma=8.0):
     return dataset
 
 
-class TargetNormalizer:
-    """Z-score normalization for target property values."""
-    def __init__(self, dataset, property_name: str):
-        values = []
-        for i in range(len(dataset)):
-            data = dataset[i]
-            if hasattr(data, property_name):
-                values.append(getattr(data, property_name).item())
 
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std())
-        if self.std < 1e-8:
-            self.std = 1.0
-
-        print(f"    Target normalizer: mean={self.mean:.4f}, std={self.std:.4f}")
-
-    def normalize(self, y: torch.Tensor) -> torch.Tensor:
-        return (y - self.mean) / self.std
-
-    def denormalize(self, y: torch.Tensor) -> torch.Tensor:
-        return y * self.std + self.mean
-
-    def state_dict(self) -> dict:
-        return {"mean": self.mean, "std": self.std}
-
-    @classmethod
-    def from_state_dict(cls, state: dict):
-        obj = cls.__new__(cls)
-        obj.mean = state["mean"]
-        obj.std = state["std"]
-        return obj
 
 
 # ─────────────────────────────────────────────────────────
@@ -201,11 +171,12 @@ def train_epoch(model, loader, optimizer, property_name, device,
         
         # Scale loss for accumulation
         loss = loss / acc_steps
-        loss.backward()
 
         if torch.isnan(loss) or torch.isinf(loss):
             optimizer.zero_grad()
             continue
+
+        loss.backward()
 
         if (i + 1) % acc_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)

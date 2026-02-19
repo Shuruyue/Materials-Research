@@ -25,7 +25,6 @@ import pandas as pd
 from atlas.config import get_config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 JARVIS_DFT_3D_URL = "https://figshare.com/ndownloader/files/40357663" # Direct link to dft_3d.json

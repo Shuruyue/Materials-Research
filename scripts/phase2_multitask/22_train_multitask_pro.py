@@ -33,6 +33,9 @@ from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIE
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
+from atlas.training.filters import filter_outliers
+from atlas.training.checkpoint import CheckpointManager
 
 # ── Pro Tier Config ──
 # Full discovery mode activated by --all-properties
@@ -59,47 +62,7 @@ PRO_PRESET = {
     "head_hidden": 128,
 }
 
-# ── Outlier Handler ──
 
-def filter_outliers(dataset, properties, save_dir, n_sigma=4.0):
-    indices_to_keep = set(range(len(dataset)))
-    outliers_found = []
-
-    for prop in properties:
-        values = []
-        valid_indices = []
-        for i in range(len(dataset)):
-            try:
-                data = dataset[i]
-                val = getattr(data, prop).item()
-                values.append(val)
-                valid_indices.append(i)
-            except: continue
-
-        if not values: continue
-        arr = np.array(values)
-        mean, std = arr.mean(), arr.std()
-        if std < 1e-8: continue
-
-        for j, v in enumerate(values):
-            if abs(v - mean) > n_sigma * std:
-                idx = valid_indices[j]
-                indices_to_keep.discard(idx)
-                outliers_found.append({
-                    "jid": getattr(dataset[idx], "jid", "unknown"),
-                    "property": prop,
-                    "value": v,
-                    "mean": mean,
-                    "sigma": (v - mean) / std,
-                    "threshold_sigma": n_sigma
-                })
-
-    if outliers_found:
-        df_out = pd.DataFrame(outliers_found)
-        df_out.to_csv(save_dir / "outliers.csv", index=False)
-        print(f"    ⚠️ Found {len(outliers_found)} outliers! Saved to outliers.csv")
-    
-    return torch.utils.data.Subset(dataset, sorted(indices_to_keep))
 
 # ── Utilities ──
 
@@ -111,7 +74,7 @@ def pad_missing_properties(dataset, properties):
             try:
                 val = getattr(data, prop)
                 if val is None: raise AttributeError
-            except:
+            except (AttributeError, TypeError):
                 setattr(data, prop, torch.tensor([float('nan')]))
                 n_padded[prop] += 1
     return dataset
@@ -131,95 +94,10 @@ class UncertaintyWeightedLoss(nn.Module):
     def get_weights(self):
         return {p: round(float(torch.exp(-self.log_vars[i])), 4) for i, p in enumerate(PROPERTIES)}
 
-class TargetNormalizer:
-    def __init__(self, dataset, property_name):
-        values = []
-        for i in range(len(dataset)):
-            try:
-                val = getattr(dataset[i], property_name).item()
-                if not np.isnan(val): values.append(val)
-            except: continue
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std()) if arr.std() > 1e-8 else 1.0
-
-    def normalize(self, y): return (y - self.mean) / self.std
-    def denormalize(self, y): return y * self.std + self.mean
-    def state_dict(self): return {"mean": self.mean, "std": self.std}
-    def load_state_dict(self, state): 
-        self.mean = state["mean"] 
-        self.std = state["std"]
-
-class MultiTargetNormalizer:
-    def __init__(self, dataset, properties):
-        self.normalizers = {p: TargetNormalizer(dataset, p) for p in properties}
-    def normalize(self, prop, y): return self.normalizers[prop].normalize(y)
-    def denormalize(self, prop, y): return self.normalizers[prop].denormalize(y)
-    def state_dict(self): return {p: n.state_dict() for p, n in self.normalizers.items()}
-    def load_state_dict(self, state):
-        for p, s in state.items(): self.normalizers[p].load_state_dict(s)
 
 
-# ── Checkpointing Logic ──
 
-class CheckpointManager:
-    """
-    Manages top-k best models and last-k checkpoints.
-    1. Keeps 'best.pt' as the absolute best.
-    2. Keeps 'best_2.pt', 'best_3.pt' as runners-up.
-    3. Keeps 'checkpoint.pt' as latest.
-    4. Keeps 'checkpoint_prev_1.pt', 'checkpoint_prev_2.pt' as history.
-    """
-    def __init__(self, save_dir, top_k=3, keep_last_k=3):
-        self.save_dir = Path(save_dir)
-        self.top_k = top_k
-        self.keep_last_k = keep_last_k
-        self.best_models = []  # List of (mae, epoch, filename)
 
-    def save_best(self, state, mae, epoch):
-        """Handle saving best models."""
-        filename = f"best_epoch_{epoch}_mae_{mae:.4f}.pt"
-        path = self.save_dir / filename
-        
-        # Always save the new candidate first
-        torch.save(state, path)
-        self.best_models.append((mae, epoch, filename))
-        self.best_models.sort(key=lambda x: x[0])  # Sort by MAE (asc)
-        
-        # Keep top-k
-        if len(self.best_models) > self.top_k:
-            worst = self.best_models.pop()
-            worst_path = self.save_dir / worst[2]
-            if worst_path.exists():
-                worst_path.unlink()
-                
-        # Update 'best.pt' symlink/copy (The #1 model)
-        if self.best_models[0][1] == epoch:
-            import shutil
-            shutil.copy(path, self.save_dir / "best.pt")
-
-    def save_checkpoint(self, state, epoch):
-        """Handle saving rotating checkpoints."""
-        # Delete oldest (last_k - 1)
-        oldest = self.save_dir / f"checkpoint_prev_{self.keep_last_k-1}.pt"
-        if oldest.exists():
-            oldest.unlink()
-            
-        # Shift others
-        import shutil
-        for i in range(self.keep_last_k - 2, 0, -1):
-            src = self.save_dir / f"checkpoint_prev_{i}.pt"
-            dst = self.save_dir / f"checkpoint_prev_{i+1}.pt"
-            if src.exists():
-                shutil.move(src, dst)
-                
-        # Move current 'checkpoint.pt' to 'prev_1'
-        current = self.save_dir / "checkpoint.pt"
-        if current.exists():
-            shutil.move(current, self.save_dir / "checkpoint_prev_1.pt")
-            
-        # Save new
-        torch.save(state, current)
 
 
 def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad_clip=0.5, accumulation_steps=4):
@@ -443,7 +321,7 @@ def main():
         loss_fn.load_state_dict(ckpt["loss_fn_state_dict"]) 
         # Note: Scheduler state might be tricky if params changed, but we try
         try: scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        except: print("    ⚠️ Scheduler state mismatch, restarting scheduler")
+        except Exception: print("    ⚠️ Scheduler state mismatch, restarting scheduler")
         
         start_epoch = ckpt["epoch"] + 1
         best_val_mae = ckpt["best_val_mae"]

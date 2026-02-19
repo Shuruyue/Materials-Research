@@ -1,8 +1,15 @@
+import sys
+from pathlib import Path
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import torch
 from atlas.models.cgcnn import CGCNN
 from atlas.data.crystal_dataset import CrystalPropertyDataset
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import TargetNormalizer
 from torch_geometric.loader import DataLoader as PyGLoader
 import numpy as np
 
@@ -12,19 +19,9 @@ MODEL_PATH = PROJECT_ROOT / "models/cgcnn_full_formation_energy/best.pt"
 BATCH_SIZE = 64
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-import sys
-from pathlib import Path
-# Add project root to sys.path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 
-class TargetNormalizer:
-    def __init__(self, state_dict):
-        self.mean = state_dict["mean"]
-        self.std = state_dict["std"]
-    def denormalize(self, y):
-        return y * self.std + self.mean
+
 
 def main():
     print(f"Loading model from {MODEL_PATH}...")

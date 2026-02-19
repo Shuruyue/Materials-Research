@@ -25,9 +25,7 @@ class RBFExpansion(nn.Module):
     def forward(self, dist: torch.Tensor) -> torch.Tensor:
         return torch.exp(-(dist.unsqueeze(-1) - self.offset)**2 / self.width**2)
 
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(x)
+
 
 class ThreeBodyInteraction(nn.Module):
     """
@@ -44,14 +42,14 @@ class ThreeBodyInteraction(nn.Module):
         # Here we use a simple MLP on cos(theta) expanded via RBF for consistency
         self.angle_expansion = nn.Sequential(
             nn.Linear(1, n_basis), 
-            Swish(),
+            nn.SiLU(),
             nn.Linear(n_basis, n_basis)
         )
         
         # Mixing weights
         self.phi_3b = nn.Sequential(
             nn.Linear(embed_dim * 2 + n_basis, embed_dim),
-            Swish(),
+            nn.SiLU(),
             nn.Linear(embed_dim, embed_dim),
         )
         
@@ -135,7 +133,7 @@ class M3GNetLayer(nn.Module):
         # 1. Edge Update (2-body)
         self.edge_mlp = nn.Sequential(
             nn.Linear(embed_dim * 3, embed_dim), # atom_i + atom_j + edge
-            Swish(),
+            nn.SiLU(),
             nn.Linear(embed_dim, embed_dim)
         )
         self.edge_gate = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.Sigmoid())
@@ -147,7 +145,7 @@ class M3GNetLayer(nn.Module):
         # 3. Node Update
         self.node_mlp = nn.Sequential(
             nn.Linear(embed_dim * 2, embed_dim), # atom + aggregated_edges
-            Swish(),
+            nn.SiLU(),
             nn.Linear(embed_dim, embed_dim)
         )
         

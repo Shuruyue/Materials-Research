@@ -28,6 +28,7 @@ from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIE
 from atlas.models.cgcnn import CGCNN
 from atlas.models.multi_task import MultiTaskGNN, ScalarHead
 from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 
 
 PROPERTIES = DEFAULT_PROPERTIES
@@ -86,35 +87,7 @@ def pad_missing_properties(dataset, properties):
     return dataset
 
 
-class TargetNormalizer:
-    """Z-score normalization per property (skips NaN)."""
-    def __init__(self, dataset, property_name: str):
-        values = []
-        for i in range(len(dataset)):
-            try:
-                data = dataset[i]
-                val = getattr(data, property_name).item()
-                if not np.isnan(val):
-                    values.append(val)
-            except (KeyError, AttributeError):
-                continue
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std())
-        if self.std < 1e-8: self.std = 1.0
-        print(f"      {property_name}: n={len(values)}, mean={self.mean:.4f}, std={self.std:.4f}")
 
-    def normalize(self, y): return (y - self.mean) / self.std
-    def denormalize(self, y): return y * self.std + self.mean
-    def state_dict(self): return {"mean": self.mean, "std": self.std}
-
-
-class MultiTargetNormalizer:
-    def __init__(self, dataset, properties):
-        self.normalizers = {p: TargetNormalizer(dataset, p) for p in properties}
-    def normalize(self, prop, y): return self.normalizers[prop].normalize(y)
-    def denormalize(self, prop, y): return self.normalizers[prop].denormalize(y)
-    def state_dict(self): return {p: n.state_dict() for p, n in self.normalizers.items()}
 
 
 def filter_outliers(dataset, properties, n_sigma=8.0):
@@ -128,7 +101,7 @@ def filter_outliers(dataset, properties, n_sigma=8.0):
                 if not np.isnan(val):
                     values.append(val)
                     valid_indices.append(i)
-            except: continue
+            except Exception: continue
         
         if not values: continue
         arr = np.array(values)

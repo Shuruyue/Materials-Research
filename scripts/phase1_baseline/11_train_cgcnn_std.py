@@ -35,6 +35,7 @@ try:
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
     from atlas.training.metrics import scalar_metrics
+    from atlas.training.normalizers import TargetNormalizer
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -110,33 +111,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     return dataset
 
 
-# ── Target Normalization ──
 
-class TargetNormalizer:
-    """Z-score normalization using training set statistics."""
-
-    def __init__(self, dataset, property_name: str):
-        values = []
-        for i in range(len(dataset)):
-            data = dataset[i]
-            if hasattr(data, property_name):
-                values.append(getattr(data, property_name).item())
-        arr = np.array(values)
-        self.mean = float(arr.mean())
-        self.std = float(arr.std())
-        if self.std < 1e-8:
-            self.std = 1.0
-        print(f"    Target normalizer: mean={self.mean:.4f}, std={self.std:.4f}")
-        print(f"    Raw range: [{arr.min():.2f}, {arr.max():.2f}]")
-
-    def normalize(self, y):
-        return (y - self.mean) / self.std
-
-    def denormalize(self, y):
-        return y * self.std + self.mean
-
-    def state_dict(self):
-        return {"mean": self.mean, "std": self.std}
 
 
 def train_epoch(model, loader, optimizer, scheduler, property_name, device,

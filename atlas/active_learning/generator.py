@@ -23,7 +23,6 @@ from pymatgen.core import Structure, Lattice, Element
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -167,7 +166,7 @@ def _heuristic_topo_score(structure: Structure) -> float:
             max_z = max(max_z, z)
             if z >= 50: score += 0.2
             if z >= 70: score += 0.2
-        except: pass
+        except Exception: pass
     
     # SOC requires heavy elements generally
     if max_z < 30: return 0.0
@@ -183,7 +182,7 @@ def _heuristic_topo_score(structure: Structure) -> float:
         # High symmetry is often good for TIs
         if sg > 100: score += 0.2
         if sg in TOPO_PROTOTYPES: score += 0.4
-    except: pass
+    except Exception: pass
 
     return min(score, 1.0)
 
@@ -238,7 +237,7 @@ def _worker_strain(parent: Structure, max_strain: float, seed: int) -> Optional[
         if sga.get_space_group_number() == 1: # P1
              # Try to symmetrize? Or just reject P1 if parent was high symmetry
              pass
-    except:
+    except Exception:
         pass
 
     return {

@@ -8,6 +8,7 @@ Methods:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
@@ -146,8 +147,6 @@ class EvidentialRegression(nn.Module):
     def __init__(self, input_dim: int, output_dim: int = 1):
         super().__init__()
         self.output_dim = output_dim
-        import torch.nn.functional as F
-        self._F = F
 
         self.head = nn.Sequential(
             nn.Linear(input_dim, input_dim // 2),
@@ -163,7 +162,6 @@ class EvidentialRegression(nn.Module):
         Returns:
             Dict with "mean", "aleatoric", "epistemic", "total_std"
         """
-        F = self._F
         raw = self.head(embedding).reshape(-1, self.output_dim, 4)
 
         gamma = raw[..., 0]                            # mean

@@ -17,9 +17,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import sys
-from pathlib import Path
-
 # Enhance module discovery
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
