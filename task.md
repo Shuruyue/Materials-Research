@@ -38,12 +38,16 @@
         - [x] Create `23_inference_multitask.py` (Batch/Excel Support)
     - [/] **Execution**
         - [x] Run `21_train_multitask_std.py` (Achieved: 0.046 eV/atom, 0.17 eV Gap)
-        - [ ] Run `22_train_multitask_pro.py` (Target: SOTA Production Model)
+        - [x] **Remote Refactoring & Optimization**:
+            - [x] Extracted logic to `atlas/training/` (Losses, Metrics, Filters, Checkpoints)
+            - [x] Simplified training scripts (Std/Pro/Specialist)
+            - [x] Added `pyproject.toml` and updated `setup.py`
+        - [/] Run `22_train_multitask_pro.py` (Target: SOTA Production Model - Est. 10-15 Days)
     - [x] **Dev Tools & Utilities**
         - [x] Create `scripts/dev_tools/inspect_checkpoint.py` (Metrics Inspector)
         - [x] Implement internal `cpp_ops.py` (C++ Acceleration)
     - [ ] **Phase 3: Single-Task Specialists** <!-- id: 50 -->
-        - [x] Create `32_train_singletask_pro.py` (Fine-Tuning Script)
+        - [x] Update `32_train_singletask_pro.py` (Synced with remote refactoring)
         - [ ] Run Specialist Training (e.g., Formation Energy only) <!-- id: 51 -->
     - [ ] **Data Exploration** <!-- id: 48 -->
         - [ ] Discovery Mode (Run Pro with `--resume` & `--save-outliers`) <!-- id: 49 -->

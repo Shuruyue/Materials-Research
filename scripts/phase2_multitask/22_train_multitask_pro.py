@@ -54,8 +54,8 @@ ALL_PROPERTIES = [
 ]
 
 PRO_PRESET = {
-    "irreps": "128x0e + 64x1o + 32x2e + 16x3o", # High capacity
-    "max_ell": 3,
+    "irreps": "128x0e + 64x1o + 32x2e", # Optimized High capacity (Removed 3o for speed)
+    "max_ell": 2, # Reduced from 3 to 2 (Massive speedup, same as Std)
     "n_layers": 4,
     "n_radial": 32,
     "radial_hidden": 256,
@@ -208,7 +208,7 @@ def main():
     parser.add_argument("--no-filter", action="store_true", help="Disable outlier filter")
     parser.add_argument("--all-properties", action="store_true", help="Train on ALL 9 properties (Discovery Mode)")
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=16) # Reduced for Pro size
+    parser.add_argument("--batch-size", type=int, default=12) # Reduced for Pro size and VRAM safety
     parser.add_argument("--lr", type=float, default=0.0005)
     args = parser.parse_args()
 
