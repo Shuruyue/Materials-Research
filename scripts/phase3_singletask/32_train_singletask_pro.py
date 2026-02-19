@@ -167,7 +167,9 @@ def main():
         )
         
         if epoch % 5 == 0 or is_best:
-            print(f"Epoch {epoch:03d} | Train MSE: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} {'🌟' if is_best else ''}")
+            log_str = f"Epoch {epoch:03d} | Train MSE: {avg_train_loss:.4f} | Val MAE ({args.property}): {avg_val_mae:.4f}"
+            if is_best: log_str += " 🌟"
+            print(log_str)
 
     print(f"\n✅ Training Complete. Best MAE: {ckpt_manager.best_value:.4f}")
     if ckpt_manager.best_path:

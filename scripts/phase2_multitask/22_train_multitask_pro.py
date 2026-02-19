@@ -467,10 +467,20 @@ def main():
         # Logging
         dt = time.time() - t0
         weights = loss_fn.get_weights()
-        log = f"Ep {epoch} | Loss: {loss:.3f} | Val Avg: {avg_val_mae:.3f} | {dt:.1f}s"
-        # Print first few property MAEs
-        prop_log = " ".join([f"{p[:3]}:{val_metrics.get(f'{p}_MAE', 0):.2f}" for p in PROPERTIES[:3]])
-        print(f"{log} | {prop_log}...")
+        log = f"Ep {epoch} | Loss: {loss:.3f} | {dt:.1f}s"
+        # Print ALL property MAEs with better abbreviations
+        prop_log = ""
+        for p in PROPERTIES:
+            short = p.split('_')[0][:4]
+            if "energy" in p: short = "En"
+            elif "gap" in p: short = "Gap"
+            elif "bulk" in p: short = "Bulk"
+            elif "shear" in p: short = "Shr"
+            
+            val = val_metrics.get(f'{p}_MAE', 0)
+            prop_log += f"{short}:{val:.3f} "
+            
+        print(f"{log} | {prop_log}")
         
         # Save History
         history["train_loss"].append(loss)

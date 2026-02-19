@@ -429,7 +429,23 @@ def main():
         scheduler.step(avg_val_mae)
         
         # Print
-        print(f"Epoch {epoch:3d} | Loss: {loss:.4f} | Val Avg MAE: {avg_val_mae:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
+        # Custom Format for cleaner log
+        log_str = f"Epoch {epoch:3d} | Loss: {loss:.4f} | "
+        for prop in PROPERTIES:
+            key = f"{prop}_MAE"
+            if key in val_metrics:
+                # Abbreviate property names
+                short_name = prop.split('_')[0][:4] 
+                if "energy" in prop: short_name = "En"
+                elif "gap" in prop: short_name = "Gap"
+                elif "bulk" in prop: short_name = "Bulk"
+                elif "shear" in prop: short_name = "Shr"
+                
+                log_str += f"{short_name}: {val_metrics[key]:.3f} | "
+        
+        # Add LR
+        log_str += f"LR: {optimizer.param_groups[0]['lr']:.2e}"
+        print(log_str)
         
         # Save History
         history["train_loss"].append(loss)
