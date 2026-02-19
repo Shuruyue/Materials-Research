@@ -208,7 +208,7 @@ def main():
     parser.add_argument("--no-filter", action="store_true", help="Disable outlier filter")
     parser.add_argument("--all-properties", action="store_true", help="Train on ALL 9 properties (Discovery Mode)")
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=12) # Reduced for Pro size and VRAM safety
+    parser.add_argument("--batch-size", type=int, default=8) # Lowered to 8 for RTX 3060 VRAM Stability
     parser.add_argument("--lr", type=float, default=0.0005)
     args = parser.parse_args()
 
