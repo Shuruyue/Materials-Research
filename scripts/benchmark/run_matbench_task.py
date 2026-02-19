@@ -15,69 +15,16 @@ import sys
 import torch
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from pathlib import Path
 
 # Add project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from atlas.config import get_config
 from atlas.benchmark.runner import MatbenchRunner
-from atlas.models.equivariant import EquivariantGNN
-from atlas.models.multi_task import MultiTaskGNN
-from atlas.training.normalizers import MultiTargetNormalizer
+from atlas.models.utils import load_phase2_model, load_phase1_model
 
-def load_phase2_model(model_path, device):
-    """Load a Phase 2 Multi-Task Model."""
-    print(f"Loading model from {model_path}")
-    
-    # Load checkpoint
-    ckpt = torch.load(model_path, map_location=device)
-    
-    # Reconstruct Model Architecture (Hardcoded for now based on Pro tier)
-    # Ideally should load config from checkpoint
-    
-    # Try to infer architecture from state dict or use default Pro
-    encoder = EquivariantGNN(
-        irreps_hidden="128x0e + 64x1o + 32x2e",
-        max_ell=2,
-        n_layers=4,
-        max_radius=5.0,
-        n_species=86,
-        n_radial_basis=32,
-        radial_hidden=256,
-        output_dim=1
-    )
-    
-    # Initialize multi-task wrapper
-    # We need to know which tasks this model was trained on
-    # Inspect classifier/head keys in state_dict
-    tasks = {}
-    for key in ckpt["model_state_dict"]:
-        if key.startswith("heads."):
-            task_name = key.split(".")[1]
-            if task_name not in tasks:
-                tasks[task_name] = {"type": "scalar"}
-                
-    model = MultiTaskGNN(
-        encoder=encoder,
-        tasks=tasks,
-        embed_dim=encoder.scalar_dim
-    ).to(device)
-    
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    
-    # Load Normalizer if available
-    normalizer = None
-    if "normalizer" in ckpt:
-        # Reconstruct normalizer
-        # This is tricky without data, but MultiTargetNormalizer stores stats in state_dict
-        # We need to instantiate a dummy one
-        dummy_data = [] # Not needed if loading state dict
-        normalizer = MultiTargetNormalizer(dummy_data, list(tasks.keys()))
-        normalizer.load_state_dict(ckpt["normalizer"])
-        
-    return model, normalizer
+from atlas.models.utils import load_phase2_model, load_phase1_model
 
 def fine_tune_fold(model, task, fold, property_name, device, epochs=50, lr=1e-4):
     """Fine-tune the model on the fold's training set."""
@@ -168,11 +115,17 @@ def main():
     print(f"Running {args.task} on {device}")
     
     # 1. Load Model
+    model = None
+    normalizer = None
     try:
         model, normalizer = load_phase2_model(args.model, device)
     except Exception as e:
-        print(f"Failed to load model: {e}")
-        return
+        print(f"Standard load failed: {e}")
+        try:
+            model, normalizer = load_phase1_model(args.model, device)
+        except Exception as e2:
+             print(f"Legacy load failed: {e2}")
+             return
 
     # 2. Map Task to ATLAS Property
     # MatbenchRunner.TASKS maps matbench_name -> atlas_property_name
@@ -186,7 +139,17 @@ def main():
     atlas_property = runner.TASKS[args.task]
     runner.property_name = atlas_property
     print(f"Targeting property: {atlas_property}")
-
+    
+    # Check if model has this task, if not, add it (for fine-tuning)
+    if hasattr(model, "task_names") and atlas_property not in model.task_names:
+        print(f"⚠️ Task '{atlas_property}' not found in model. Adding new initialized Head.")
+        if hasattr(model, "add_task"):
+            # Most Matbench tasks are scalars. 
+            # If tensor, we'd need to know type, but for now default scalar.
+            model.add_task(atlas_property, task_type="scalar")
+            model.to(device) # Ensure new parameters are on device
+            print(f"  Head added. Model now supports: {model.task_names}")
+    
     # 3. Load Matbench Data
     try:
         from matbench.bench import MatbenchBenchmark

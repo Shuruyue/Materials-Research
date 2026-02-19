@@ -43,7 +43,11 @@ jupyter = [
 ]
 benchmark = [
     "matbench>=0.6",
+    "matminer>=0.9",
 ]
+
+[project.scripts]
+benchmark = "scripts.benchmark.run_matbench_task:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

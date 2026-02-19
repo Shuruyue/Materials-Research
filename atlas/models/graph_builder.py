@@ -141,8 +141,16 @@ class CrystalGraphBuilder:
         n_atoms = len(structure)
 
         # Node features
+        def get_symbol(site):
+            if hasattr(site, "specie"):
+                return str(site.specie)
+            else:
+                # Handle disordered structures (e.g. alloys)
+                # Take majority element
+                return site.species.most_common(1)[0][0].symbol
+
         node_feats = np.array(
-            [self.element_features(str(site.specie)) for site in structure],
+            [self.element_features(get_symbol(site)) for site in structure],
             dtype=np.float32,
         )
 

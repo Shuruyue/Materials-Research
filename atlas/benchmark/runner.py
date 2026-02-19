@@ -23,6 +23,7 @@ class MatbenchRunner:
         "matbench_dielectric": "dielectric",
         "matbench_phonons": "phonons",
         "matbench_jdft2d": "exfoliation_energy",
+        "matbench_steels": "yield strength",
     }
     
     def __init__(self, model, property_name, device="auto"):
@@ -56,7 +57,7 @@ class MatbenchRunner:
         """Convert pymatgen structure to PyG Data."""
         try:
             # Convert to PyG graph using shared builder
-            data = self.graph_builder.build_graph(structure)
+            data = self.graph_builder.structure_to_pyg(structure)
             
             # Add dummy target for compatibility
             if target is not None:
