@@ -35,9 +35,13 @@ def main():
     }
     s = pd.Series(data, name="Formation Energy (eV/atom)")
     
+    # Ensure output directory exists
+    output_dir = Path("scripts/phase6_analysis/outputs")
+    output_dir.mkdir(exist_ok=True, parents=True)
+
     fig_ptable = ptable_heatmap_plotly(s)
     # Save as HTML for interactivity
-    output_ptable = Path("scripts/phase6_analysis/ptable_heatmap.html")
+    output_ptable = output_dir / "ptable_heatmap.html"
     try:
         fig_ptable.write_html(str(output_ptable))
         print(f"  [SAVED] {output_ptable}")
@@ -51,7 +55,7 @@ def main():
     spg_nums = np.random.randint(1, 231, size=200)
     
     fig_sunburst = spacegroup_sunburst(spg_nums)
-    output_sunburst = Path("scripts/phase6_analysis/spacegroup_sunburst.html")
+    output_sunburst = output_dir / "spacegroup_sunburst.html"
     try:
         fig_sunburst.write_html(str(output_sunburst))
         print(f"  [SAVED] {output_sunburst}")
