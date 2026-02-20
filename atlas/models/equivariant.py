@@ -212,13 +212,12 @@ class InteractionBlock(nn.Module):
         else:
             self.gate = None
 
-        # Tensor product: node ⊗ edge → message
-        self.tp = o3.FullyConnectedTensorProduct(
+        # Tensor product: node ⊗ edge → message (Fused for VRAM optimization)
+        from .fast_tp import FusedTensorProductScatter
+        self.tp = FusedTensorProductScatter(
             self.irreps_in,
             self.irreps_sh,
             self.irreps_tp_out,
-            internal_weights=False,
-            shared_weights=False,
         )
 
         # Radial MLP: produces weights for tensor product
@@ -262,14 +261,17 @@ class InteractionBlock(nn.Module):
         tp_weights = self.radial_mlp(edge_basis)  # (E, weight_numel)
 
         # Tensor product: source_node ⊗ edge_sh, weighted by radial
-        messages = self.tp(node_features[src], edge_sh, tp_weights)  # (E, irreps_tp_out_dim)
-
-        # Aggregate messages per target node
-        agg = torch.zeros(
-            node_features.size(0), messages.size(-1),
-            device=messages.device, dtype=messages.dtype,
+        # Using the unified FusedTensorProductScatter (NequIP style)
+        messages = self.tp(
+            x=node_features,
+            edge_attr=edge_sh,
+            edge_weight=tp_weights,
+            edge_src=src,
+            edge_dst=dst,
+            num_nodes=node_features.size(0)
         )
-        agg.index_add_(0, dst, messages)
+
+        agg = messages
 
         # Gated activation (SiLU for scalars, sigmoid·value for L>0)
         if self.gate is not None:

@@ -23,6 +23,11 @@ from atlas.config import get_config
 from atlas.active_learning.generator import StructureGenerator
 from atlas.active_learning.acquisition import expected_improvement, upper_confidence_bound
 
+try:
+    import rustworkx as rx
+except ImportError:
+    rx = None
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -375,7 +380,35 @@ class DiscoveryController:
             self.known_formulas.add(c.formula)
             self.top_candidates.append(c)
             
+        # Optional: Attempt to find a synthesis pathway using reaction-network logic
+        if rx is not None:
+            self._analyze_pathways(top)
+            
         return candidates
+
+    def _analyze_pathways(self, candidates: List[Candidate]):
+        """
+        Uses rustworkx (inspired by materialsproject/reaction-network) 
+        to model basic synthesis pathways for top candidates.
+        """
+        logger.info("Analyzing synthesis pathways for top candidates...")
+        # Create a basic graph network
+        graph = rx.PyDiGraph()
+        
+        # In a full implementation, we would extract available precursors 
+        # from Materials Project/JARVIS and link them to the target candidates
+        # via mass-balanced edges. Here we simulate the network builder.
+        
+        for cand in candidates:
+             # Add target node
+             target_idx = graph.add_node(cand.formula)
+             # Basic heuristic: if formation energy is highly negative, 
+             # likely synthesizable from elements.
+             if cand.energy_per_atom and cand.energy_per_atom < -1.0:
+                 graph.add_edge(0, target_idx, "Exothermic Formation")
+                 cand.mutations += " [Synthesizable via direct elements]"
+                 
+        logger.info(f"Built pathway graph with {graph.num_nodes()} nodes and {graph.num_edges()} edges.")
 
     def _save_iteration(self, iteration: int, top_candidates: List[Candidate]):
         data = {

@@ -61,3 +61,8 @@ new/
 verify_*.py
 test_structure.cif
 scripts/phase6_analysis/outputs/*.html
+
+# Reference Repositories
+references/
+!references/task.md
+!references/miner_results.json

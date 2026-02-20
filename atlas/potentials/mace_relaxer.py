@@ -123,8 +123,9 @@ class MACERelaxer:
             dict with: relaxed_structure, energy_per_atom, converged, n_steps
         """
         from atlas.utils.structure import pymatgen_to_ase, ase_to_pymatgen
-        from ase.optimize import BFGS, FIRE, LBFGS
-        from ase.constraints import ExpCellFilter, UnitCellFilter
+        from ase.optimize import BFGS, FIRE, LBFGS, BFGSLineSearch, LBFGSLineSearch
+        from ase.constraints import ExpCellFilter, UnitCellFilter, FixSymmetry
+        from ase.spacegroup import get_spacegroup
         
         # Helper for Frechet filter (more stable)
         try:
@@ -142,7 +143,15 @@ class MACERelaxer:
         
         # Setup relaxation
         try:
-            # Choose filter
+            # 1. Symmetry Constraint (inspired by MLIP-Arena)
+            if structure.get_space_group_info()[1] > 1:
+                try:
+                    atoms.set_constraint(FixSymmetry(atoms))
+                    logger.debug("Applied FixSymmetry constraint.")
+                except Exception as sym_e:
+                    logger.debug(f"Could not apply FixSymmetry: {sym_e}")
+
+            # 2. Choose filter
             if cell_filter == "frechet" and HAS_FRECHET:
                 ecf = FrechetCellFilter(atoms)
             elif cell_filter == "exp" or (cell_filter == "frechet" and not HAS_FRECHET):
@@ -153,9 +162,18 @@ class MACERelaxer:
                  # Fixed cell
                 ecf = atoms
 
-            # Choose optimizer (BFGS is robust, FIRE is safer for bad starts)
-            # Using BFGS as default
-            opt = BFGS(ecf, trajectory=trajectory_file, logfile=None)
+            # 3. Choose optimizer (MLIP-Arena robust choice mapping)
+            optimizers = {
+                "bfgs": BFGS,
+                "fire": FIRE,
+                "lbfgs": LBFGS,
+                "bfgs_ls": BFGSLineSearch,
+                "lbfgs_ls": LBFGSLineSearch
+            }
+            # Defaulting to BFGSLineSearch as recommended by MLIP-Arena for general robust optimization
+            opt_class = optimizers.get("bfgs_ls", BFGSLineSearch)
+            
+            opt = opt_class(ecf, trajectory=trajectory_file, logfile=None)
             
             # Run
             converged = opt.run(fmax=fmax, steps=steps)

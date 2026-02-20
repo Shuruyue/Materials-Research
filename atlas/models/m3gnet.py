@@ -31,20 +31,26 @@ class ThreeBodyInteraction(nn.Module):
     """
     Computes 3-body interactions using bond angles.
     """
-    def __init__(self, embed_dim: int, n_basis: int = 20):
+    def __init__(self, embed_dim: int, n_basis: int = 20, use_sh: bool = True):
         super().__init__()
         self.embed_dim = embed_dim
         self.n_basis = n_basis
+        self.use_sh = use_sh
         
-        # Basis for angles (Cosine expansion)
-        # Expansion of cos(theta) in 0..pi
-        # Actually simpler to just use RBF on clamped cos theta, or Chebyshev polynomials
-        # Here we use a simple MLP on cos(theta) expanded via RBF for consistency
-        self.angle_expansion = nn.Sequential(
-            nn.Linear(1, n_basis), 
-            nn.SiLU(),
-            nn.Linear(n_basis, n_basis)
-        )
+        # Basis for angles 
+        from .matgl_three_body import SimpleMLPAngleExpansion, SphericalBesselHarmonicsExpansion
+        if use_sh:
+            # MatGL style (Spherical Harmonics + Bessel Expansion)
+            # max_n * max_l must equal n_basis
+            max_n = 4
+            max_l = n_basis // max_n
+            n_basis = max_n * max_l # adjust if division wasn't perfect
+            self.angle_expansion = SphericalBesselHarmonicsExpansion(max_n=max_n, max_l=max_l)
+        else:
+            # Simple Original MLP style
+            self.angle_expansion = SimpleMLPAngleExpansion(n_basis)
+        
+        self.n_basis = n_basis # Update n_basis in case it changed
         
         # Mixing weights
         self.phi_3b = nn.Sequential(
@@ -97,8 +103,11 @@ class ThreeBodyInteraction(nn.Module):
         cos_theta = (vec_ij * vec_ik).sum(dim=1, keepdim=True) / (length_ij * length_ik)
         cos_theta = cos_theta.clamp(-1, 1)
         
-        # Expand angle
-        angle_feats = self.angle_expansion(cos_theta) # (T, n_basis)
+        # Expand angle (using either SH or MLP)
+        if self.use_sh:
+            angle_feats = self.angle_expansion(length_ij, length_ik, cos_theta) # (T, max_n * max_l)
+        else:
+            angle_feats = self.angle_expansion(length_ij, length_ik, cos_theta) # (T, n_basis)
         
         # Combine with edge features
         # We use edge features at the previous step (e_ij, e_ik)

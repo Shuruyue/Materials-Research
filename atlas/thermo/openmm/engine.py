@@ -5,6 +5,8 @@ import numpy as np
 from typing import Optional, List, Dict, Any
 import ase
 from ase import Atoms
+from atlas.utils.structure import ase_to_pymatgen
+from atlas.thermo.openmm.reporters import PymatgenTrajectoryReporter
 
 class OpenMMEngine:
     """
@@ -131,35 +133,37 @@ class OpenMMEngine:
             force.addParticle(0.0, 3.4 * unit.angstrom, 0.2 * unit.kilocalories_per_mole)
         self.system.addForce(force)
 
-    def run(self, steps: int) -> List[ase.Atoms]:
+    def run(self, steps: int, trajectory_interval: int = 100) -> Any:
         """
-        Run simulation for N steps.
+        Run simulation for N steps and return a Pymatgen Trajectory.
         
+        Args:
+            steps (int): Number of steps to simulate.
+            trajectory_interval (int): How often to record a frame.
         Returns:
-            trajectory (List[ase.Atoms]): List of snapshots (currently just final state).
+            trajectory (pymatgen.core.trajectory.Trajectory): Recorded MD trajectory.
         """
         if not self.simulation:
             raise RuntimeError("Simulation not initialized. Call setup_system first.")
             
         print(f"Running OpenMM simulation for {steps} steps...")
         
-        # Reporters can be added here
-        # For now, just run
+        # Attach Atomate2-style Reporter
+        pmg_struct = ase_to_pymatgen(self.atoms)
+        pmg_reporter = PymatgenTrajectoryReporter(
+            reportInterval=trajectory_interval,
+            structure=pmg_struct
+        )
+        self.simulation.reporters.append(pmg_reporter)
+        
+        # Run
         self.simulation.step(steps)
         
-        # Get state
-        state = self.simulation.context.getState(getPositions=True, getEnergy=True)
-        pos = state.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
-        
-        # OpenMM native energy unit is kJ/mol
+        # Get final state summary
+        state = self.simulation.context.getState(getEnergy=True)
         pe_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
-        # 1 eV = 96.4853 kJ/mol
         pot_energy_ev = pe_kj / 96.4853
+        print(f"Simulation Done. Final Potential Energy: {pot_energy_ev:.4f} eV")
         
-        print(f"Simulation Done. Potential Energy: {pot_energy_ev:.4f} eV")
-        
-        # Return final structure
-        final_atoms = self.atoms.copy()
-        final_atoms.set_positions(pos)
-        
-        return [final_atoms]
+        # Return elegant PyMatgen Trajectory
+        return pmg_reporter.get_trajectory()
