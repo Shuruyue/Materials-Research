@@ -93,12 +93,22 @@ class TrainConfig:
     
 
 @dataclass
+class ProfileConfig:
+    """Algorithm profiles to dynamically select registered components."""
+    # Definer which model/relaxer to use from Registry
+    model_name: str = "mace_default" 
+    relaxer_name: str = "ase_bfgs"
+    screener_name: str = "crabnet_default"
+    evaluator_name: str = "rustworkx_pathfinder"
+
+@dataclass
 class Config:
     """Master configuration."""
     paths: PathConfig = field(default_factory=PathConfig)
     dft: DFTConfig = field(default_factory=DFTConfig)
     mace: MACEConfig = field(default_factory=MACEConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
 
     def __post_init__(self):
         self.paths.ensure_dirs()
@@ -130,12 +140,11 @@ class Config:
             "=" * 60,
             f"Project root : {self.paths.project_root}",
             f"Data dir     : {self.paths.data_dir}",
-            f"Models dir   : {self.paths.models_dir}",
             f"Device       : {self.device}",
-            f"Data source  : JARVIS-DFT (no API key required)",
-            f"MACE cutoff  : {self.mace.r_max} Å",
-            f"MACE epochs  : {self.mace.max_epochs}",
-            f"DFT ENCUT    : {self.dft.encut} eV",
+            f"Model Profile: {self.profile.model_name}",
+            f"Relaxer      : {self.profile.relaxer_name}",
+            f"Screener     : {self.profile.screener_name}",
+            f"Evaluator    : {self.profile.evaluator_name}",
             "=" * 60,
         ]
         return "\n".join(lines)

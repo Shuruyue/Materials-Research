@@ -49,6 +49,9 @@ class FractionalEncoder(nn.Module):
         return self.pe[frac_idx]
 
 
+from atlas.utils.registry import MODELS
+
+@MODELS.register("crabnet_screener")
 class CompositionScreener(nn.Module):
     """
     CrabNet-inspired composition screening model. 

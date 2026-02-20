@@ -19,10 +19,12 @@ from typing import Optional, Dict, Any, Union
 from pathlib import Path
 
 from atlas.config import get_config
+from atlas.utils.registry import RELAXERS
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
+@RELAXERS.register("mlip_arena_mace")
 class MACERelaxer:
     """
     Fast structure relaxation using MACE potentials.

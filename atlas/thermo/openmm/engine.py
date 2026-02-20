@@ -7,7 +7,9 @@ import ase
 from ase import Atoms
 from atlas.utils.structure import ase_to_pymatgen
 from atlas.thermo.openmm.reporters import PymatgenTrajectoryReporter
+from atlas.utils.registry import RELAXERS
 
+@RELAXERS.register("atomate2_openmm")
 class OpenMMEngine:
     """
     Wrapper for OpenMM to perform molecular dynamics simulations.

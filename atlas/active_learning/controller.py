@@ -14,6 +14,7 @@ import json
 import time
 import shutil
 import logging
+import gc
 import torch
 from pathlib import Path
 from typing import Optional, List, Dict, Set
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field, asdict
 from atlas.config import get_config
 from atlas.active_learning.generator import StructureGenerator
 from atlas.active_learning.acquisition import expected_improvement, upper_confidence_bound
+from atlas.utils.registry import ModelFactory, RelaxerFactory, EvaluatorFactory
 
 try:
     import rustworkx as rx
@@ -99,6 +101,35 @@ class DiscoveryController:
         self.classifier = classifier_model
         self.graph_builder = graph_builder
         
+        
+        self.cfg = get_config()
+        self.profile = self.cfg.profile
+
+        logger.info(f"Initializing DiscoveryController with profile: {self.profile}")
+
+        # Config-driven Dynamic Loading (Factory Pattern)
+        if self.relaxer is None and hasattr(self.profile, "relaxer_name"):
+            try:
+                self.relaxer = RelaxerFactory.create(self.profile.relaxer_name)
+                logger.info(f"Dynamically loaded relaxer: {self.profile.relaxer_name}")
+            except Exception as e:
+                logger.warning(f"Could not load auto-relaxer {self.profile.relaxer_name}: {e}")
+
+        if self.classifier is None and hasattr(self.profile, "model_name"):
+             try:
+                 self.classifier = ModelFactory.create(self.profile.model_name)
+                 logger.info(f"Dynamically loaded classifier model: {self.profile.model_name}")
+             except Exception as e:
+                 logger.warning(f"Could not load auto-classifier {self.profile.model_name}: {e}")
+                 
+        self.synthesizability_evaluator = None
+        if hasattr(self.profile, "evaluator_name"):
+            try:
+                self.synthesizability_evaluator = EvaluatorFactory.create(self.profile.evaluator_name)
+                logger.info(f"Dynamically loaded synthesizability evaluator: {self.profile.evaluator_name}")
+            except Exception as e:
+                logger.info("No synthesis evaluator attached.")
+                
         # Hyperparams
         self.weights = {
             "topo": w_topo,
@@ -337,7 +368,12 @@ class DiscoveryController:
             except Exception as e:
                 logger.warning(f"Classification failed for {c.formula}: {e}")
                 c.topo_probability = 0.0
-        
+
+        # Optimization 2 & 3: Force aggressive memory cleanup after batch
+        if "cuda" in str(device):
+            torch.cuda.empty_cache()
+        gc.collect()
+
         return candidates
 
     def _score_and_select(self, candidates: List[Candidate], n_top: int) -> List[Candidate]:
@@ -402,9 +438,12 @@ class DiscoveryController:
         for cand in candidates:
              # Add target node
              target_idx = graph.add_node(cand.formula)
-             # Basic heuristic: if formation energy is highly negative, 
-             # likely synthesizable from elements.
-             if cand.energy_per_atom and cand.energy_per_atom < -1.0:
+             
+             if self.synthesizability_evaluator:
+                 eval_result = self.synthesizability_evaluator.evaluate(cand.formula, cand.energy_per_atom)
+                 if eval_result["synthesizable"]:
+                     cand.mutations += " " + eval_result["pathway"][0]
+             elif cand.energy_per_atom and cand.energy_per_atom < -1.0:
                  graph.add_edge(0, target_idx, "Exothermic Formation")
                  cand.mutations += " [Synthesizable via direct elements]"
                  
