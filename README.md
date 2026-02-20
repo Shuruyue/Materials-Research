@@ -119,6 +119,7 @@ scripts/                            # Executable pipeline scripts
 ├── phase4_topology/                # Topological classifier
 ├── phase5_active_learning/         # Discovery loop & search
 ├── phase6_analysis/                # Alloy properties & phase diagrams
+├── phase8_integration/             # Recisic integration (Alchemy, MEPIN, LiFlow)
 └── dev_tools/                      # Environment checks & monitoring
 
 tests/                              # Unit tests
@@ -142,6 +143,24 @@ models/                             # Trained models (gitignored)
 - PyTorch ≥ 2.1 with CUDA
 - GPU: NVIDIA RTX 4060 or better (for training)
 - No API key required — JARVIS-DFT data is freely downloadable
+
+## Phase 8: Advanced Discovery (Recisic Integration)
+ATLAS now integrates state-of-the-art tools from the Recisic suite:
+- **Alchemy**: Continuous composition optimization using Alchemical-MLIP.
+- **MEPIN**: Reaction pathway and stability prediction.
+- **LiFlow**: Ion transport property prediction.
+
+```bash
+# Run the full discovery pipeline (Grand Loop)
+python scripts/phase8_integration/run_discovery_pipeline.py
+```
+
+## Developer Tools (`scripts/dev_tools/`)
+Utility scripts for inspection and verification:
+- `inspect_mace_model.py`: Inspect internal weights of MACE models.
+- `inspect_liflow_model.py`: Verify LiFlow checkpoint loading.
+- `verify_mepin_setup.py`: specific check for MEPIN imports.
+- `check_env.py`: Validate python environment dependencies.
 
 ## References
 
