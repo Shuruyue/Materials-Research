@@ -45,8 +45,8 @@ LITE_PRESET = {
 
 def main():
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     🟢 E3NN LITE (Debug Mode)                                  ║")
-    print("║     Fast Validation / Smoke Test                               ║")
+    print(f"║ {'E3NN LITE (Debug Mode)'.center(64)} ║")
+    print(f"║ {'Fast Validation / Smoke Test'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
 
     config = get_config()
@@ -127,7 +127,7 @@ def main():
                 
         print(f"    Epoch {epoch}: Loss = {total_loss:.4f}")
 
-    print("\n[4/4] ✅ Lite Test Passed! The pipeline is functional.")
+    print("\n[4/4] [OK] Lite Test Passed! The pipeline is functional.")
     print("      You can now proceed to 'Std' or 'Pro' tiers.")
 
 if __name__ == "__main__":

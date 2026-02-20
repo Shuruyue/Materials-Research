@@ -21,6 +21,12 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
+# Workaround for WeightsUnpickler error with slice
+try:
+    torch.serialization.add_safe_globals([slice])
+except AttributeError:
+    pass # Old torch version checking
+
 from atlas.config import get_config
 from atlas.models.graph_builder import CrystalGraphBuilder
 
@@ -118,7 +124,8 @@ class CrystalPropertyDataset:
         self._df = None
         
         # Parallel workers: leave 1 core free
-        self.n_workers = max(1, multiprocessing.cpu_count() - 1)
+        # self.n_workers = max(1, multiprocessing.cpu_count() - 1)
+        self.n_workers = 1 # Force sequential on Windows to avoid spawn errors
 
     def prepare(self, force_reload: bool = False) -> "CrystalPropertyDataset":
         """
@@ -190,21 +197,28 @@ class CrystalPropertyDataset:
         
         print(f"  Building {self.split} graphs with {self.n_workers} workers...")
         
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            # Submit all tasks
-            futures = [
-                executor.submit(_worker_process_row, row, self.properties, rev_map)
-                for row in rows
-            ]
-            
-            # Progress bar
-            for future in tqdm(as_completed(futures), total=len(futures), desc="  Converting"):
-                try:
-                    data = future.result()
-                    if data is not None:
-                        data_list.append(data)
-                except Exception:
-                    pass
+        if self.n_workers > 1:
+            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+                # Submit all tasks
+                futures = [
+                    executor.submit(_worker_process_row, row, self.properties, rev_map)
+                    for row in rows
+                ]
+                
+                # Progress bar
+                for future in tqdm(as_completed(futures), total=len(futures), desc="  Converting"):
+                    try:
+                        data = future.result()
+                        if data is not None:
+                            data_list.append(data)
+                    except Exception:
+                        pass
+        else:
+            # Sequential fallback
+            for row in tqdm(rows, desc="  Converting (Sequential)"):
+                data = _worker_process_row(row, self.properties, rev_map)
+                if data is not None:
+                    data_list.append(data)
 
         print(f"  Successfully built {len(data_list)} graphs")
 

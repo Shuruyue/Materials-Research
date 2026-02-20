@@ -424,7 +424,7 @@ def main():
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     Phase 6: Active Learning & Multi-Objective Screening       ║")
+    print(f"║ {'Phase 6: Active Learning & Multi-Objective Screening'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
 
     config = get_config()

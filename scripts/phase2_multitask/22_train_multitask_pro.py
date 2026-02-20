@@ -216,17 +216,17 @@ def main():
     global PROPERTIES
     if args.all_properties:
         PROPERTIES = ALL_PROPERTIES
-        print("🌍 DISCOVERY MODE: Training on ALL 9 properties!")
+        print("[INFO] DISCOVERY MODE: Training on ALL 9 properties!")
     else:
         PROPERTIES = CORE_PROPERTIES
-        print("🔹 STANDARD MODE: Training on core 4 properties.")
+        print("[INFO] STANDARD MODE: Training on core 4 properties.")
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     🔴 E3NN PRO (Production Mode)                              ║")
-    print(f"║     Tasks: {len(PROPERTIES)} Properties                                      ║")
+    print(f"║ {'E3NN PRO (Production Mode)'.center(64)} ║")
+    print(f"║ {f'Tasks: {len(PROPERTIES)} Properties'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     
     # ── Output Directory ──
@@ -243,14 +243,14 @@ def main():
         runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
         if runs:
             save_dir = runs[-1]
-            print(f"  🟡 Resuming in existing run folder: {save_dir.name}")
+            print(f"  [INFO] Resuming in existing run folder: {save_dir.name}")
         else:
             save_dir = base_dir / f"run_{timestamp}"
             save_dir.mkdir()
     else:
         save_dir = base_dir / f"run_{timestamp}"
         save_dir.mkdir()
-        print(f"  🔵 Starting new experiment run: {save_dir.name}")
+        print(f"  [INFO] Starting new experiment run: {save_dir.name}")
 
     # 1. Data
     print("\n[1/5] Loading Dataset...")
@@ -266,7 +266,7 @@ def main():
         train_data = filter_outliers(datasets["train"], PROPERTIES, save_dir, n_sigma=4.0)
         val_data = filter_outliers(datasets["val"], PROPERTIES, save_dir, n_sigma=4.0)
     else:
-        print("\n[2/5] ⚠️ Outlier Filter DISABLED (--no-filter). Discovery Mode ON.")
+        print("\n[2/5] [WARN] Outlier Filter DISABLED (--no-filter). Discovery Mode ON.")
         train_data = datasets["train"]
         val_data = datasets["val"]
     
@@ -305,7 +305,12 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
+    # Scheduler: CosineAnnealingLR (better convergence for fixed epochs)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.lr * 0.01,
+    )
     
     start_epoch = 1
     best_val_mae = float('inf')
@@ -314,14 +319,14 @@ def main():
     # Resume
     checkpoint_path = save_dir / "checkpoint.pt"
     if args.resume and checkpoint_path.exists():
-        print(f"    🔄 Resuming from {checkpoint_path}...")
-        ckpt = torch.load(checkpoint_path)
+        print(f"    [INFO] Resuming from {checkpoint_path}...")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         loss_fn.load_state_dict(ckpt["loss_fn_state_dict"]) 
         # Note: Scheduler state might be tricky if params changed, but we try
         try: scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        except Exception: print("    ⚠️ Scheduler state mismatch, restarting scheduler")
+        except Exception: print("    [WARN] Scheduler state mismatch, restarting scheduler")
         
         start_epoch = ckpt["epoch"] + 1
         best_val_mae = ckpt["best_val_mae"]
@@ -340,7 +345,9 @@ def main():
         val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
         avg_val_mae = sum(val_maes) / len(val_maes) if val_maes else float('inf')
         
-        scheduler.step(avg_val_mae)
+        # Scheduler step (CosineAnnealingLR steps per epoch, not on metric)
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
         
         # Logging
         dt = time.time() - t0
@@ -381,7 +388,7 @@ def main():
         # Save Best
         if avg_val_mae < best_val_mae:
             best_val_mae = avg_val_mae
-            print(f"    ⭐ New Best! ({best_val_mae:.4f})")
+            print(f"    * New Best! ({best_val_mae:.4f})")
             manager.save_best(state, best_val_mae, epoch)
             
         # Save Checkpoint (Rotating last-k)

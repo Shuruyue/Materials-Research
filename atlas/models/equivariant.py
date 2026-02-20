@@ -21,6 +21,44 @@ import math
 import torch
 import torch.nn as nn
 from typing import Optional, Dict
+import torch.nn.functional as F
+
+class AtomRef(nn.Module):
+    """
+    Atomic Reference Energy.
+    
+    Learnable per-species offset that is added to the final prediction.
+    Helps the model capture systematic species-dependent energy shifts.
+    """
+    def __init__(self, n_species: int = 86, output_dim: int = 1):
+        super().__init__()
+        self.output_dim = output_dim
+        # Initialize with zeros, let the model learn the offsets
+        self.ref = nn.Embedding(n_species, output_dim)
+        nn.init.zeros_(self.ref.weight)
+
+    def forward(self, node_feats: torch.Tensor, batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            node_feats: (N, node_dim) — species index extracted from first column
+            batch: (N,) or None
+        Returns:
+            (B, output_dim) summed atomic reference energy per graph
+        """
+        # Extract species index (assuming it's the argmax of the first 86 features)
+        # This matches EquivariantGNN.encode logic
+        species_idx = node_feats[:, :86].argmax(dim=-1)  # (N,)
+        
+        # Get per-atom reference values
+        atom_refs = self.ref(species_idx) # (N, output_dim)
+        
+        # Sum per graph
+        if batch is None:
+            batch = torch.zeros(atom_refs.size(0), dtype=torch.long, device=atom_refs.device)
+            
+        from torch_geometric.nn import global_add_pool
+        return global_add_pool(atom_refs, batch) # (B, output_dim)
+
 
 
 # ─────────────────────────────────────────────────────────
@@ -309,6 +347,10 @@ class EquivariantGNN(nn.Module):
         scalar_mul = sum(mul for mul, ir in irreps_hidden if ir.l == 0)
         self._embed_dim = embed_dim or scalar_mul
 
+        # ── AtomRef (Learnable Atomic Reference) ──
+        # Adds a baseline energy based on composition
+        self.atom_ref = AtomRef(n_species=n_species, output_dim=output_dim)
+
         # ── Species embedding ──
         # Maps atomic number to scalar features that seed the irreps
         self.species_embed = nn.Embedding(n_species, self._embed_dim)
@@ -431,4 +473,9 @@ class EquivariantGNN(nn.Module):
             (B, output_dim) predicted property values
         """
         graph_emb = self.encode(node_feats, edge_index, edge_vectors, batch)
-        return self.output_head(graph_emb)
+        interaction_energy = self.output_head(graph_emb) # (B, output_dim)
+        
+        # Add atomic reference energy
+        atomic_energy = self.atom_ref(node_feats, batch) # (B, output_dim)
+        
+        return interaction_energy + atomic_energy

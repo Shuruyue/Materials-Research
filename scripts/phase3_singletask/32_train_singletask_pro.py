@@ -285,17 +285,17 @@ def train_single_property(args, property_name: str):
 
     # Load Transfer Learning Weights
     if args.finetune_from:
-        print(f"  ⬇️ Loading pre-trained weights from {args.finetune_from}")
+        print(f"  [INFO] Loading pre-trained weights from {args.finetune_from}")
         checkpoint = torch.load(args.finetune_from, map_location=device)
         pretrained_dict = checkpoint['model_state_dict']
         encoder_dict = model.state_dict()
         filtered_dict = {k.replace('encoder.', ''): v for k, v in pretrained_dict.items() if k.startswith('encoder.')}
         encoder_dict.update(filtered_dict)
         model.load_state_dict(encoder_dict)
-        print("  ✅ Encoder weights loaded successfully")
+        print("  [OK] Encoder weights loaded successfully")
         
         if args.freeze_encoder:
-            print("  🔒 Freezing encoder weights")
+            print("  [INFO] Freezing encoder weights")
             for param in model.species_embed.parameters(): param.requires_grad = False
             for param in model.interactions.parameters(): param.requires_grad = False
             for param in model.input_proj.parameters(): param.requires_grad = False
@@ -398,14 +398,14 @@ def train_single_property(args, property_name: str):
                   f"ema: {ema_val_mae:.4f} | {dt_ep:.1f}s")
 
         if patience_counter >= args.patience:
-            print(f"\n  ⏹ Early stopping at epoch {epoch}")
+            print(f"\n  [STOP] Early stopping at epoch {epoch}")
             break
 
     # Save SWA
     if args.use_swa:
         torch.save(swa_model.state_dict(), save_dir / "swa_final.pt")
 
-    print(f"\n✅ Training Complete.")
+    print(f"\n[DONE] Training Complete.")
     return save_dir
 
 
@@ -433,7 +433,8 @@ def main():
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     PHASE 3: SPECIALIST PRO TRAINING (Fine-Tuning/SWA)         ║")
+    print(f"║ {'PHASE 3: SPECIALIST PRO TRAINING'.center(64)} ║")
+    print(f"║ {'Fine-Tuning / SWA'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
 
     if args.all_properties:

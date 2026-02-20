@@ -261,7 +261,7 @@ class TopoGNN(nn.Module):
     @classmethod
     def load_model(cls, path: Union[str, Path], device: str = "cpu") -> "TopoGNN":
         """Load model from file."""
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         config = checkpoint.get('config', {})
         
         # Instantiate with saved config

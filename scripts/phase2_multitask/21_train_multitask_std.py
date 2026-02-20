@@ -173,8 +173,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     🟡 E3NN STD (Dev Mode)                                     ║")
-    print("║     Balanced Performance / Resume Capability                   ║")
+    print(f"║ {'E3NN STD (Dev Mode)'.center(64)} ║")
+    print(f"║ {'Balanced Performance / Resume Capability'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     
     # ── Output Directory ──
@@ -191,14 +191,14 @@ def main():
         runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
         if runs:
             save_dir = runs[-1]
-            print(f"  🟡 Resuming in existing run folder: {save_dir.name}")
+            print(f"  [INFO] Resuming in existing run folder: {save_dir.name}")
         else:
             save_dir = base_dir / f"run_{timestamp}"
             save_dir.mkdir()
     else:
         save_dir = base_dir / f"run_{timestamp}"
         save_dir.mkdir()
-        print(f"  🔵 Starting new experiment run: {save_dir.name}")
+        print(f"  [INFO] Starting new experiment run: {save_dir.name}")
 
     # 1. Data
     print("\n[1/5] Loading Dataset...")
@@ -248,7 +248,12 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    # Scheduler: CosineAnnealingLR (better convergence for fixed epochs)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.lr * 0.01,
+    )
     
     start_epoch = 1
     best_val_mae = float('inf')
@@ -257,8 +262,8 @@ def main():
     # ── RESUME LOGIC ──
     checkpoint_path = save_dir / "checkpoint.pt"
     if args.resume and checkpoint_path.exists():
-        print(f"    🔄 Resuming from {checkpoint_path}...")
-        ckpt = torch.load(checkpoint_path)
+        print(f"    [INFO] Resuming from {checkpoint_path}...")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -282,7 +287,9 @@ def main():
         val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
         avg_val_mae = sum(val_maes) / len(val_maes) if val_maes else float('inf')
         
-        scheduler.step(avg_val_mae)
+        # Scheduler step (CosineAnnealingLR steps per epoch, not on metric)
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
         
         # Print
         # Custom Format for cleaner log
@@ -321,7 +328,7 @@ def main():
 
         if avg_val_mae < best_val_mae:
             best_val_mae = avg_val_mae
-            print(f"    ⭐ New Best! ({best_val_mae:.4f})")
+            print(f"    * New Best! ({best_val_mae:.4f})")
             manager.save_best(state, best_val_mae, epoch)
             
         manager.save_checkpoint(state, epoch)

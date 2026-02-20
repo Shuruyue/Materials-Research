@@ -102,7 +102,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
         outlier_df = pd.DataFrame(outlier_data)
         outlier_file = save_dir / "outliers.csv"
         outlier_df.to_csv(outlier_file, index=False)
-        print(f"    ⚠️ Saved {n_removed} outliers to {outlier_file} for review")
+        print(f"    [WARN] Saved {n_removed} outliers to {outlier_file} for review")
 
         from torch.utils.data import Subset
         indices = np.where(mask)[0].tolist()
@@ -239,12 +239,17 @@ def train_single_property(args, property_name: str):
         print("    Applying strict outlier filter (4.0 sigma)...")
         # Pass save_dir to save outliers.csv
         train_data = filter_outliers(datasets["train"], property_name, save_dir, n_sigma=4.0)
+  # Filter extreme outliers from all splits (Strict 4.0 sigma)
+    if not args.no_filter:
+        print("    Applying strict outlier filter (4.0 sigma)...")
+        # Pass save_dir to save outliers.csv
+        train_data = filter_outliers(datasets["train"], property_name, save_dir, n_sigma=4.0)
         # Validation/Test should represent reality, but for stability we filter extreme physics errors
         # In production discovery, we might want to keep them.
         val_data = filter_outliers(datasets["val"], property_name, save_dir, n_sigma=4.0)
         test_data = filter_outliers(datasets["test"], property_name, save_dir, n_sigma=4.0)
     else:
-        print("    ⚠️ Outlier filter DISABLED (--no-filter active)")
+        print("    [WARN] Outlier filter DISABLED (--no-filter active)")
         print("    Training on raw data including extreme values.")
         train_data = datasets["train"]
         val_data = datasets["val"]
@@ -312,7 +317,7 @@ def train_single_property(args, property_name: str):
     # Resume logic
     checkpoint_path = save_dir / "checkpoint.pt"
     if args.resume and checkpoint_path.exists():
-        print(f"  🟡 Resuming from checkpoint: {checkpoint_path}")
+        print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -326,7 +331,7 @@ def train_single_property(args, property_name: str):
         history = checkpoint.get("history", history)
         best_val_mae = checkpoint.get("best_val_mae", float("inf"))
         patience_counter = checkpoint.get("patience_counter", 0)
-        print(f"  ➜ Resuming at epoch {start_epoch}")
+        print(f"  -> Resuming at epoch {start_epoch}")
 
     t_train = time.time()
 
@@ -427,7 +432,7 @@ def train_single_property(args, property_name: str):
     print(f"  │  Test MAE: {test_mae:.4f} {unit:<26s}│")
     print(f"  │  Target: {benchmark['target_mae']:.4f} {unit:<27s}│")
     passed = test_mae <= benchmark["target_mae"]
-    status = "✅ PASS" if passed else "❌ FAIL"
+    status = "[PASS]" if passed else "[FAIL]"
     print(f"  │  Result: {status:<32s}│")
     print(f"  │  Best epoch: {best_epoch:<27d}│")
     print(f"  └─────────────────────────────────────────┘")
@@ -497,8 +502,8 @@ def main():
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║        🟡 CGCNN STANDARD (Dev Mode)                              ║")
-    print("║        Balanced for Development & Tuning                         ║")
+    print(f"║ {'CGCNN STANDARD (Dev Mode)'.center(64)} ║")
+    print(f"║ {'Balanced for Development & Tuning'.center(64)} ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
 
     train_single_property(args, args.property)
