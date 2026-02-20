@@ -61,3 +61,4 @@ new/
 verify_*.py
 test_structure.cif
 references/
+scripts/phase6_analysis/outputs/*.html
