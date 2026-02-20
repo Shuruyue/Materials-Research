@@ -70,6 +70,13 @@ python scripts/phase6_analysis/08_alloy_properties.py
 python scripts/phase6_analysis/09_phase_diagram.py
 ```
 
+## Pre-trained Models
+
+To keep the GitHub repository lightweight, trained model checkpoints (like MACE or CGCNN weights) are hosted externally on a cloud drive.
+
+1. Download the `models.zip` file from this link: **[Insert Your Google Drive/OneDrive Link Here]**
+2. Extract the contents directly into the `models/` directory at the root of this project.
+
 ## Project Structure
 
 ```
