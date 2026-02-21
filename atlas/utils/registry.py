@@ -70,3 +70,8 @@ class FeatureExtractorFactory:
     @staticmethod
     def create(name: str, **kwargs) -> Any:
         return FEATURE_EXTRACTORS.build(name, **kwargs)
+
+class EvaluatorFactory:
+    @staticmethod
+    def create(name: str, **kwargs) -> Any:
+        return EVALUATORS.build(name, **kwargs)

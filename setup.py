@@ -24,6 +24,7 @@ setup(
         "e3nn>=0.5.0",
         "botorch>=0.9.0",
         "gpytorch>=1.11.0",
+        "rustworkx>=0.13.0",
     ],
     extras_require={
         "mace": [
@@ -37,6 +38,10 @@ setup(
         "jupyter": [
             "jupyter>=1.0",
             "ipywidgets>=8.0",
+        ],
+        "benchmark": [
+            "matbench>=0.6",
+            "matminer>=0.9",
         ],
     },
 )

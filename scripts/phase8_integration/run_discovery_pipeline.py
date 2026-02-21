@@ -83,9 +83,9 @@ def grand_loop():
         print("Running Gradient Descent on Composition...")
         
         for i in range(5):
-            loss = optimizer.step()
-            energy_history.append(loss)
-            print(f"  Step {i+1}: Energy = {loss:.4f} eV")
+            energy, weights = optimizer.step()
+            energy_history.append(energy)
+            print(f"  Step {i+1}: Energy = {energy:.4f} eV")
             
         # Get Final Weights
         final_weights = calc.alchemy_manager.alchemical_weights.detach().cpu().numpy()

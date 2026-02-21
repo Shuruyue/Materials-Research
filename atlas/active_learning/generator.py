@@ -17,6 +17,7 @@ import logging
 from typing import Optional, List, Dict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+import os
 import traceback
 
 from pymatgen.core import Structure, Lattice, Element
@@ -73,9 +74,14 @@ class StructureGenerator:
         self.seeds = seed_structures or []
         self.rng_seed = rng_seed
         self.rng = np.random.RandomState(rng_seed)
+        self.generated: list[dict] = []
         
         # Parallel setup
-        self.n_workers = max(1, multiprocessing.cpu_count() - 2) # Leave 2 cores free
+        # Windows multiprocessing with pymatgen objects is brittle; keep it safe by default.
+        if os.name == "nt":
+            self.n_workers = 1
+        else:
+            self.n_workers = max(1, multiprocessing.cpu_count() - 2) # Leave 2 cores free
 
     def add_seeds(self, structures: list[Structure]):
         """Add seed structures for mutation."""
@@ -113,8 +119,7 @@ class StructureGenerator:
         Generate a batch of candidate structures in parallel.
         """
         if not self.seeds:
-            logger.warning("No seeds provided. Returning empty batch.")
-            return []
+            raise ValueError("No seed structures provided.")
 
         methods = methods or ["substitute", "strain"]
         candidates = []
@@ -127,20 +132,28 @@ class StructureGenerator:
             # Submit substitution tasks
             if "substitute" in methods:
                 for _ in range(per_method):
-                    seed = self.rng.choice(self.seeds)
+                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
                     futures.append(executor.submit(_worker_substitute, seed, self.rng.randint(1e9)))
             
             # Submit strain tasks
             if "strain" in methods:
                 for _ in range(per_method):
-                    seed = self.rng.choice(self.seeds)
+                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
                     futures.append(executor.submit(_worker_strain, seed, 0.03, self.rng.randint(1e9)))
+
+            # Optional mix strategy (fallback to substitute-style mutation for now)
+            if "mix" in methods:
+                for _ in range(per_method):
+                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
+                    futures.append(executor.submit(_worker_substitute, seed, self.rng.randint(1e9)))
             
             # Collect results
             for future in as_completed(futures):
                 try:
                     cand = future.result()
                     if cand and self._validate_structure(cand["structure"]):
+                        if "mix" in methods and cand["method"] == "substitute":
+                            cand = {**cand, "method": "mix"}
                         candidates.append(cand)
                 except Exception as e:
                     pass
@@ -148,7 +161,14 @@ class StructureGenerator:
         # Sort by heuristic score and trim
         # Prefer higher heuristic scores for initial screening
         candidates.sort(key=lambda x: x.get("topo_score", 0), reverse=True)
-        return candidates[:n_candidates]
+        trimmed = candidates[:n_candidates]
+        self.generated.extend(trimmed)
+        return trimmed
+
+    def get_top_candidates(self, n: int = 10) -> list[dict]:
+        """Return top generated candidates ranked by heuristic topological score."""
+        ranked = sorted(self.generated, key=lambda x: x.get("topo_score", 0), reverse=True)
+        return ranked[:n]
 
 
 # ── Worker Functions ──

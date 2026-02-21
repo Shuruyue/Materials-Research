@@ -9,6 +9,10 @@ from atlas.utils.structure import (
     get_element_info,
     compute_structural_features,
 )
+from atlas.utils.reproducibility import (
+    collect_runtime_metadata,
+    set_global_seed,
+)
 
 __all__ = [
     "pymatgen_to_ase",
@@ -16,4 +20,6 @@ __all__ = [
     "structure_from_dict",
     "get_element_info",
     "compute_structural_features",
+    "collect_runtime_metadata",
+    "set_global_seed",
 ]

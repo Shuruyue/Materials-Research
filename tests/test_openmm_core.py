@@ -1,6 +1,10 @@
-from atlas.thermo.openmm.engine import OpenMMEngine
+import pytest
 from ase.build import bulk
-import numpy as np
+
+pytest.importorskip("openmm")
+from atlas.thermo.openmm.engine import OpenMMEngine
+
+pytestmark = pytest.mark.integration
 
 def test_openmm_core():
     print("Testing OpenMM Core Engine...")
@@ -25,6 +29,3 @@ def test_openmm_core():
     final_pos = traj[-1].get_positions()
     assert final_pos.shape == atoms.get_positions().shape
     print("Test Passed: Simulation completed and shapes match.")
-
-if __name__ == "__main__":
-    test_openmm_core()

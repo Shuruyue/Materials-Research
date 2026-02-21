@@ -20,11 +20,28 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # Linux/Mac
 
-# Install dependencies
+# Install core dependencies
 pip install -r requirements.txt
 
-# Install ATLAS in development mode (using pyproject.toml)
+# Install ATLAS in development mode
 pip install -e .
+
+# Optional profiles
+# pip install -r requirements-dev.txt         # test + jupyter
+# pip install -r requirements-benchmark.txt   # matbench + matminer
+# pip install -r requirements-full.txt        # all optional extras
+
+# Validate environment
+python scripts/dev_tools/check_env.py
+```
+
+Run tests:
+```bash
+# Default: fast/unit suite (integration tests excluded)
+pytest
+
+# Integration suite (optional dependencies required)
+pytest -m integration
 ```
 
 ### 2. Phase 1 — Baseline Training

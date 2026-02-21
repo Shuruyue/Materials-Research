@@ -34,6 +34,13 @@ class MACERelaxer:
     2. The pre-trained MACE-MP-0 foundation model (zero-shot, covers all elements)
     """
 
+    def __init__(
+        self,
+        model_path: Optional[Union[str, Path]] = None,
+        device: str = "auto",
+        use_foundation: bool = True,
+        model_size: str = "large",
+        default_dtype: str = "float32",
     ):
         """
         Args:
@@ -127,7 +134,6 @@ class MACERelaxer:
         from atlas.utils.structure import pymatgen_to_ase, ase_to_pymatgen
         from ase.optimize import BFGS, FIRE, LBFGS, BFGSLineSearch, LBFGSLineSearch
         from ase.constraints import ExpCellFilter, UnitCellFilter, FixSymmetry
-        from ase.spacegroup import get_spacegroup
         
         # Helper for Frechet filter (more stable)
         try:

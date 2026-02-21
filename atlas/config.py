@@ -10,10 +10,8 @@ Optimization:
 """
 
 import os
-import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +86,7 @@ class TrainConfig:
     """General training parameters for Phase 1/Phase 2 models."""
     device: str = "auto"
     seed: int = 42
+    deterministic: bool = True
     num_workers: int = 4
     pin_memory: bool = True
     
@@ -96,10 +95,13 @@ class TrainConfig:
 class ProfileConfig:
     """Algorithm profiles to dynamically select registered components."""
     # Definer which model/relaxer to use from Registry
-    model_name: str = "mace_default" 
+    model_name: str = "mace_default"
     relaxer_name: str = "ase_bfgs"
     screener_name: str = "crabnet_default"
     evaluator_name: str = "rustworkx_pathfinder"
+    data_source_key: str = "jarvis_dft"
+    method_key: str = "workflow_reproducible_graph"
+    fallback_methods: tuple[str, str] = ("gp_active_learning", "descriptor_microstructure")
 
 @dataclass
 class Config:
@@ -133,14 +135,30 @@ class Config:
             return torch.device("cpu")
         return torch.device(requested)
 
+    @staticmethod
+    def source_label(source_key: str) -> str:
+        labels = {
+            "jarvis_dft": "JARVIS-DFT",
+            "materials_project": "Materials Project",
+            "matbench": "Matbench",
+            "oqmd": "OQMD",
+        }
+        return labels.get(source_key, source_key)
+
     def summary(self) -> str:
+        fallback_str = ", ".join(self.profile.fallback_methods)
         lines = [
             "=" * 60,
             "ATLAS Configuration",
             "=" * 60,
             f"Project root : {self.paths.project_root}",
             f"Data dir     : {self.paths.data_dir}",
+            f"Data Source  : {self.source_label(self.profile.data_source_key)}",
             f"Device       : {self.device}",
+            f"Seed         : {self.train.seed}",
+            f"Deterministic: {self.train.deterministic}",
+            f"Method       : {self.profile.method_key}",
+            f"Fallbacks    : {fallback_str}",
             f"Model Profile: {self.profile.model_name}",
             f"Relaxer      : {self.profile.relaxer_name}",
             f"Screener     : {self.profile.screener_name}",

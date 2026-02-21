@@ -1,6 +1,10 @@
-from atlas.thermo.openmm.engine import OpenMMEngine
+import pytest
 from ase.build import bulk
-import numpy as np
+
+pytest.importorskip("openmm")
+from atlas.thermo.openmm.engine import OpenMMEngine
+
+pytestmark = pytest.mark.integration
 
 def test_openmm_mace():
     print("Testing OpenMM with MACE Potential...")
@@ -30,7 +34,5 @@ def test_openmm_mace():
     
     # 5. Check results
     final_pos = traj[-1].get_positions()
+    assert final_pos.shape == atoms.get_positions().shape
     print("MACE MD Simulation completed.")
-
-if __name__ == "__main__":
-    test_openmm_mace()

@@ -12,17 +12,18 @@ Optimization:
 
 import json
 import time
-import shutil
 import logging
 import gc
 import torch
-from pathlib import Path
-from typing import Optional, List, Dict, Set
-from dataclasses import dataclass, field, asdict
+from typing import Optional, List, Set
+from dataclasses import dataclass, asdict
 
 from atlas.config import get_config
 from atlas.active_learning.generator import StructureGenerator
-from atlas.active_learning.acquisition import expected_improvement, upper_confidence_bound
+from atlas.active_learning.acquisition import expected_improvement
+from atlas.active_learning.gp_surrogate import GPSurrogateAcquirer
+from atlas.research.workflow_reproducible_graph import WorkflowReproducibleGraph, IterationSnapshot
+from atlas.utils.reproducibility import set_global_seed
 from atlas.utils.registry import ModelFactory, RelaxerFactory, EvaluatorFactory
 
 try:
@@ -127,7 +128,7 @@ class DiscoveryController:
             try:
                 self.synthesizability_evaluator = EvaluatorFactory.create(self.profile.evaluator_name)
                 logger.info(f"Dynamically loaded synthesizability evaluator: {self.profile.evaluator_name}")
-            except Exception as e:
+            except Exception:
                 logger.info("No synthesis evaluator attached.")
                 
         # Hyperparams
@@ -137,10 +138,16 @@ class DiscoveryController:
             "heuristic": w_heuristic,
             "novelty": w_novelty,
         }
+        self.method_key = getattr(self.profile, "method_key", "graph_equivariant")
+        self.fallback_methods = tuple(getattr(self.profile, "fallback_methods", ()))
+        self.use_gp_active = self.method_key == "gp_active_learning"
 
-        self.cfg = get_config()
         self.results_dir = self.cfg.paths.data_dir / "discovery_results"
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.workflow = None
+        if self.method_key in {"workflow_reproducible_graph", "gp_active_learning"}:
+            self.workflow = WorkflowReproducibleGraph(self.results_dir / "workflow_runs")
+        self.gp_acquirer = GPSurrogateAcquirer() if self.use_gp_active else None
 
         # State
         self.iteration = 0
@@ -169,7 +176,9 @@ class DiscoveryController:
                     self.iteration = max(self.iteration, iter_num)
                     
                     for cand_dict in data.get("candidates", []):
-                        self.known_formulas.add(cand_dict.get("formula"))
+                        formula = cand_dict.get("formula")
+                        if formula:
+                            self.known_formulas.add(formula)
                         # We don't load full objects to RAM to save space, 
                         # just formulas for novelty check.
                         
@@ -205,7 +214,23 @@ class DiscoveryController:
         """
         start_iter = self.iteration + 1
         end_iter = self.iteration + n_iterations
-        
+        status = "completed"
+        seed_meta = set_global_seed(
+            self.cfg.train.seed,
+            deterministic=self.cfg.train.deterministic,
+        )
+
+        if self.workflow is not None:
+            self.workflow.start(
+                extra_metrics={
+                    "requested_iterations": n_iterations,
+                    "candidates_per_iteration": n_candidates_per_iter,
+                    "select_top": n_select_top,
+                    "resume_from_iteration": self.iteration,
+                    "seed_metadata": seed_meta,
+                }
+            )
+
         print("\n" + "=" * 70)
         print(f"  ATLAS Discovery Engine (Iter {start_iter} -> {end_iter})")
         print("=" * 70)
@@ -213,56 +238,105 @@ class DiscoveryController:
         for it in range(start_iter, end_iter + 1):
             self.iteration = it
             t0 = time.time()
-            
+            stage_timings = {}
+
             print(f"\n{'─' * 50}")
             print(f"  Iteration {it}/{end_iter}")
             print(f"{'─' * 50}")
 
             # 1. Generate
             print(f"  [1/4] Generating {n_candidates_per_iter} candidates...")
+            t_gen = time.time()
             try:
-                # Dynamically adjust generation methods based on iteration?
-                # Early iters: exploration (random sub). Late: exploitation (strain).
                 methods = ["substitute", "strain"] if it > 3 else ["substitute"]
-                
                 raw_candidates = self.generator.generate_batch(n_candidates_per_iter, methods=methods)
             except Exception as e:
                 logger.error(f"Generation failed: {e}")
                 raw_candidates = []
+            stage_timings["generate"] = time.time() - t_gen
 
             # Filter duplicates immediately
             new_raw = [r for r in raw_candidates if r["structure"].composition.reduced_formula not in self.known_formulas]
             print(f"        Generated {len(raw_candidates)}, New Unique: {len(new_raw)}")
-            
+
             if not new_raw:
                 logger.warning("No new unique candidates. Trying fallback seeds...")
-                # Logic to inject random seeds from JARVIS could go here
+                status = "stalled_no_new_candidates"
+                if self.workflow is not None:
+                    self.workflow.record_iteration(
+                        IterationSnapshot(
+                            iteration=it,
+                            generated=len(raw_candidates),
+                            unique=0,
+                            relaxed=0,
+                            selected=0,
+                            duration_sec=time.time() - t0,
+                            stage_timings_sec=stage_timings,
+                            seed_pool_size=len(self.generator.seeds),
+                            status=status,
+                            notes="no unique candidate after dedup",
+                        )
+                    )
                 break
 
             # 2. Relax
             print(f"  [2/4] Relaxing {len(new_raw)} structures...")
+            t_relax = time.time()
             candidates = self._relax_candidates(new_raw)
+            stage_timings["relax"] = time.time() - t_relax
 
             # 3. Classify
-            print(f"  [3/4] Classifying candidates...")
+            print("  [3/4] Classifying candidates...")
+            t_classify = time.time()
             candidates = self._classify_candidates(candidates)
+            stage_timings["classify"] = time.time() - t_classify
 
             # 4. Select
+            t_select = time.time()
             candidates = self._score_and_select(candidates, n_select_top)
+            stage_timings["select"] = time.time() - t_select
 
             # Save & Feedback
-            self._save_iteration(it, candidates[:n_select_top])
-            
-            # Add top winners as seeds for next round
+            selected = candidates[:n_select_top]
+            t_save = time.time()
+            self._save_iteration(it, selected)
+            stage_timings["save"] = time.time() - t_save
+
             best_structs = [
-                c.relaxed_structure or c.structure 
-                for c in candidates[:n_select_top]
-                if c.acquisition_value > 0.25 # Threshold
+                c.relaxed_structure or c.structure
+                for c in selected
+                if c.acquisition_value > 0.25
             ]
+            t_feedback = time.time()
             self.generator.add_seeds(best_structs)
-            
+            stage_timings["seed_feedback"] = time.time() - t_feedback
+
             dt = time.time() - t0
-            self._print_iteration_summary(candidates[:n_select_top], dt)
+            self._print_iteration_summary(selected, dt)
+
+            if self.workflow is not None:
+                self.workflow.record_iteration(
+                    IterationSnapshot(
+                        iteration=it,
+                        generated=len(raw_candidates),
+                        unique=len(new_raw),
+                        relaxed=len(candidates),
+                        selected=len(selected),
+                        duration_sec=dt,
+                        stage_timings_sec=stage_timings,
+                        seed_pool_size=len(self.generator.seeds),
+                    )
+                )
+
+        if self.workflow is not None:
+            self.workflow.finalize(
+                status=status,
+                extra_metrics={
+                    "iterations_completed": self.iteration,
+                    "known_formulas": len(self.known_formulas),
+                    "top_candidates": len(self.top_candidates),
+                },
+            )
 
         return self.top_candidates
 
@@ -305,13 +379,14 @@ class DiscoveryController:
                 timestamp=time.time(),
             )
             candidates.append(cand)
-        return self._classify_candidates(candidates)
+        return candidates
 
     def _classify_candidates(self, candidates):
         """Use GNN classifier to predict topological probability for each candidate."""
         if not self.classifier or not self.graph_builder:
             # Fallback to heuristic
-            for c in candidates: c.topo_probability = c.heuristic_topo_score
+            for c in candidates:
+                c.topo_probability = c.heuristic_topo_score
             return candidates
 
         self.classifier.eval()
@@ -324,14 +399,17 @@ class DiscoveryController:
                 graph = self.graph_builder.structure_to_graph(struct)
                 
                 with torch.no_grad():
-                    node_feats = graph["node_features"].to(device)
-                    if node_feats.dim() == 2: node_feats = node_feats.unsqueeze(0)
-                        
+                    node_feats = torch.as_tensor(graph["node_features"], dtype=torch.float32, device=device)
+                    edge_index = torch.as_tensor(graph["edge_index"], dtype=torch.long, device=device)
+                    edge_features = torch.as_tensor(graph["edge_features"], dtype=torch.float32, device=device)
+                    batch_idx = torch.zeros(node_feats.size(0), dtype=torch.long, device=device)
+
                     # Predict using the model (Surrogate)
                     pred = self.classifier(
                         node_feats,
-                        graph["edge_index"].to(device),
-                        graph["edge_features"].to(device)
+                        edge_index,
+                        edge_features,
+                        batch_idx,
                     )
                     
                     # Handle Multi-Task Dictionary Output
@@ -407,19 +485,29 @@ class DiscoveryController:
                     self.weights["heuristic"] * c.heuristic_topo_score +
                     self.weights["novelty"] * c.novelty_score
                 )
-        
+
+        if self.gp_acquirer is not None:
+            gp_ucb = self.gp_acquirer.suggest_ucb(candidates)
+            if gp_ucb is not None:
+                blend = self.gp_acquirer.config.blend_ratio
+                for c, gp_score in zip(candidates, gp_ucb):
+                    c.acquisition_value = (1.0 - blend) * c.acquisition_value + blend * float(gp_score)
+
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
-        
+
         # Register winners
         top = candidates[:n_top]
         for c in top:
             self.known_formulas.add(c.formula)
             self.top_candidates.append(c)
-            
+
+        if self.gp_acquirer is not None:
+            self.gp_acquirer.update(candidates)
+
         # Optional: Attempt to find a synthesis pathway using reaction-network logic
         if rx is not None:
             self._analyze_pathways(top)
-            
+
         return candidates
 
     def _analyze_pathways(self, candidates: List[Candidate]):
@@ -459,6 +547,30 @@ class DiscoveryController:
         fpath = self.results_dir / f"iteration_{iteration:03d}.json"
         with open(fpath, "w") as f:
             json.dump(data, f, indent=2, default=str)
+
+    def save_final_report(self, filename: str = "final_report.json"):
+        """
+        Persist a final summary after discovery loop completes.
+        """
+        unique_formulas = sorted({c.formula for c in self.top_candidates})
+        top_ranked = sorted(self.top_candidates, key=lambda c: c.acquisition_value, reverse=True)
+        payload = {
+            "timestamp": time.time(),
+            "iterations_completed": self.iteration,
+            "n_top_candidates": len(self.top_candidates),
+            "n_unique_formulas": len(unique_formulas),
+            "unique_formulas": unique_formulas,
+            "top_candidates": [c.to_dict() for c in top_ranked[:50]],
+            "weights": self.weights,
+            "method_key": self.method_key,
+            "fallback_methods": list(self.fallback_methods),
+        }
+        if self.gp_acquirer is not None:
+            payload["gp_history_size"] = self.gp_acquirer.history_size
+        fpath = self.results_dir / filename
+        with open(fpath, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        logger.info(f"Final discovery report saved to {fpath}")
 
     def _print_iteration_summary(self, top: List[Candidate], dt: float):
         print(f"\n  Top candidates ({dt:.1f}s):")

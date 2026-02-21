@@ -1,6 +1,5 @@
 """Tests for atlas.config module."""
 
-import pytest
 from pathlib import Path
 
 
@@ -36,6 +35,9 @@ def test_config_summary():
     assert isinstance(s, str)
     assert "ATLAS" in s
     assert "JARVIS" in s
+    assert "workflow_reproducible_graph" in s
+    assert "Seed" in s
+    assert "Deterministic" in s
 
 
 def test_dft_config_defaults():

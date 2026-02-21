@@ -1,50 +1,106 @@
-import sys
-from pathlib import Path
-# Add project root to sys.path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+"""
+ATLAS environment checker.
 
-print("--- Detailed Environment Check ---")
-try:
-    import torch
-    print(f"Torch: {torch.__version__} (CUDA: {torch.version.cuda})")
-    print(f"CUDA Available: {torch.cuda.is_available()}")
-except ImportError:
-    print("Torch MISSING")
+Usage:
+    python scripts/dev_tools/check_env.py
+"""
 
-try:
-    import torch_scatter
-    print(f"torch_scatter: {torch_scatter.__version__}")
-except ImportError:
-    print("torch_scatter MISSING")
+from __future__ import annotations
 
-try:
-    import torch_sparse
-    print(f"torch_sparse: {torch_sparse.__version__}")
-except ImportError:
-    print("torch_sparse MISSING")
+import importlib
+import importlib.metadata
+from dataclasses import dataclass
 
-try:
-    import e3nn
-    from e3nn import o3
-    print(f"e3nn: {e3nn.__version__} (o3 imported)")
-except ImportError:
-    print("e3nn MISSING or o3 failed")
 
-try:
-    import mace
-    print(f"mace: {mace.__version__}")
-except ImportError:
-    print("mace MISSING")
+@dataclass(frozen=True)
+class DependencyCheck:
+    package: str
+    import_name: str
+    required: bool
+    group: str
+    hint: str
 
-try:
-    import botorch
-    print(f"botorch: {botorch.__version__}")
-except ImportError:
-    print("botorch MISSING")
 
-try:
-    import gpytorch
-    print(f"gpytorch: {gpytorch.__version__}")
-except ImportError:
-    print("gpytorch MISSING")
+CHECKS = [
+    DependencyCheck("torch", "torch", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("torch-geometric", "torch_geometric", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("numpy", "numpy", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("pandas", "pandas", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("pymatgen", "pymatgen", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("ase", "ase", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("e3nn", "e3nn", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("jarvis-tools", "jarvis", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("rustworkx", "rustworkx", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("botorch", "botorch", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("gpytorch", "gpytorch", True, "core", "pip install -r requirements.txt"),
+    DependencyCheck("torch-scatter", "torch_scatter", False, "optional", "install wheel matching torch/pyg"),
+    DependencyCheck("torch-sparse", "torch_sparse", False, "optional", "install wheel matching torch/pyg"),
+    DependencyCheck("mace-torch", "mace", False, "mace", "pip install -e .[mace]"),
+    DependencyCheck("matbench", "matbench", False, "benchmark", "pip install -e .[benchmark]"),
+    DependencyCheck("matminer", "matminer", False, "benchmark", "pip install -e .[benchmark]"),
+]
+
+
+def _module_version(package_name: str) -> str:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def run_checks() -> int:
+    print("=" * 72)
+    print("ATLAS Environment Check")
+    print("=" * 72)
+
+    missing_required = []
+    missing_optional = []
+
+    for check in CHECKS:
+        try:
+            importlib.import_module(check.import_name)
+            version = _module_version(check.package)
+            print(f"[OK]    {check.package:<18} version={version} ({check.group})")
+        except Exception as exc:
+            msg = f"[MISSING] {check.package:<18} ({check.group}) -> {check.hint}"
+            if check.required:
+                missing_required.append((check.package, str(exc)))
+                print(msg)
+            else:
+                missing_optional.append((check.package, str(exc)))
+                print(msg)
+
+    # CUDA / device info
+    try:
+        import torch
+
+        print("-" * 72)
+        print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
+        print(f"PyTorch CUDA version  : {torch.version.cuda}")
+        print(f"GPU count             : {torch.cuda.device_count()}")
+        if torch.cuda.is_available():
+            print(f"GPU[0] name           : {torch.cuda.get_device_name(0)}")
+    except Exception as exc:
+        print(f"CUDA inspection skipped: {exc}")
+
+    print("-" * 72)
+    if missing_required:
+        print("Required dependencies missing:")
+        for pkg, err in missing_required:
+            print(f"  - {pkg}: {err}")
+        print("Suggested command: pip install -r requirements.txt && pip install -e .")
+        return 1
+
+    if missing_optional:
+        print("Optional dependencies missing (allowed):")
+        for pkg, err in missing_optional:
+            print(f"  - {pkg}: {err}")
+        print("Install optional profiles only if needed for your phase.")
+    else:
+        print("All required and optional dependencies detected.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_checks())

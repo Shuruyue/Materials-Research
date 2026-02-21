@@ -1,6 +1,4 @@
-import numpy as np
 import openmm.unit as unit
-from openmm.app import StateDataReporter
 from pymatgen.core import Structure
 from pymatgen.core.trajectory import Trajectory
 

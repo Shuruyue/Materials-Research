@@ -1,10 +1,8 @@
 import openmm
 import openmm.app as app
 import openmm.unit as unit
-import numpy as np
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 import ase
-from ase import Atoms
 from atlas.utils.structure import ase_to_pymatgen
 from atlas.thermo.openmm.reporters import PymatgenTrajectoryReporter
 from atlas.utils.registry import RELAXERS

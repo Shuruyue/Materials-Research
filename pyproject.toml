@@ -48,7 +48,7 @@ benchmark = [
 ]
 
 [project.scripts]
-benchmark = "scripts.benchmark.run_matbench_task:main"
+benchmark = "atlas.benchmark.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -57,10 +57,13 @@ exclude = ["scripts*", "tests*"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q"
+addopts = "-ra -q -m \"not integration\""
 testpaths = [
     "tests",
 ]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "integration: tests requiring optional heavy dependencies or long runtime",
+]

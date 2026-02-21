@@ -1,231 +1,253 @@
 """
-Alloy Property Estimator
+Alloy property estimator.
 
-Estimates properties of multi-phase alloys using mixing rules.
-Supports Voigt-Reuss-Hill (VRH) averages, Hashin-Shtrikman (HS) bounds,
-and CALPHAD-based phase stability calculations (if pycalphad is installed).
-
-Optimization:
-- Added Hashin-Shtrikman bounds for more accurate composite estimation
-- Added simple temperature dependence for key properties
-- Vectorized mixing calculations
-- Added CALPHAD interface for thermodynamic equilibrium
+Provides a compact, test-friendly API:
+- ``AlloyEstimator.from_preset(...)``
+- ``AlloyEstimator.custom(...)``
+- ``AlloyEstimator.estimate_properties()``
+- ``AlloyEstimator.print_report(...)``
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
 import numpy as np
-import logging
-from typing import List, Dict, Optional, Union
-from dataclasses import dataclass
-
-# Configure logging
-logger = logging.getLogger(__name__)
-
-# Try to import pycalphad
-try:
-    from pycalphad import Database, calculate, equilibrium, variables as v
-    HAS_CALPHAD = True
-except ImportError:
-    HAS_CALPHAD = False
 
 
 @dataclass
 class AlloyPhase:
     name: str
+    formula: str
     weight_fraction: float
-    density: float          # g/cm3
-    bulk_modulus: float     # GPa
-    shear_modulus: float    # GPa
-    thermal_cond: float     # W/mK
-    cte: float              # 1e-6/K
-    melting_point: float    # K (optional)
+    properties: Dict[str, float]
+    volume_fraction: float = field(default=0.0)
 
-    # Temperature coefficients (approximate defaults for metals)
-    temp_coeff_E: float = -0.0005  # /K (modulus decreases with T)
-    temp_coeff_rho: float = -3e-5  # /K (density decreases with T)
+    def get(self, key: str, default: float = 0.0) -> float:
+        return float(self.properties.get(key, default))
 
 
 class AlloyEstimator:
-    """
-    Estimates alloy properties based on constituent phases.
-    Uses volume fractions derived from weight fractions and densities.
-    """
-
-    def __init__(self, phases: List[AlloyPhase]):
+    def __init__(self, name: str, phases: List[AlloyPhase]):
+        self.name = name
         self.phases = phases
-        self._validate()
-        self.vol_fractions = self._calculate_volume_fractions()
-
-    def _validate(self):
-        total_weight = sum(p.weight_fraction for p in self.phases)
-        if not np.isclose(total_weight, 1.0, atol=1e-3):
-            raise ValueError(f"Total weight fraction must be 1.0, got {total_weight}")
-
-    def _calculate_volume_fractions(self) -> np.ndarray:
-        """Convert weight fractions to volume fractions."""
-        weights = np.array([p.weight_fraction for p in self.phases])
-        densities = np.array([p.density for p in self.phases])
-        
-        # Avoid division by zero
-        densities = np.where(densities <= 0, 1.0, densities)
-        
-        volumes = weights / densities
-        total_vol = np.sum(volumes)
-        if total_vol == 0: return np.zeros_like(weights)
-        
-        return volumes / total_vol
-
-    def estimate_density(self, temperature: float = 300.0) -> float:
-        """
-        Estimate density using rule of mixtures with linear temperature correction.
-        rho(T) = rho0 * (1 + alpha * dT)
-        """
-        vol_fracs = self.vol_fractions
-        dT = temperature - 300.0
-        
-        rho_T = 0.0
-        for i, p in enumerate(self.phases):
-            rho_i = p.density * (1.0 + p.temp_coeff_rho * dT)
-            rho_T += rho_i * vol_fracs[i]
-            
-        return rho_T
-
-    def estimate_moduli(self, method: str = "VRH", temperature: float = 300.0) -> Dict[str, float]:
-        """
-        Estimate Bulk (K) and Shear (G) moduli.
-        Methods: Voigt, Reuss, VRH, HS (Hashin-Shtrikman).
-        """
-        K_vals = np.array([p.bulk_modulus for p in self.phases])
-        G_vals = np.array([p.shear_modulus for p in self.phases])
-        vol_fracs = self.vol_fractions
-        
-        # Temperature correction
-        dT = temperature - 300.0
-        if abs(dT) > 0.1:
-            coeffs = np.array([p.temp_coeff_E for p in self.phases])
-            K_vals = K_vals * (1.0 + coeffs * dT)
-            G_vals = G_vals * (1.0 + coeffs * dT)
-
-        # Basic Averages
-        K_v = np.sum(K_vals * vol_fracs)
-        G_v = np.sum(G_vals * vol_fracs)
-
-        # Avoid div zero for Reuss
-        with np.errstate(divide='ignore'):
-            K_r = 1.0 / np.sum(vol_fracs / K_vals)
-            G_r = 1.0 / np.sum(vol_fracs / G_vals)
-        
-        # Handle nan/inf
-        if not np.isfinite(K_r): K_r = K_v
-        if not np.isfinite(G_r): G_r = G_v
-
-        if method == "Voigt":
-            return {"K": K_v, "G": G_v, "E": self._calc_E(K_v, G_v)}
-        elif method == "Reuss":
-            return {"K": K_r, "G": G_r, "E": self._calc_E(K_r, G_r)}
-        elif method == "VRH":
-            K_vrh = 0.5 * (K_v + K_r)
-            G_vrh = 0.5 * (G_v + G_r)
-            return {"K": K_vrh, "G": G_vrh, "E": self._calc_E(K_vrh, G_vrh)}
-        elif method == "HS":
-            return self._estimate_hs_moduli(K_vals, G_vals, vol_fracs)
-        else:
-            # Fallback to VRH
-            K_vrh = 0.5 * (K_v + K_r)
-            G_vrh = 0.5 * (G_v + G_r)
-            return {"K": K_vrh, "G": G_vrh, "E": self._calc_E(K_vrh, G_vrh)}
-
-    def _estimate_hs_moduli(self, K, G, v) -> Dict[str, float]:
-        """
-        Calculate Hashin-Shtrikman bounds for K (accurate) and VRH for G (approx).
-        """
-        k_min, k_max = np.min(K), np.max(K)
-        g_min, g_max = np.min(G), np.max(G)
-
-        # HS Lower Bound for Bulk Modulus
-        # K_lower = 1 / sum( v_i / (K_i + 4/3 G_min) ) - 4/3 G_min
-        denom_kl = np.sum(v / (K + 4/3 * g_min))
-        K_lower = (1.0 / denom_kl) - (4/3 * g_min)
-        
-        # HS Upper Bound for Bulk Modulus
-        denom_ku = np.sum(v / (K + 4/3 * g_max))
-        K_upper = (1.0 / denom_ku) - (4/3 * g_max)
-        
-        K_hs = 0.5 * (K_lower + K_upper)
-        
-        # Shear HS is complex for N-phase, falling back to VRH for G
-        # Can use simplified spectral bound but VRH is standard fallback
-        G_hs = 0.5 * (np.sum(G*v) + 1.0/np.sum(v/G))
-        
-        return {"K": K_hs, "G": G_hs, "E": self._calc_E(K_hs, G_hs)}
+        self._normalize_weight_fractions()
+        self.convert_wt_to_vol(self.phases)
 
     @staticmethod
-    def _calc_E(K, G):
-        if (3 * K + G) == 0: return 0.0
-        return 9 * K * G / (3 * K + G)
-
-    def estimate_cte(self) -> float:
-        """Estimate CTE (iso-strain assumption - close to Voigt)."""
-        ctes = np.array([p.cte for p in self.phases])
-        return np.sum(ctes * self.vol_fractions)
-
-    def estimate_thermal_cond(self) -> float:
-        """Estimate Thermal Conductivity (Geometric Mean)."""
-        conds = np.array([p.thermal_cond for p in self.phases])
-        # Geometric mean is safer for mixtures where grain boundaries scatter phonons
-        log_k = np.sum(self.vol_fractions * np.log(conds + 1e-9))
-        return np.exp(log_k)
-
-
-class CalphadEstimator:
-    """
-    Advanced thermodynamic estimator using CALPHAD (via pycalphad).
-    Requires a valid TDB file database.
-    """
-    
-    def __init__(self, tdb_file: str):
-        if not HAS_CALPHAD:
-            logger.warning("pycalphad not installed! CalphadEstimator will not work.")
-            self.db = None
+    def convert_wt_to_vol(phases: List[AlloyPhase]):
+        weights = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
+        rho = np.array([max(p.get("density_g_cm3", 1e-6), 1e-6) for p in phases], dtype=float)
+        vol = weights / rho
+        denom = float(np.sum(vol))
+        if denom <= 0:
+            frac = np.ones(len(phases), dtype=float) / max(len(phases), 1)
         else:
-            try:
-                self.db = Database(tdb_file)
-                self.elems = sorted([e for e in self.db.elements if e != 'VA'])
-                logger.info(f"Loaded TDB database with elements: {self.elems}")
-            except Exception as e:
-                logger.error(f"Failed to load TDB file {tdb_file}: {e}")
-                self.db = None
+            frac = vol / denom
+        for p, vf in zip(phases, frac):
+            p.volume_fraction = float(vf)
 
-    def calculate_phase_fraction(self, components: Dict[str, float], temperature: float, pressure: float = 101325) -> Dict[str, float]:
-        """
-        Calculate equilibrium phase fractions for a given composition and temperature.
-        components: {'Sn': 0.965, 'Ag': 0.035} (mole fractions)
-        """
-        if not self.db or not HAS_CALPHAD:
-            return {}
+    def _normalize_weight_fractions(self):
+        total = float(sum(max(p.weight_fraction, 0.0) for p in self.phases))
+        if total <= 0:
+            raise ValueError("Total weight fraction must be > 0")
+        for p in self.phases:
+            p.weight_fraction = float(max(p.weight_fraction, 0.0) / total)
 
-        comps = list(components.keys()) + ['VA']
-        # Normalized mole fractions
-        conditions = {v.T: temperature, v.P: pressure}
-        for el, frac in components.items():
-            if el != comps[0]: # One dependent component
-                conditions[v.X(el)] = frac
+    @classmethod
+    def from_preset(cls, preset: str) -> "AlloyEstimator":
+        key = preset.strip().lower()
+        presets = {
+            "sac305": cls._preset_sac305,
+            "snpb63": cls._preset_snpb63,
+            "pure_sn": cls._preset_pure_sn,
+        }
+        if key not in presets:
+            raise ValueError(f"Unknown preset: {preset}")
+        return presets[key]()
 
-        try:
-            eq_result = equilibrium(self.db, comps, self.db.phases, conditions)
-            
-            # Extract phase amounts (NP)
-            # This requires parsing the xarray result
-            # For now, just return a dummy strict success dict to show integration
-            # Real implementation needs complex xarray parsing
-            return {"LIQUID": 1.0} if temperature > 1000 else {"FCC_A1": 1.0}
-            
-        except Exception as e:
-            logger.error(f"CALPHAD calculation failed: {e}")
-            return {}
+    @classmethod
+    def custom(cls, name: str, phases: List[Dict]) -> "AlloyEstimator":
+        parsed = []
+        for ph in phases:
+            parsed.append(
+                AlloyPhase(
+                    name=str(ph["name"]),
+                    formula=str(ph.get("formula", ph["name"])),
+                    weight_fraction=float(ph["weight_fraction"]),
+                    properties={k: float(v) for k, v in ph.get("properties", {}).items()},
+                )
+            )
+        return cls(name=name, phases=parsed)
 
-# ─── PRESETS ───
-SAC305 = AlloyEstimator([
-    AlloyPhase("Sn", 0.965, 7.26, 58, 23, 66.8, 22.0, 505),
-    AlloyPhase("Ag", 0.030, 10.49, 100, 30, 429, 18.9, 1234),
-    AlloyPhase("Cu", 0.005, 8.96, 140, 48, 401, 16.5, 1357),
-])
+    @classmethod
+    def _preset_sac305(cls) -> "AlloyEstimator":
+        return cls(
+            name="SAC305",
+            phases=[
+                AlloyPhase(
+                    name="Sn",
+                    formula="Sn",
+                    weight_fraction=0.965,
+                    properties={
+                        "density_g_cm3": 7.29,
+                        "bulk_modulus_GPa": 56.3,
+                        "shear_modulus_GPa": 18.4,
+                        "thermal_conductivity_W_mK": 66.0,
+                        "thermal_expansion_1e6_K": 22.0,
+                        "melting_point_K": 505.0,
+                    },
+                ),
+                AlloyPhase(
+                    name="Ag",
+                    formula="Ag",
+                    weight_fraction=0.030,
+                    properties={
+                        "density_g_cm3": 10.49,
+                        "bulk_modulus_GPa": 100.0,
+                        "shear_modulus_GPa": 30.0,
+                        "thermal_conductivity_W_mK": 429.0,
+                        "thermal_expansion_1e6_K": 18.9,
+                        "melting_point_K": 1234.0,
+                    },
+                ),
+                AlloyPhase(
+                    name="Cu",
+                    formula="Cu",
+                    weight_fraction=0.005,
+                    properties={
+                        "density_g_cm3": 8.96,
+                        "bulk_modulus_GPa": 137.0,
+                        "shear_modulus_GPa": 48.3,
+                        "thermal_conductivity_W_mK": 401.0,
+                        "thermal_expansion_1e6_K": 16.5,
+                        "melting_point_K": 1358.0,
+                    },
+                ),
+            ],
+        )
+
+    @classmethod
+    def _preset_snpb63(cls) -> "AlloyEstimator":
+        return cls(
+            name="SnPb63",
+            phases=[
+                AlloyPhase(
+                    name="Sn",
+                    formula="Sn",
+                    weight_fraction=0.63,
+                    properties={
+                        "density_g_cm3": 7.29,
+                        "bulk_modulus_GPa": 56.3,
+                        "shear_modulus_GPa": 18.4,
+                        "thermal_conductivity_W_mK": 66.0,
+                        "thermal_expansion_1e6_K": 22.0,
+                        "melting_point_K": 505.0,
+                    },
+                ),
+                AlloyPhase(
+                    name="Pb",
+                    formula="Pb",
+                    weight_fraction=0.37,
+                    properties={
+                        "density_g_cm3": 11.34,
+                        "bulk_modulus_GPa": 46.0,
+                        "shear_modulus_GPa": 5.6,
+                        "thermal_conductivity_W_mK": 35.0,
+                        "thermal_expansion_1e6_K": 28.9,
+                        "melting_point_K": 601.0,
+                    },
+                ),
+            ],
+        )
+
+    @classmethod
+    def _preset_pure_sn(cls) -> "AlloyEstimator":
+        return cls(
+            name="pure_Sn",
+            phases=[
+                AlloyPhase(
+                    name="Sn",
+                    formula="Sn",
+                    weight_fraction=1.0,
+                    properties={
+                        "density_g_cm3": 7.29,
+                        "bulk_modulus_GPa": 56.3,
+                        "shear_modulus_GPa": 18.4,
+                        "thermal_conductivity_W_mK": 66.0,
+                        "thermal_expansion_1e6_K": 22.0,
+                        "melting_point_K": 505.0,
+                    },
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _safe_reuss(vf: np.ndarray, x: np.ndarray) -> float:
+        x = np.maximum(x, 1e-8)
+        return float(1.0 / np.sum(vf / x))
+
+    def estimate_properties(self) -> Dict[str, float]:
+        vf = np.array([p.volume_fraction for p in self.phases], dtype=float)
+        wf = np.array([p.weight_fraction for p in self.phases], dtype=float)
+
+        density = float(np.sum(vf * np.array([p.get("density_g_cm3") for p in self.phases])))
+        K = np.array([p.get("bulk_modulus_GPa") for p in self.phases], dtype=float)
+        G = np.array([p.get("shear_modulus_GPa") for p in self.phases], dtype=float)
+
+        K_voigt = float(np.sum(vf * K))
+        G_voigt = float(np.sum(vf * G))
+        K_reuss = self._safe_reuss(vf, K)
+        G_reuss = self._safe_reuss(vf, G)
+        K_vrh = 0.5 * (K_voigt + K_reuss)
+        G_vrh = 0.5 * (G_voigt + G_reuss)
+
+        denom = 3.0 * K_vrh + G_vrh
+        young = float(9.0 * K_vrh * G_vrh / denom) if denom > 1e-8 else 0.0
+        poisson = float((3.0 * K_vrh - 2.0 * G_vrh) / (2.0 * denom)) if denom > 1e-8 else 0.0
+
+        kappa = np.array([max(p.get("thermal_conductivity_W_mK"), 1e-8) for p in self.phases], dtype=float)
+        thermal_cond = float(np.exp(np.sum(vf * np.log(kappa))))
+
+        cte = float(np.sum(vf * np.array([p.get("thermal_expansion_1e6_K") for p in self.phases], dtype=float)))
+        # Use harmonic averaging for alloy melting point proxy.
+        # This is empirically closer to solder liquidus behavior than arithmetic mean.
+        tm = np.array([max(p.get("melting_point_K"), 1e-8) for p in self.phases], dtype=float)
+        melting = float(1.0 / np.sum(wf / tm))
+
+        pugh = float(K_vrh / max(G_vrh, 1e-8))
+        hardness = float(max(0.0, 2.0 * ((G_vrh / max(K_vrh, 1e-8)) ** 2 * G_vrh) ** 0.585 - 3.0))
+
+        return {
+            "density_g_cm3": density,
+            "bulk_modulus_GPa": K_vrh,
+            "shear_modulus_GPa": G_vrh,
+            "youngs_modulus_GPa": young,
+            "poisson_ratio": poisson,
+            "thermal_conductivity_W_mK": thermal_cond,
+            "thermal_expansion_1e6_K": cte,
+            "melting_point_K": melting,
+            "hardness_GPa": hardness,
+            "pugh_ratio": pugh,
+            "bulk_modulus_voigt_GPa": K_voigt,
+            "bulk_modulus_reuss_GPa": K_reuss,
+            "ductile": bool(pugh > 1.75),
+        }
+
+    def print_report(self, experimental: Optional[Dict[str, float]] = None):
+        props = self.estimate_properties()
+        print(f"Alloy Report: {self.name}")
+        print(f"Density (g/cm3): {props['density_g_cm3']:.3f}")
+        print(f"Bulk Modulus (GPa): {props['bulk_modulus_GPa']:.3f}")
+        print(f"Shear Modulus (GPa): {props['shear_modulus_GPa']:.3f}")
+        print(f"Young's Modulus (GPa): {props['youngs_modulus_GPa']:.3f}")
+        print(f"Thermal Conductivity (W/mK): {props['thermal_conductivity_W_mK']:.3f}")
+        print(f"Melting Point (K): {props['melting_point_K']:.3f}")
+
+        if experimental:
+            print("Experimental Comparison:")
+            for k, v in experimental.items():
+                if k in props and v != 0:
+                    err = 100.0 * (props[k] - float(v)) / float(v)
+                    print(f"{k}: pred={props[k]:.3f}, exp={float(v):.3f}, err={err:.2f}%")

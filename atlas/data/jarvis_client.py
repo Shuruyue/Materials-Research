@@ -11,7 +11,6 @@ Optimization:
 """
 
 import json
-import os
 import requests
 import time
 import logging
@@ -19,7 +18,6 @@ from pathlib import Path
 from typing import Optional
 from tqdm import tqdm
 
-import numpy as np
 import pandas as pd
 
 from atlas.config import get_config
@@ -202,7 +200,7 @@ class JARVISClient:
         if len(trivial) > n_trivial:
             trivial = trivial.sample(n=n_trivial, random_state=42)
 
-        print(f"\n  Training data prepared:")
+        print("\n  Training data prepared:")
         print(f"    Topological:  {len(topo)}")
         print(f"    Trivial:      {len(trivial)}")
         print(f"    Total:        {len(topo) + len(trivial)}")

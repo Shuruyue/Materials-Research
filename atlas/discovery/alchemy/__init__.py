@@ -5,7 +5,24 @@ This module integrates the Alchemical-MLIP logic for continuous chemical space e
 Ported and optimized from recisic/alchemical-mlip.
 """
 
-from .model import AlchemicalModel, AlchemyManager
-from .calculator import AlchemicalMACECalculator
+try:
+    from .model import AlchemicalModel, AlchemyManager
+    from .calculator import AlchemicalMACECalculator
+    _ALCHEMY_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional heavy dependency path
+    AlchemicalModel = None
+    AlchemyManager = None
+    _ALCHEMY_IMPORT_ERROR = exc
 
-__all__ = ["AlchemicalModel", "AlchemyManager", "AlchemicalMACECalculator"]
+    class AlchemicalMACECalculator:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "Alchemical module is unavailable. "
+                f"Underlying error: {_ALCHEMY_IMPORT_ERROR}"
+            )
+
+__all__ = [
+    "AlchemicalModel",
+    "AlchemyManager",
+    "AlchemicalMACECalculator",
+]
