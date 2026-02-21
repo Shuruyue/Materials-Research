@@ -14,10 +14,10 @@ Pipeline:
     5. Output ranked candidate list
 
 Usage:
-    python scripts/06_run_discovery.py                         # Default (5 iterations)
-    python scripts/06_run_discovery.py --iterations 20         # More iterations  
-    python scripts/06_run_discovery.py --candidates 100        # More candidates/iter
-    python scripts/06_run_discovery.py --no-mace               # Skip MACE (fast mode)
+    python scripts/phase5_active_learning/run_discovery.py                         # Default (5 iterations)
+    python scripts/phase5_active_learning/run_discovery.py --iterations 20         # More iterations  
+    python scripts/phase5_active_learning/run_discovery.py --candidates 100        # More candidates/iter
+    python scripts/phase5_active_learning/run_discovery.py --no-mace               # Skip MACE (fast mode)
 """
 
 import argparse
@@ -94,7 +94,7 @@ def load_classifier(cfg):
     else:
         print(f"\n  No trained classifier found at {model_path}")
         print(f"  Using heuristic topological scoring instead")
-        print(f"  (Train one with: python scripts/05_train_topo_classifier.py)")
+        print(f"  (Train one with: python scripts/phase4_topology/train_topo_classifier.py)")
         return None, builder
 
 

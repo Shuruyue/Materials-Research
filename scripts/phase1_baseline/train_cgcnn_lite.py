@@ -9,8 +9,8 @@ This validates that the data pipeline and model architecture work correctly
 before proceeding to multi-task learning (Phase 2).
 
 Usage:
-    python scripts/phase1_baseline/10_train_cgcnn_lite.py
-    python scripts/phase1_baseline/10_train_cgcnn_lite.py --property band_gap
+    python scripts/phase1_baseline/train_cgcnn_lite.py
+    python scripts/phase1_baseline/train_cgcnn_lite.py --property band_gap
 """
 
 import argparse
@@ -267,3 +267,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

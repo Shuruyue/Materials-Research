@@ -8,7 +8,7 @@ Designed for rapid validation of the pipeline.
 - Verifies that data loading, model forward pass, and backprop work without crashing.
 
 Usage:
-    python scripts/phase2_multitask/20_train_multitask_lite.py
+    python scripts/phase2_multitask/train_multitask_lite.py
 """
 
 import argparse
@@ -132,3 +132,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

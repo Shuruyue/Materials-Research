@@ -11,13 +11,13 @@ graph construction logic (JARVIS Atoms -> Pymatgen Structure -> Graph).
 
 Usage:
     # Single file
-    python scripts/phase1_baseline/13_inference_demo.py --cif data/structure.cif
+    python scripts/phase1_baseline/inference_demo.py --cif data/structure.cif
 
     # Batch processing (save to csv)
-    python scripts/phase1_baseline/13_inference_demo.py --dir data/my_structures/ --output results.csv
+    python scripts/phase1_baseline/inference_demo.py --dir data/my_structures/ --output results.csv
 
     # Verification
-    python scripts/phase1_baseline/13_inference_demo.py --test-random
+    python scripts/phase1_baseline/inference_demo.py --test-random
 """
 
 import argparse
@@ -267,3 +267,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

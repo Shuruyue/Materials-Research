@@ -8,10 +8,10 @@ phase DFT/literature data using Voigt-Reuss-Hill mixing rules.
 Built-in presets: SAC305, SAC405, SnPb63, pure_Sn, pure_Cu
 
 Usage:
-    python scripts/08_alloy_properties.py                    # SAC305 (default)
-    python scripts/08_alloy_properties.py --alloy SAC405     # SAC405
-    python scripts/08_alloy_properties.py --alloy SnPb63     # Leaded solder
-    python scripts/08_alloy_properties.py --compare          # Compare all presets
+    python scripts/phase6_analysis/alloy_properties.py                    # SAC305 (default)
+    python scripts/phase6_analysis/alloy_properties.py --alloy SAC405     # SAC405
+    python scripts/phase6_analysis/alloy_properties.py --alloy SnPb63     # Leaded solder
+    python scripts/phase6_analysis/alloy_properties.py --compare          # Compare all presets
 """
 
 import argparse

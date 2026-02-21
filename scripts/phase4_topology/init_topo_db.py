@@ -6,7 +6,7 @@ Creates and populates the local topological materials database
 with known/confirmed topological materials as seed data.
 
 Usage:
-    python scripts/02_init_topo_db.py
+    python scripts/phase4_topology/init_topo_db.py
 """
 
 import sys

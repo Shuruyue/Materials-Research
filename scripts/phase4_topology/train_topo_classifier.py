@@ -9,9 +9,9 @@ This is a surrogate model — it learns to predict topological character
 from structure alone, without running expensive DFT+SOC calculations.
 
 Usage:
-    python scripts/05_train_topo_classifier.py                 # Full training
-    python scripts/05_train_topo_classifier.py --epochs 20     # Quick test
-    python scripts/05_train_topo_classifier.py --max 500       # Small dataset
+    python scripts/phase4_topology/train_topo_classifier.py                 # Full training
+    python scripts/phase4_topology/train_topo_classifier.py --epochs 20     # Quick test
+    python scripts/phase4_topology/train_topo_classifier.py --max 500       # Small dataset
 """
 
 import argparse

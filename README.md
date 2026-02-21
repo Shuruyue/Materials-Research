@@ -42,15 +42,15 @@ pytest -m integration
 ### Common Pipeline Entrypoints
 ```bash
 # Phase 1
-python scripts/phase1_baseline/01_download_data.py
-python scripts/phase1_baseline/10_train_cgcnn_lite.py
+python scripts/phase1_baseline/download_data.py
+python scripts/phase1_baseline/train_cgcnn_lite.py
 
 # Phase 2
 python scripts/phase2_multitask/process_data_phase2.py
-python scripts/phase2_multitask/20_train_multitask_lite.py
+python scripts/phase2_multitask/train_multitask_lite.py
 
 # Phase 5
-python scripts/phase5_active_learning/06_run_discovery.py
+python scripts/phase5_active_learning/run_discovery.py
 
 # Benchmark CLI
 benchmark --list-tasks
@@ -73,3 +73,4 @@ references/               # external research repos (gitignored by default)
 
 ## License
 MIT License - see `LICENSE`.
+

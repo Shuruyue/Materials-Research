@@ -8,9 +8,9 @@ training data for the ATLAS platform.
 NO API KEY REQUIRED — data is freely downloadable from NIST/Figshare.
 
 Usage:
-    python scripts/01_download_data.py              # Full download + stats
-    python scripts/01_download_data.py --stats       # Show database statistics only
-    python scripts/01_download_data.py --topo        # Show topological materials
+    python scripts/phase1_baseline/download_data.py              # Full download + stats
+    python scripts/phase1_baseline/download_data.py --stats       # Show database statistics only
+    python scripts/phase1_baseline/download_data.py --topo        # Show topological materials
 """
 
 import argparse

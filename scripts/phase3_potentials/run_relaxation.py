@@ -9,7 +9,7 @@ Refactored to use the shared `atlas.potentials.MACERelaxer` module for robustnes
 and consistency with the active learning loop.
 
 Usage:
-    python scripts/phase3_potentials/05_run_relaxation.py --structure data/raw/mp-1234.cif --model models/mace/best.model
+    python scripts/phase3_potentials/run_relaxation.py --structure data/raw/mp-1234.cif --model models/mace/best.model
 """
 
 import argparse
@@ -134,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

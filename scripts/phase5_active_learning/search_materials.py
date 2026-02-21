@@ -33,22 +33,22 @@ Available properties for search:
 
 Examples:
     # Find low-melting-point metals with good conductivity
-    python scripts/07_search_materials.py --metal --melting-max 600 --sort melting_point_est
+    python scripts/phase5_active_learning/search_materials.py --metal --melting-max 600 --sort melting_point_est
 
     # Find hard, stiff ceramics
-    python scripts/07_search_materials.py --hardness-min 10 --youngs-min 200
+    python scripts/phase5_active_learning/search_materials.py --hardness-min 10 --youngs-min 200
 
     # Find thermoelectric materials (high Seebeck, semiconductor)
-    python scripts/07_search_materials.py --semiconductor --seebeck-min 200 --sort seebeck_best -desc
+    python scripts/phase5_active_learning/search_materials.py --semiconductor --seebeck-min 200 --sort seebeck_best -desc
 
     # Find EM-resistant interconnect metals
-    python scripts/07_search_materials.py --metal --em-min 0.5 --sort electromigration_resistance -desc
+    python scripts/phase5_active_learning/search_materials.py --metal --em-min 0.5 --sort electromigration_resistance -desc
 
     # Full database summary
-    python scripts/07_search_materials.py --summary
+    python scripts/phase5_active_learning/search_materials.py --summary
 
     # Custom query: any column with min/max
-    python scripts/07_search_materials.py --filter "melting_point_est<600" --filter "bandgap_best<0.1"
+    python scripts/phase5_active_learning/search_materials.py --filter "melting_point_est<600" --filter "bandgap_best<0.1"
 """
 
 import argparse

@@ -16,7 +16,7 @@ Phase 1 focuses on training a standard Crystal Graph Convolutional Neural Networ
 
 ```bash
 # Download JARVIS-DFT data (~76,000 materials)
-python scripts/phase1_baseline/01_download_data.py
+python scripts/phase1_baseline/download_data.py
 ```
 
 ### 2. Train Model
@@ -25,24 +25,24 @@ Choose the appropriate tier for your task:
 
 ```bash
 # Lite: Debug run (1 min)
-python scripts/phase1_baseline/10_train_cgcnn_lite.py
+python scripts/phase1_baseline/train_cgcnn_lite.py
 
 # Std: Development run (45 min)
-python scripts/phase1_baseline/11_train_cgcnn_std.py
+python scripts/phase1_baseline/train_cgcnn_std.py
 
 # Pro: Production run (>12 hr)
 # Use this for final PhD-level results
-python scripts/phase1_baseline/12_train_cgcnn_pro.py
+python scripts/phase1_baseline/train_cgcnn_pro.py
 ```
 
 ## Directory Structure
 
 ```
 scripts/phase1_baseline/
-├── 01_download_data.py         # Data downloader & stats
-├── 10_train_cgcnn_lite.py      # Lite tier (10 epochs, 1k samples)
-├── 11_train_cgcnn_std.py       # Std tier (300 epochs, full data)
-├── 12_train_cgcnn_pro.py       # Pro tier (2000 epochs, full optimizations)
+├── download_data.py         # Data downloader & stats
+├── train_cgcnn_lite.py      # Lite tier (10 epochs, 1k samples)
+├── train_cgcnn_std.py       # Std tier (300 epochs, full data)
+├── train_cgcnn_pro.py       # Pro tier (2000 epochs, full optimizations)
 └── README.md                   # This file
 ```
 
@@ -58,7 +58,7 @@ All training scripts support the following common arguments:
 
 ```bash
 # Example: Resume interrupted Pro training
-python scripts/phase1_baseline/12_train_cgcnn_pro.py --resume
+python scripts/phase1_baseline/train_cgcnn_pro.py --resume
 ```
 ##  Hardware & Estimated Performance
 
@@ -71,9 +71,9 @@ python scripts/phase1_baseline/12_train_cgcnn_pro.py --resume
 
 | Tier | Script | Est. Time | Device |
 | :--- | :--- | :--- | :--- |
-| **Lite** | `10_train_cgcnn_lite.py` | ~1 min | GPU (Fast) |
-| **Std** | `11_train_cgcnn_std.py` | ~15-20 mins | GPU (Stable) |
-| **Pro** | `12_train_cgcnn_pro.py` | ~45-60 mins | GPU (Reliable) |
+| **Lite** | `train_cgcnn_lite.py` | ~1 min | GPU (Fast) |
+| **Std** | `train_cgcnn_std.py` | ~15-20 mins | GPU (Stable) |
+| **Pro** | `train_cgcnn_pro.py` | ~45-60 mins | GPU (Reliable) |
 
 
 > **Note:** Actual times may vary based on system load. We use `num_workers=0` to ensure stability on Windows.
@@ -84,16 +84,17 @@ Run the provided inference script to make predictions with your trained model:
 
 ```bash
 # 1. Verification (Random Test Sample)
-python scripts/phase1_baseline/13_inference_demo.py --test-random
+python scripts/phase1_baseline/inference_demo.py --test-random
 
 # 2. Single File Prediction
-python scripts/phase1_baseline/13_inference_demo.py --cif structure.cif
+python scripts/phase1_baseline/inference_demo.py --cif structure.cif
 
 # 3. Batch Processing (Entire Folder)
-python scripts/phase1_baseline/13_inference_demo.py --dir my_structures/ --output results.csv
+python scripts/phase1_baseline/inference_demo.py --dir my_structures/ --output results.csv
 ```
 
 Results are saved in `models/cgcnn_pro_formation_energy/`.
 - `results.json`: Final test metrics
 - `history.json`: Loss/MAE curves
 - `best.pt`: PyTorch model weights
+

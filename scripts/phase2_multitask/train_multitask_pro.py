@@ -9,9 +9,9 @@ The "Holy Grail" script for training the Universal Material Brain.
 - Detailed JSON logging for experiment tracking
 
 Usage:
-    python scripts/phase2_multitask/22_train_multitask_pro.py
-    python scripts/phase2_multitask/22_train_multitask_pro.py --resume
-    python scripts/phase2_multitask/22_train_multitask_pro.py --no-filter  (Discovery Mode)
+    python scripts/phase2_multitask/train_multitask_pro.py
+    python scripts/phase2_multitask/train_multitask_pro.py --resume
+    python scripts/phase2_multitask/train_multitask_pro.py --no-filter  (Discovery Mode)
 """
 
 import argparse
@@ -396,3 +396,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

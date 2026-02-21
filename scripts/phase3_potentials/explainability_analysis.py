@@ -9,8 +9,8 @@ After training, runs:
 5. Property-property correlation in learned representations
 
 Usage:
-    python scripts/30_explainability_analysis.py --model-dir models/equivariant_formation_energy
-    python scripts/30_explainability_analysis.py --multi-task --model-dir models/multitask_equivariant
+    python scripts/phase3_potentials/explainability_analysis.py --model-dir models/equivariant_formation_energy
+    python scripts/phase3_potentials/explainability_analysis.py --multi-task --model-dir models/multitask_equivariant
 """
 
 import argparse

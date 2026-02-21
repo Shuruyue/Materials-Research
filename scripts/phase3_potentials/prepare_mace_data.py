@@ -9,9 +9,9 @@ MACE needs: atomic positions, lattice, energies, forces, stresses.
 JARVIS provides pre-computed DFT energies and structures.
 
 Usage:
-    python scripts/03_prepare_mace_data.py                  # Default: Si,Ge,Sn
-    python scripts/03_prepare_mace_data.py --elements Bi Se Te
-    python scripts/03_prepare_mace_data.py --max 500
+    python scripts/phase3_potentials/prepare_mace_data.py                  # Default: Si,Ge,Sn
+    python scripts/phase3_potentials/prepare_mace_data.py --elements Bi Se Te
+    python scripts/phase3_potentials/prepare_mace_data.py --max 500
 """
 
 import argparse

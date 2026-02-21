@@ -8,8 +8,8 @@ The workhorse script for tuning and development.
 - Supports Outlier Inspection (saves outliers.csv)
 
 Usage:
-    python scripts/phase2_multitask/21_train_multitask_std.py
-    python scripts/phase2_multitask/21_train_multitask_std.py --resume
+    python scripts/phase2_multitask/train_multitask_std.py
+    python scripts/phase2_multitask/train_multitask_std.py --resume
 """
 
 import argparse
@@ -334,3 +334,4 @@ def main():
         manager.save_checkpoint(state, epoch)
 if __name__ == "__main__":
     main()
+

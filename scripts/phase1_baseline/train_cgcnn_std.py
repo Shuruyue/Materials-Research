@@ -10,7 +10,7 @@ Full-scale training with all accuracy optimizations and STABILITY fixes:
 - Outlier filtering (4-sigma)
 
 Usage:
-    python scripts/phase1_baseline/11_train_cgcnn_std.py
+    python scripts/phase1_baseline/train_cgcnn_std.py
 """
 
 import argparse
@@ -511,4 +511,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

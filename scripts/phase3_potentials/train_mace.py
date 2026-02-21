@@ -11,9 +11,9 @@ This creates a universal interatomic potential that can:
 - Estimate formation energies
 
 Usage:
-    python scripts/04_train_mace.py                     # Default settings
-    python scripts/04_train_mace.py --epochs 100        # Quick test
-    python scripts/04_train_mace.py --r-max 6.0         # Larger cutoff
+    python scripts/phase3_potentials/train_mace.py                     # Default settings
+    python scripts/phase3_potentials/train_mace.py --epochs 100        # Quick test
+    python scripts/phase3_potentials/train_mace.py --r-max 6.0         # Larger cutoff
 """
 
 import argparse
@@ -72,7 +72,7 @@ def main():
 
     if not train_file.exists():
         print(f"\n  ✗ Training data not found at {train_file}")
-        print(f"  Run first: python scripts/03_prepare_mace_data.py")
+        print(f"  Run first: python scripts/phase3_potentials/prepare_mace_data.py")
         return
 
     # Count structures

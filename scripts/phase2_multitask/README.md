@@ -1,4 +1,3 @@
-
 # Phase 2 — Multi-Task & Equivariant Learning
 
 > **Goal**: Transition from single-property models (Phase 1) to a "Universal Material Brain" (Phase 2).
@@ -40,21 +39,21 @@ The primary "Universal Brain" models (E3NN) training on all properties.
 
 | Script | Role |
 | :--- | :--- |
-| `20_train_multitask_lite.py` | **Lite (Debug)**. Fast check (2 epochs). |
-| `21_train_multitask_std.py` | **Std (Dev)**. Balanced training. |
-| `22_train_multitask_pro.py` | **Pro (SOTA)**. The "Holy Grail". `--all-properties` unlocked. |
+| `train_multitask_lite.py` | **Lite (Debug)**. Fast check (2 epochs). |
+| `train_multitask_std.py` | **Std (Dev)**. Balanced training. |
+| `train_multitask_pro.py` | **Pro (SOTA)**. The "Holy Grail". `--all-properties` unlocked. |
 
 ### Step 2: Single-Task Specialists (Deep Dive)
 High-precision models for specific properties.
 
 | Script | Role |
 | :--- | :--- |
-| `32_train_singletask_pro.py` | **Single-Task Pro**. E.g., `python 32...py --property band_gap`. |
+| `train_singletask_pro.py` | **Single-Task Pro**. E.g., `python scripts/phase3_singletask/train_singletask_pro.py --property band_gap`. |
 
 ### Legacy / Baselines
 | Script | Role |
 | :--- | :--- |
-| `12_train_multitask_cgcnn.py` | **Baseline (CGCNN)**. For comparison. |
+| `train_multitask_cgcnn.py` | **Baseline (CGCNN)**. For comparison. |
 
 
 
@@ -66,14 +65,14 @@ Choose the appropriate tier for your task:
 
 ```bash
 # 1. LITE: Fast Debug (2 epochs, CPU friendly)
-python scripts/phase2_multitask/20_train_multitask_lite.py
+python scripts/phase2_multitask/train_multitask_lite.py
 
 # 2. STD: Standard Dev (Resume + Outlier Check)
-python scripts/phase2_multitask/21_train_multitask_std.py
+python scripts/phase2_multitask/train_multitask_std.py
 
 # 3. PRO: Production SOTA (9 Properties)
 # Add --all-properties to unlock full discovery mode
-python scripts/phase2_multitask/22_train_multitask_pro.py --all-properties
+python scripts/phase2_multitask/train_multitask_pro.py --all-properties
 ```
 
 ### Single-Task: The Specialist (Deep Dive)
@@ -83,10 +82,10 @@ Train on a specific property. Replace `band_gap` with any of the **9 Supported P
 
 ```bash
 # Example: Train formation energy
-python scripts/phase2_multitask/32_train_singletask_pro.py --property formation_energy
+python scripts/phase3_singletask/train_singletask_pro.py --property formation_energy
 
 # Example: Train dielectric constant
-python scripts/phase2_multitask/32_train_singletask_pro.py --property dielectric
+python scripts/phase3_singletask/train_singletask_pro.py --property dielectric
 ```
 
 ##  Hardware & Estimated Performance
@@ -100,9 +99,10 @@ python scripts/phase2_multitask/32_train_singletask_pro.py --property dielectric
 
 | Tier | Script | Est. Time | Notes |
 | :--- | :--- | :--- | :--- |
-| **Lite** | `20_train_multitask_lite.py` | ~2-3 mins | Smoke Test |
-| **Std** | `21_train_multitask_std.py` | ~1-2 hours | E3NN is compute-heavy |
-| **Pro** | `22_train_multitask_pro.py` | ~4-8 hours | Deep E3NN (500 epochs) |
-| **Single**| `32_train_singletask_pro.py`| ~2-4 hours | High Precision |
+| **Lite** | `train_multitask_lite.py` | ~2-3 mins | Smoke Test |
+| **Std** | `train_multitask_std.py` | ~1-2 hours | E3NN is compute-heavy |
+| **Pro** | `train_multitask_pro.py` | ~4-8 hours | Deep E3NN (500 epochs) |
+| **Single**| `train_singletask_pro.py`| ~2-4 hours | High Precision |
 
 > **Note:** E3NN (Equivariant GNN) is mathematically complex. We use `num_workers=0` to ensure no deadlocks on Windows.
+

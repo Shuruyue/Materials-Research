@@ -7,9 +7,9 @@ Implements:
 3. Acquisition functions: uncertainty, expected improvement, random
 
 Usage:
-    python scripts/31_active_learning.py --strategy uncertainty --budget 500
-    python scripts/31_active_learning.py --strategy random --budget 500
-    python scripts/31_active_learning.py --pareto --objectives "high bulk_modulus" "low band_gap"
+    python scripts/phase5_active_learning/active_learning.py --strategy uncertainty --budget 500
+    python scripts/phase5_active_learning/active_learning.py --strategy random --budget 500
+    python scripts/phase5_active_learning/active_learning.py --pareto --objectives "high bulk_modulus" "low band_gap"
 """
 
 import argparse

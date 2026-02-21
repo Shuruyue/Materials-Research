@@ -10,11 +10,11 @@ Uses pycalphad with the Sn-Ag-Cu thermodynamic database.
 Available alloys: SAC305, SAC405, SAC105, SN100C, SNAG36
 
 Usage:
-    python scripts/09_phase_diagram.py                       # SAC305 equilibrium table
-    python scripts/09_phase_diagram.py --alloy SAC405        # Different alloy
-    python scripts/09_phase_diagram.py --solidify             # Solidification curve
-    python scripts/09_phase_diagram.py --plot                 # Plot solidification
-    python scripts/09_phase_diagram.py --binary SN AG         # Binary phase diagram
+    python scripts/phase6_analysis/phase_diagram.py                       # SAC305 equilibrium table
+    python scripts/phase6_analysis/phase_diagram.py --alloy SAC405        # Different alloy
+    python scripts/phase6_analysis/phase_diagram.py --solidify             # Solidification curve
+    python scripts/phase6_analysis/phase_diagram.py --plot                 # Plot solidification
+    python scripts/phase6_analysis/phase_diagram.py --binary SN AG         # Binary phase diagram
 """
 
 import argparse

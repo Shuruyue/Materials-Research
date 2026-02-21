@@ -8,7 +8,7 @@ This serves as the fast BASELINE to compare against Phase 2 (Equivariant GNN).
 It uses the exact same multi-task loss and data pipeline, just a different encoder.
 
 Usage:
-    python scripts/12_train_multitask_cgcnn.py --preset medium
+    python scripts/phase2_multitask/train_multitask_cgcnn.py --preset medium
 """
 
 import argparse
