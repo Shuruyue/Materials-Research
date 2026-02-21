@@ -35,7 +35,29 @@ Recommended entry point: `scripts/phase4_topology/run_phase4.py`.
 | `pro` | `train_topo_classifier_rf.py` | `max_samples=8000`, `n_estimators=900`, `max_depth=28` | Strong baseline |
 | `max` | `train_topo_classifier_rf.py` | `max_samples=12000`, `n_estimators=1200`, `max_depth=32` | Maximum baseline |
 
-## 3. Standard Commands (Recommended)
+## 3. Competition Profile (Independent Mode)
+
+Competition mode is independent from levels and targets accuracy/runtime balance.
+
+### TopoGNN competition profile
+
+- backend: `train_topo_classifier.py`
+- defaults: `epochs=120`, `max=6000`, `batch_size=40`, `hidden=144`, `lr=9e-4`
+
+```bash
+python scripts/phase4_topology/run_phase4.py --algorithm topognn --competition
+```
+
+### RF competition profile
+
+- backend: `train_topo_classifier_rf.py`
+- defaults: `max_samples=7000`, `n_estimators=700`, `max_depth=22`, `min_samples_leaf=2`
+
+```bash
+python scripts/phase4_topology/run_phase4.py --algorithm rf --competition
+```
+
+## 4. Standard Commands (Recommended)
 
 ```bash
 # Initialize known topological seed database (optional but recommended)
@@ -49,6 +71,9 @@ python scripts/phase4_topology/run_phase4.py --algorithm rf --level std
 
 # Highest-precision TopoGNN run
 python scripts/phase4_topology/run_phase4.py --algorithm topognn --level max --max-samples 15000
+
+# Competition mode
+python scripts/phase4_topology/run_phase4.py --algorithm topognn --competition
 ```
 
 Common overrides:
@@ -56,17 +81,17 @@ Common overrides:
 ```bash
 python scripts/phase4_topology/run_phase4.py --algorithm topognn --level std --epochs 140 --hidden 160
 python scripts/phase4_topology/run_phase4.py --algorithm rf --level pro --n-estimators 1200 --max-depth 30
+python scripts/phase4_topology/run_phase4.py --algorithm rf --competition --n-estimators 900
 ```
 
-## 4. Expected Outputs
+## 5. Expected Outputs
 
 - TopoGNN model folder: `models/topo_classifier/`
 - RF baseline folder: `models/topo_classifier_rf/`
 - Both save metrics in `training_info.json`.
 
-## 5. Team Handoff Checklist
+## 6. Team Handoff Checklist
 
-- Record algorithm + level used.
+- Record algorithm + mode used (`level` or `competition`).
 - Save val/test metrics (accuracy, precision, recall, F1).
 - Keep confusion matrix and model path in project tracking sheet.
-

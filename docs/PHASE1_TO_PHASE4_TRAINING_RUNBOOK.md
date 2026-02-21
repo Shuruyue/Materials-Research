@@ -50,20 +50,39 @@ All phases now align to 5 levels:
 - `pro`: production-level training.
 - `max`: highest precision / longest training.
 
-## 5. Required Handoff Record (per run)
+## 5. Competition Mode (Independent from Levels)
+
+Each phase launcher now supports `--competition`, designed for better score/time tradeoff.
+
+```bash
+# Phase 1
+python scripts/phase1_baseline/run_phase1.py --competition --property formation_energy
+
+# Phase 2
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
+
+# Phase 3
+python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --competition --property band_gap
+
+# Phase 4
+python scripts/phase4_topology/run_phase4.py --algorithm topognn --competition
+```
+
+## 6. Required Handoff Record (per run)
 
 For every run, capture:
 
 - phase (`phase1` / `phase2` / `phase3` / `phase4`)
 - algorithm
-- level
+- mode (`level` or `competition`)
+- level (if mode is `level`)
 - full command
 - key overrides (epochs/lr/batch/property/etc.)
 - output model directory
 - final validation/test metrics
 - notes on failures or anomalies
 
-## 6. Output Locations (Default)
+## 7. Output Locations (Default)
 
 - Phase 1: `models/cgcnn_*`
 - Phase 2: `models/multitask_*`
@@ -73,4 +92,3 @@ For every run, capture:
 - Phase 4:
   - `models/topo_classifier`
   - `models/topo_classifier_rf`
-

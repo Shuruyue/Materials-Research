@@ -6,6 +6,7 @@ Usage examples:
   python scripts/phase4_topology/run_phase4.py --algorithm topognn --level std
   python scripts/phase4_topology/run_phase4.py --algorithm rf --level pro
   python scripts/phase4_topology/run_phase4.py --algorithm topognn --level max --max-samples 10000
+  python scripts/phase4_topology/run_phase4.py --algorithm topognn --competition
 """
 
 from __future__ import annotations
@@ -35,11 +36,18 @@ PHASE4_PROFILES = {
     },
 }
 
+PHASE4_COMPETITION = {
+    "topognn": ["--epochs", "120", "--max", "6000", "--batch-size", "40", "--hidden", "144", "--lr", "0.0009"],
+    "rf": ["--max-samples", "7000", "--n-estimators", "700", "--max-depth", "22", "--min-samples-leaf", "2"],
+}
+
 
 def build_command(args: argparse.Namespace) -> list[str]:
+    profile_args = PHASE4_COMPETITION[args.algorithm] if args.competition else PHASE4_PROFILES[args.algorithm][args.level]
+
     if args.algorithm == "topognn":
         cmd = [sys.executable, str(PROJECT_ROOT / "scripts/phase4_topology/train_topo_classifier.py")]
-        cmd.extend(PHASE4_PROFILES["topognn"][args.level])
+        cmd.extend(profile_args)
 
         overrides = {
             "--epochs": args.epochs,
@@ -57,7 +65,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         return cmd
 
     cmd = [sys.executable, str(PROJECT_ROOT / "scripts/phase4_topology/train_topo_classifier_rf.py")]
-    cmd.extend(PHASE4_PROFILES["rf"][args.level])
+    cmd.extend(profile_args)
 
     overrides = {
         "--max-samples": args.max_samples,
@@ -83,6 +91,11 @@ def main() -> int:
         choices=["smoke", "lite", "std", "pro", "max"],
         help="Hyperparameter level",
     )
+    parser.add_argument(
+        "--competition",
+        action="store_true",
+        help="Use competition-optimized profile (independent from --level)",
+    )
 
     parser.add_argument("--max-samples", type=int, default=None)
 
@@ -102,6 +115,8 @@ def main() -> int:
 
     cmd = build_command(args)
     print("[Phase4] Command:")
+    if args.competition:
+        print(f"  [Mode] competition profile enabled ({args.algorithm})")
     print("  " + " ".join(cmd))
 
     if args.dry_run:
@@ -113,4 +128,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

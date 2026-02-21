@@ -8,10 +8,11 @@ Use the unified launcher and operation manual:
 
 ```bash
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level std
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
 ```
 
 - Full teammate guide: `scripts/phase2_multitask/OPERATION.md`
-- Includes algorithm switching (`e3nn` / `cgcnn`) and 5 hyperparameter levels.
+- Includes algorithm switching (`e3nn` / `cgcnn`), 5 levels, and independent competition mode.
 
 ## The Grand Strategy (The Matrix)
 

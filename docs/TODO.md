@@ -49,4 +49,5 @@ Last updated: 2026-02-21
 - [x] Standardized requirements profile files and environment checker.
 - [x] Added Phase 1-4 teammate runbook and per-phase operation manuals.
 - [x] Added Phase 1-4 unified launchers with 5-level hyperparameter profiles.
+- [x] Added independent competition profile mode for Phase 1-4 launchers.
 - [x] Added Phase 4 algorithm switch baseline (`TopoGNN` / `RandomForest`).

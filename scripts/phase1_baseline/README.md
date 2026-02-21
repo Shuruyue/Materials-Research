@@ -16,10 +16,11 @@ Use the unified launcher and operation manual:
 
 ```bash
 python scripts/phase1_baseline/run_phase1.py --level std
+python scripts/phase1_baseline/run_phase1.py --competition --property formation_energy
 ```
 
 - Full teammate guide: `scripts/phase1_baseline/OPERATION.md`
-- Includes 5 hyperparameter levels (`smoke/lite/std/pro/max`) and handoff checklist.
+- Includes 5 hyperparameter levels and an independent `competition` mode.
 
 ## Quick Start
 

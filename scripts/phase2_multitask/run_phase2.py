@@ -7,6 +7,7 @@ Usage examples:
   python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --all-properties
   python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --level lite
   python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level max --resume
+  python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
 """
 
 from __future__ import annotations
@@ -96,9 +97,26 @@ PHASE2_PROFILES = {
     },
 }
 
+PHASE2_COMPETITION = {
+    "e3nn": {
+        "script": "scripts/phase2_multitask/train_multitask_pro.py",
+        "args": ["--epochs", "260", "--batch-size", "6", "--lr", "0.00045"],
+        "supports_resume": True,
+        "supports_all_properties": True,
+        "supports_max_samples": False,
+    },
+    "cgcnn": {
+        "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+        "args": ["--preset", "medium", "--epochs", "280", "--batch-size", "128", "--lr", "0.0009"],
+        "supports_resume": False,
+        "supports_all_properties": False,
+        "supports_max_samples": True,
+    },
+}
+
 
 def build_command(args: argparse.Namespace) -> list[str]:
-    profile = PHASE2_PROFILES[args.algorithm][args.level]
+    profile = PHASE2_COMPETITION[args.algorithm] if args.competition else PHASE2_PROFILES[args.algorithm][args.level]
     cmd = [sys.executable, str(PROJECT_ROOT / profile["script"])]
     cmd.extend(profile["args"])
 
@@ -143,6 +161,11 @@ def main() -> int:
         choices=["smoke", "lite", "std", "pro", "max"],
         help="Hyperparameter level",
     )
+    parser.add_argument(
+        "--competition",
+        action="store_true",
+        help="Use competition-optimized profile (independent from --level)",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--all-properties", action="store_true")
     parser.add_argument("--epochs", type=int, default=None)
@@ -155,6 +178,8 @@ def main() -> int:
 
     cmd = build_command(args)
     print("[Phase2] Command:")
+    if args.competition:
+        print(f"  [Mode] competition profile enabled ({args.algorithm})")
     print("  " + " ".join(cmd))
 
     if args.dry_run:
@@ -166,4 +191,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

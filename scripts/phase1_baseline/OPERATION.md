@@ -34,7 +34,18 @@ python scripts/phase1_baseline/download_data.py --stats
 | `pro` | `train_cgcnn_pro.py` | `epochs=2000`, `batch_size=64`, `lr=0.001`, `hidden_dim=512`, `n_conv=5` | Main training |
 | `max` | `train_cgcnn_pro.py` | `epochs=3000`, `batch_size=48`, `lr=7e-4`, `hidden_dim=768`, `n_conv=6` | Highest precision |
 
-## 4. Standard Commands (Recommended)
+## 4. Competition Profile (Independent Mode)
+
+Competition mode is not one of the 5 levels. It is an independent profile focused on strong score/time ratio:
+
+- backend: `train_cgcnn_std.py`
+- defaults: `epochs=450`, `batch_size=48`, `lr=8e-4`, `patience=80`, `hidden_dim=192`, `n_conv=4`, `max_samples=40000`
+
+```bash
+python scripts/phase1_baseline/run_phase1.py --competition --property formation_energy
+```
+
+## 5. Standard Commands (Recommended)
 
 ```bash
 # Default dev run
@@ -48,6 +59,9 @@ python scripts/phase1_baseline/run_phase1.py --level pro --resume
 
 # Disable outlier filter (supported in std/pro/max)
 python scripts/phase1_baseline/run_phase1.py --level pro --no-filter
+
+# Competition mode (independent from levels)
+python scripts/phase1_baseline/run_phase1.py --competition --property band_gap
 ```
 
 Available common overrides:
@@ -55,9 +69,10 @@ Available common overrides:
 ```bash
 python scripts/phase1_baseline/run_phase1.py --level pro --epochs 1200 --batch-size 64 --lr 0.0008
 python scripts/phase1_baseline/run_phase1.py --level std --hidden-dim 192 --n-conv 4
+python scripts/phase1_baseline/run_phase1.py --competition --epochs 520 --lr 0.0007
 ```
 
-## 5. Direct Script Mode (If Needed)
+## 6. Direct Script Mode (If Needed)
 
 ```bash
 python scripts/phase1_baseline/train_cgcnn_lite.py --property formation_energy
@@ -65,7 +80,7 @@ python scripts/phase1_baseline/train_cgcnn_std.py --property formation_energy --
 python scripts/phase1_baseline/train_cgcnn_pro.py --property formation_energy --resume
 ```
 
-## 6. Inference
+## 7. Inference
 
 ```bash
 # Random sample check
@@ -78,7 +93,7 @@ python scripts/phase1_baseline/inference_demo.py --cif data/your_structure.cif
 python scripts/phase1_baseline/inference_demo.py --dir data/structures --output predictions.csv
 ```
 
-## 7. Expected Outputs
+## 8. Expected Outputs
 
 - Model folder: `models/cgcnn_*`
 - Key artifacts:
@@ -87,10 +102,9 @@ python scripts/phase1_baseline/inference_demo.py --dir data/structures --output 
   - `results.json`
   - `history.json`
 
-## 8. Team Handoff Checklist
+## 9. Team Handoff Checklist
 
-- Confirm command and level used.
+- Confirm command and run mode used (`level` or `competition`).
 - Record property and all CLI overrides.
 - Save final metrics from `results.json`.
 - Keep model directory name and run timestamp in experiment notes.
-

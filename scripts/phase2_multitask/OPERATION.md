@@ -40,7 +40,30 @@ python scripts/phase2_multitask/process_data_phase2.py
 | `pro` | `train_multitask_cgcnn.py` | `preset=large`, `epochs=300` | Strong baseline |
 | `max` | `train_multitask_cgcnn.py` | `preset=large`, `epochs=500`, `batch_size=160` | Maximum baseline |
 
-## 4. Standard Commands (Recommended)
+## 4. Competition Profile (Independent Mode)
+
+Competition mode is independent from the 5 levels and is tuned for balanced score vs runtime.
+
+### E3NN competition profile
+
+- backend: `train_multitask_pro.py`
+- defaults: `epochs=260`, `batch_size=6`, `lr=4.5e-4`
+
+```bash
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition --all-properties
+```
+
+### CGCNN competition profile
+
+- backend: `train_multitask_cgcnn.py`
+- defaults: `preset=medium`, `epochs=280`, `batch_size=128`, `lr=9e-4`
+
+```bash
+python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --competition
+```
+
+## 5. Standard Commands (Recommended)
 
 ```bash
 # E3NN standard development run
@@ -54,6 +77,9 @@ python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --res
 
 # CGCNN baseline run
 python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --level std
+
+# Competition mode
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
 ```
 
 Common overrides:
@@ -61,16 +87,17 @@ Common overrides:
 ```bash
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --epochs 700 --lr 0.0004
 python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --level std --preset large --max-samples 12000
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition --epochs 320
 ```
 
-## 5. Inference
+## 6. Inference
 
 ```bash
 python scripts/phase2_multitask/inference_multitask.py --cif data/your_structure.cif
 python scripts/phase2_multitask/inference_multitask.py --dir data/structures --output phase2_preds.csv
 ```
 
-## 6. Expected Outputs
+## 7. Expected Outputs
 
 - E3NN:
   - `models/multitask_std_e3nn/run_*/`
@@ -80,10 +107,9 @@ python scripts/phase2_multitask/inference_multitask.py --dir data/structures --o
 - Key artifacts:
   - `best.pt`, `checkpoint.pt`, `history.json`, metrics JSON/CSV logs.
 
-## 7. Team Handoff Checklist
+## 8. Team Handoff Checklist
 
-- Note algorithm (`e3nn` / `cgcnn`) and level.
+- Note algorithm (`e3nn` / `cgcnn`) and mode (`level` or `competition`).
 - Record whether `--all-properties` is enabled.
 - Save final validation/test MAE table by property.
 - Keep run directory path in experiment registry.
-

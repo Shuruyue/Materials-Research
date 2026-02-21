@@ -38,7 +38,29 @@ Recommended entry point: `scripts/phase3_potentials/run_phase3.py`.
 | `pro` | `phase3_singletask/train_singletask_pro.py` | Script defaults (`epochs=1500`, etc.) | Main training |
 | `max` | `phase3_singletask/train_singletask_pro.py` | `epochs=2200`, `acc_steps=6`, `lr=1.5e-4`, `--use-swa` | Highest precision |
 
-## 3. Standard Commands (Recommended)
+## 3. Competition Profile (Independent Mode)
+
+Competition mode is independent from levels and emphasizes score/time efficiency.
+
+### MACE competition profile
+
+- backend: `train_mace.py`
+- defaults: `epochs=350`, `batch_size=32`, `lr=2.5e-4`, `r_max=5.5`
+
+```bash
+python scripts/phase3_potentials/run_phase3.py --algorithm mace --competition --prepare-mace-data
+```
+
+### Equivariant specialist competition profile
+
+- backend: `phase3_singletask/train_singletask_pro.py`
+- defaults: `epochs=900`, `batch_size=16`, `acc_steps=3`, `lr=2e-4`, `ema_decay=0.999`, `outlier_sigma=7.5`
+
+```bash
+python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --competition --property band_gap
+```
+
+## 4. Standard Commands (Recommended)
 
 ```bash
 # 3A) MACE with auto data preparation
@@ -52,6 +74,9 @@ python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --level p
 
 # Specialist fine-tuning from Phase 2
 python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --level pro --property formation_energy --finetune-from models/multitask_pro_e3nn/run_xxx/best.pt
+
+# Competition mode
+python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --competition --property formation_energy
 ```
 
 Common overrides:
@@ -59,9 +84,10 @@ Common overrides:
 ```bash
 python scripts/phase3_potentials/run_phase3.py --algorithm mace --level std --epochs 450 --lr 0.0002
 python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --level std --epochs 1000 --batch-size 16 --acc-steps 5
+python scripts/phase3_potentials/run_phase3.py --algorithm mace --competition --epochs 420 --with-forces
 ```
 
-## 4. Structure Relaxation (Post-Training)
+## 5. Structure Relaxation (Post-Training)
 
 ```bash
 python scripts/phase3_potentials/run_relaxation.py --structure data/raw/target.cif --model models/mace/best.model
@@ -73,16 +99,15 @@ Foundation model mode example:
 python scripts/phase3_potentials/run_relaxation.py --structure data/raw/target.cif --model medium
 ```
 
-## 5. Expected Outputs
+## 6. Expected Outputs
 
 - MACE outputs: `models/mace/`
 - Specialist outputs: `models/specialist_<property>/`
 - Optional analysis outputs: `analysis/` under model folders.
 
-## 6. Team Handoff Checklist
+## 7. Team Handoff Checklist
 
-- Record algorithm (`mace` / `equivariant`) and level.
+- Record algorithm (`mace` / `equivariant`) and mode (`level` or `competition`).
 - If MACE: record element set and whether `--with-forces` is enabled.
 - If specialist: record target property and fine-tuning source checkpoint.
 - Save final metrics JSON and model path.
-

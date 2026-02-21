@@ -10,6 +10,7 @@ Phase 4 now supports two switchable algorithms:
 ```bash
 python scripts/phase4_topology/run_phase4.py --algorithm topognn --level std
 python scripts/phase4_topology/run_phase4.py --algorithm rf --level std
+python scripts/phase4_topology/run_phase4.py --algorithm topognn --competition
 ```
 
 ## Full Operation Guide
@@ -18,6 +19,6 @@ See `scripts/phase4_topology/OPERATION.md` for:
 
 - algorithm switching details
 - 5-level hyperparameter presets
+- independent competition profile
 - teammate handoff checklist
 - output artifact locations
-

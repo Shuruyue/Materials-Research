@@ -7,6 +7,7 @@ Usage examples:
   python scripts/phase3_potentials/run_phase3.py --algorithm mace --level max --with-forces
   python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --level pro --property band_gap
   python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --level max --all-properties
+  python scripts/phase3_potentials/run_phase3.py --algorithm equivariant --competition --property band_gap
 """
 
 from __future__ import annotations
@@ -64,6 +65,18 @@ PHASE3_PROFILES = {
     },
 }
 
+PHASE3_COMPETITION = {
+    "mace": ["--epochs", "350", "--batch-size", "32", "--lr", "0.00025", "--r-max", "5.5"],
+    "equivariant": [
+        "--epochs", "900",
+        "--batch-size", "16",
+        "--acc-steps", "3",
+        "--lr", "0.0002",
+        "--ema-decay", "0.999",
+        "--outlier-sigma", "7.5",
+    ],
+}
+
 
 def build_prepare_command(args: argparse.Namespace) -> list[str]:
     cmd = [
@@ -80,9 +93,11 @@ def build_prepare_command(args: argparse.Namespace) -> list[str]:
 
 
 def build_train_command(args: argparse.Namespace) -> list[str]:
+    profile_args = PHASE3_COMPETITION[args.algorithm] if args.competition else PHASE3_PROFILES[args.algorithm][args.level]
+
     if args.algorithm == "mace":
         cmd = [sys.executable, str(PROJECT_ROOT / "scripts/phase3_potentials/train_mace.py")]
-        cmd.extend(PHASE3_PROFILES["mace"][args.level])
+        cmd.extend(profile_args)
         if args.with_forces:
             cmd.append("--with-forces")
 
@@ -102,7 +117,7 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         return cmd
 
     cmd = [sys.executable, str(PROJECT_ROOT / "scripts/phase3_singletask/train_singletask_pro.py")]
-    cmd.extend(PHASE3_PROFILES["equivariant"][args.level])
+    cmd.extend(profile_args)
 
     if args.all_properties:
         cmd.append("--all-properties")
@@ -149,6 +164,11 @@ def main() -> int:
         choices=["smoke", "lite", "std", "pro", "max"],
         help="Hyperparameter level",
     )
+    parser.add_argument(
+        "--competition",
+        action="store_true",
+        help="Use competition-optimized profile (independent from --level)",
+    )
 
     # MACE options
     parser.add_argument("--prepare-mace-data", action="store_true")
@@ -182,9 +202,10 @@ def main() -> int:
 
     train_cmd = build_train_command(args)
     print("[Phase3] Training command:")
+    if args.competition:
+        print(f"  [Mode] competition profile enabled ({args.algorithm})")
     return run_command(train_cmd, args.dry_run)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

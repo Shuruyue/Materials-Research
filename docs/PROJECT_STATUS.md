@@ -19,6 +19,7 @@ ATLAS is a research-first platform for combining materials science and machine l
 - Phase 1 baseline (CGCNN family scripts)
 - Phase 2 multitask/equivariant branch
 - Phase 1-4 unified launchers with 5-level profiles:
+  - plus independent `competition` mode focused on score/time efficiency
   - `scripts/phase1_baseline/run_phase1.py`
   - `scripts/phase2_multitask/run_phase2.py`
   - `scripts/phase3_potentials/run_phase3.py`
