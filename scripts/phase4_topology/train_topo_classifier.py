@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -223,8 +224,6 @@ def evaluate(model, loader, criterion, device):
 
 
 def main():
-    import pandas as pd
-
     parser = argparse.ArgumentParser(description="Train topological classifier")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--max", type=int, default=5000, help="Max samples")

@@ -10,6 +10,17 @@ Phase 1 focuses on training a standard Crystal Graph Convolutional Neural Networ
 2.  **Std (Dev)** — Standard development and hyperparameter tuning.
 3.  **Pro (Production)** — High-precision training for final benchmarking.
 
+## Delivery Mode (Recommended for Team Ops)
+
+Use the unified launcher and operation manual:
+
+```bash
+python scripts/phase1_baseline/run_phase1.py --level std
+```
+
+- Full teammate guide: `scripts/phase1_baseline/OPERATION.md`
+- Includes 5 hyperparameter levels (`smoke/lite/std/pro/max`) and handoff checklist.
+
 ## Quick Start
 
 ### 1. Prepare Data

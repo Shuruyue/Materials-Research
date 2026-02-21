@@ -48,8 +48,19 @@ def main():
     parser.add_argument("--r-max", type=float, default=None, help="Cutoff radius (Å)")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
-    parser.add_argument("--energy-only", action="store_true", default=True,
-                        help="Train on energy only (default for JARVIS data)")
+    parser.add_argument(
+        "--energy-only",
+        dest="energy_only",
+        action="store_true",
+        default=True,
+        help="Train on energy only (default for JARVIS data)",
+    )
+    parser.add_argument(
+        "--with-forces",
+        dest="energy_only",
+        action="store_false",
+        help="Enable force/stress loss weights (requires force labels)",
+    )
     args = parser.parse_args()
 
     cfg = get_config()

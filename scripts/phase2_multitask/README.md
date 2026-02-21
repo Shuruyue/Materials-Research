@@ -2,6 +2,17 @@
 
 > **Goal**: Transition from single-property models (Phase 1) to a "Universal Material Brain" (Phase 2).
 
+## Delivery Mode (Recommended for Team Ops)
+
+Use the unified launcher and operation manual:
+
+```bash
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level std
+```
+
+- Full teammate guide: `scripts/phase2_multitask/OPERATION.md`
+- Includes algorithm switching (`e3nn` / `cgcnn`) and 5 hyperparameter levels.
+
 ## The Grand Strategy (The Matrix)
 
 We are unlocking a total of **29+ Models** across 3 dimensions of difficulty.

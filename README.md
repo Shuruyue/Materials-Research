@@ -70,6 +70,7 @@ references/               # external research repos (gitignored by default)
 ## Documentation
 - `docs/PROJECT_STATUS.md`: current implementation progress and known constraints.
 - `docs/TODO.md`: prioritized TODO list for next development steps.
+- `docs/PHASE1_TO_PHASE4_TRAINING_RUNBOOK.md`: teammate-ready Phase 1-4 execution guide.
 
 ## License
 MIT License - see `LICENSE`.

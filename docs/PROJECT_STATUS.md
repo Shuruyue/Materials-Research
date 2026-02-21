@@ -18,6 +18,14 @@ ATLAS is a research-first platform for combining materials science and machine l
 ### Modeling and training
 - Phase 1 baseline (CGCNN family scripts)
 - Phase 2 multitask/equivariant branch
+- Phase 1-4 unified launchers with 5-level profiles:
+  - `scripts/phase1_baseline/run_phase1.py`
+  - `scripts/phase2_multitask/run_phase2.py`
+  - `scripts/phase3_potentials/run_phase3.py`
+  - `scripts/phase4_topology/run_phase4.py`
+- Phase 4 baseline algorithm switch support:
+  - `TopoGNN` (graph-based)
+  - `RandomForest` composition baseline (`train_topo_classifier_rf.py`)
 - M3GNet-style modeling components
 
 ### Discovery loop
@@ -49,6 +57,8 @@ ATLAS is a research-first platform for combining materials science and machine l
   - `requirements-full.txt`
 - Environment validation script:
   - `scripts/dev_tools/check_env.py`
+- Team operation runbook:
+  - `docs/PHASE1_TO_PHASE4_TRAINING_RUNBOOK.md`
 
 ## Known Constraints
 - `torch-scatter` and `torch-sparse` may not have prebuilt wheels for all Python/Torch/CUDA combinations.

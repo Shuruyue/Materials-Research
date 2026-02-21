@@ -22,6 +22,11 @@ Last updated: 2026-02-21
 - [ ] Add explicit failure taxonomy in workflow manifests (dependency missing, model load fail, runtime fail).
 - [ ] Add experiment templates for metal doping and semiconductor thin-film tracks.
 
+## P1 - Phase 1-4 Operations
+- [ ] Add automated smoke tests for `run_phase1.py` to `run_phase4.py` with `--dry-run` and arg matrix checks.
+- [ ] Add standardized experiment report template (YAML/JSON) shared by all phase launchers.
+- [ ] Add phase-level dependency precheck command (per algorithm) before long training starts.
+
 ## P2 - Data and Model Governance
 - [ ] Define canonical dataset versions and split manifests.
 - [ ] Add model registry metadata:
@@ -42,3 +47,6 @@ Last updated: 2026-02-21
 - [x] Added benchmark CLI and fold/aggregate JSON reports.
 - [x] Added reproducibility workflow manifests and runtime metadata capture.
 - [x] Standardized requirements profile files and environment checker.
+- [x] Added Phase 1-4 teammate runbook and per-phase operation manuals.
+- [x] Added Phase 1-4 unified launchers with 5-level hyperparameter profiles.
+- [x] Added Phase 4 algorithm switch baseline (`TopoGNN` / `RandomForest`).
