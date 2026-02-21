@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 02: Initialize Topological Materials Database
+Initialize Topological Materials Database
 
 Creates and populates the local topological materials database
 with known/confirmed topological materials as seed data.

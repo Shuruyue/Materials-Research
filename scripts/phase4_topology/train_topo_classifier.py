@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 05: Train Topological GNN Classifier
+Train Topological GNN Classifier
 
 Trains a Graph Neural Network to classify crystal structures as
 topological (spillage > 0.5) or trivial using JARVIS-DFT data.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 05: Run Relaxation with MACE Potential (Phase 3)
+Run Relaxation with MACE Potential (Phase 3)
 
 Demonstrates how to use a trained MACE model (or M3GNet) to relax crystal structures.
 This is the "Dynamic" part of Phase 3, moving beyond static property prediction.

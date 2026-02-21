@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 03: Prepare MACE Training Data
+Prepare MACE Training Data
 
 Extracts crystal structures from JARVIS-DFT and converts them
 to the format required by MACE training (extended XYZ format).

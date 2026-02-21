@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 01: Download JARVIS-DFT Data
+Download JARVIS-DFT Data
 
 Downloads the JARVIS-DFT database (~76,000 materials) and prepares
 training data for the ATLAS platform.

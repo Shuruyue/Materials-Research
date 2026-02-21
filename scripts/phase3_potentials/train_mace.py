@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 04: Train MACE Model
+Train MACE Model
 
 Trains a MACE equivariant neural network potential on the prepared
 training data. Uses energy-only training (forces optional).
