@@ -34,3 +34,17 @@ def device():
     """Return available device (cuda or cpu)."""
     import torch
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def pytest_collection_modifyitems(items):
+    """
+    Auto-classify tests by folder:
+    - tests/integration/** -> integration
+    - others -> unit
+    """
+    for item in items:
+        node = item.nodeid.replace("\\", "/")
+        if "tests/integration/" in node:
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.unit)

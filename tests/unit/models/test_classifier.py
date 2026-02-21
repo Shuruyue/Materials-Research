@@ -1,13 +1,7 @@
 """Tests for atlas.models.m3gnet and atlas.models.multi_task"""
 
-import numpy as np
 import torch
 import unittest
-import sys
-import os
-
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.m3gnet import M3GNet

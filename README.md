@@ -44,6 +44,21 @@ pytest
 pytest -m integration
 ```
 
+Test layout:
+```text
+tests/
+├─ unit/
+│  ├─ active_learning/
+│  ├─ benchmark/
+│  ├─ config/
+│  ├─ data/
+│  ├─ models/
+│  └─ research/
+└─ integration/
+   ├─ openmm/
+   └─ recisic/
+```
+
 ### 2. Phase 1 — Baseline Training
 
 ```bash
