@@ -82,7 +82,7 @@ def main():
     test_file = data_dir / "test.xyz"
 
     if not train_file.exists():
-        print(f"\n  ✗ Training data not found at {train_file}")
+        print(f"\n  [ERROR] Training data not found at {train_file}")
         print(f"  Run first: python scripts/phase3_potentials/prepare_mace_data.py")
         return
 
@@ -151,12 +151,12 @@ def main():
         )
 
         if result.returncode == 0:
-            print(f"\n✓ Training complete! Model saved to {model_dir}")
+            print(f"\n[OK] Training complete. Model saved to {model_dir}")
         else:
-            print(f"\n✗ Training failed with return code {result.returncode}")
+            print(f"\n[ERROR] Training failed with return code {result.returncode}")
 
     except FileNotFoundError:
-        print("\n  ✗ MACE training script not found.")
+        print("\n  [ERROR] MACE training script not found.")
         print("  Install MACE: pip install mace-torch")
         print("\n  Alternative: train using MACE Python API:")
         print_python_training_alternative(cfg, train_file, val_file, device)

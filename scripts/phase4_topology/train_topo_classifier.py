@@ -372,8 +372,8 @@ def main():
     with open(model_dir / "training_info.json", "w") as f:
         json.dump(info, f, indent=2)
 
-    print(f"\n✓ Model saved to {model_dir}")
-    print(f"✓ Training complete!")
+    print(f"\n[OK] Model saved to {model_dir}")
+    print("[OK] Training complete.")
 
 
 if __name__ == "__main__":

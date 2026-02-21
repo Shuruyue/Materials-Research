@@ -102,6 +102,21 @@ python scripts/phase1_baseline/inference_demo.py --dir data/structures --output 
   - `results.json`
   - `history.json`
 
+## 8.1 Results Review (Recommended)
+
+Use the summary tool to compare runs with consistent metrics:
+
+```bash
+python scripts/phase1_baseline/report_phase1_results.py --property formation_energy
+python scripts/phase1_baseline/report_phase1_results.py --property formation_energy --top 10 --csv artifacts/phase1_results_summary.csv
+```
+
+Metric definitions:
+- `MAE`: Mean Absolute Error (lower is better)
+- `RMSE`: Root Mean Squared Error (lower is better)
+- `R2`: Coefficient of Determination (higher is better)
+- `MaxAE`: Maximum Absolute Error (lower is better)
+
 ## 9. Team Handoff Checklist
 
 - Confirm command and run mode used (`level` or `competition`).

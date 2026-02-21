@@ -41,12 +41,12 @@ def main():
     except Exception:
         device = "cpu"
         
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     🟢 MACE RELAXATION (Phase 3)                               ║")
-    print(f"║     Input: {Path(args.structure).name:<40}          ║")
-    print(f"║     Model: {args.model:<40}          ║")
-    print(f"║     Device: {device:<40}         ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
+    print("=" * 70)
+    print("MACE RELAXATION (Phase 3)")
+    print(f"Input : {Path(args.structure).name}")
+    print(f"Model : {args.model}")
+    print(f"Device: {device}")
+    print("=" * 70)
 
     # 1. Load Structure
     print("\n[1/3] Loading Structure...")
@@ -56,7 +56,7 @@ def main():
         print(f"  Composition: {structure.composition.reduced_formula}")
         print(f"  Atoms: {len(structure)}")
     except Exception as e:
-        print(f"  ❌ Error loading structure: {e}")
+        print(f"  [ERROR] Failed to load structure: {e}")
         return
 
     # 2. Initialize Relaxer
@@ -76,13 +76,13 @@ def main():
         
         # Trigger lazy load to check availability
         if relaxer.calculator is None:
-             print("  ❌ Failed to load calculator (check logs).")
+             print("  [ERROR] Failed to load calculator (check logs).")
              return
              
         print(f"  Relaxer ready on {relaxer.device}")
         
     except Exception as e:
-        print(f"  ❌ Error initializing relaxer: {e}")
+        print(f"  [ERROR] Failed to initialize relaxer: {e}")
         return
 
     # 3. Relaxation
@@ -108,7 +108,7 @@ def main():
     
     # 4. Results
     if result.get("error"):
-        print(f"\n  ❌ Relaxation Failed: {result['error']}")
+        print(f"\n  [ERROR] Relaxation failed: {result['error']}")
         return
 
     e_final = result["energy_total"]
@@ -128,7 +128,7 @@ def main():
     final_path = out_dir / "relaxed.cif"
     result["relaxed_structure"].to(filename=str(final_path))
     
-    print(f"\n  ✅ Relaxation Complete!")
+    print(f"\n  [OK] Relaxation complete.")
     print(f"     Trajectory: {traj_file}")
     print(f"     Final CIF:  {final_path}")
 

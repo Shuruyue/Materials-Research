@@ -68,7 +68,7 @@ def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
     save_path = save_dir / "phase2_m3gnet_graphs.pt"
     
     if save_path.exists() and limit is None:
-        print(f"✅ Found existing data at {save_path}")
+        print(f"[OK] Found existing data at {save_path}")
         print("   Delete this file if you want to force regeneration.")
         return
 
@@ -76,11 +76,11 @@ def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
     data = jdata(dataset_name)
     
     if limit:
-        print(f"⚠️ LIMITING TO {limit} SAMPLES FOR TESTING")
+        print(f"[WARN] Limiting to {limit} samples for testing")
         data = data[:limit]
         
     n_workers = n_workers or max(1, multiprocessing.cpu_count() - 2)
-    print(f"🚀 Processing {len(data)} structures with {n_workers} workers...")
+    print(f"[INFO] Processing {len(data)} structures with {n_workers} workers...")
     print(f"   extracting ALL properties: {list(PROPERTY_MAP.values())}")
     
     processed_graphs = []
@@ -93,7 +93,7 @@ def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
             if res is not None:
                 processed_graphs.append(res)
             
-    print(f"✨ Successfully processed {len(processed_graphs)}/{len(data)} graphs.")
+    print(f"[OK] Successfully processed {len(processed_graphs)}/{len(data)} graphs.")
     
     print(f"Saving to {save_path}...")
     torch.save(processed_graphs, save_path)

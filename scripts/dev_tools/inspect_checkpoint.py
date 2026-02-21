@@ -14,7 +14,7 @@ try:
     from atlas.models.multi_task import MultiTaskGNN
     from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 except ImportError as e:
-    print(f"❌ ImportError: {e}")
+    print(f"[ERROR] ImportError: {e}")
     print(f"   sys.path: {sys.path}")
     sys.exit(1)
 
@@ -35,12 +35,12 @@ from torch_geometric.loader import DataLoader
 from sklearn.metrics import mean_absolute_error
 
 def evaluate_run(run_dir):
-    print(f"\n🔍 Inspecting Run: {run_dir}")
+    print(f"\n[INFO] Inspecting run: {run_dir}")
     run_path = Path(run_dir)
     checkpoint_path = run_path / "best.pt"
     
     if not checkpoint_path.exists():
-        print(f"❌ No best.pt found in {run_dir}")
+        print(f"[ERROR] No best.pt found in {run_dir}")
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -115,7 +115,7 @@ def evaluate_run(run_dir):
                 all_targets[prop].append(target.cpu())
 
     # Calculate Metrics
-    print("\n   📊 Detailed Validation Metrics (MAE):")
+    print("\n   Validation Metrics (MAE):")
     print(f"   {'Property':<20} | {'MAE':<10} | {'Target (approx)'}")
     print("-" * 50)
     

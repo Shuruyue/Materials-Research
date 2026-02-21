@@ -192,7 +192,7 @@ def main():
             print(f"Error: File {args.cif} not found.")
             return
         
-        print(f"\n🔮 Predicting for: {args.cif.name}")
+        print(f"\n[INFO] Predicting for: {args.cif.name}")
         atoms = Atoms.from_cif(str(args.cif))
         val = predictor.predict(atoms)
         print(f"   Formation Energy: {val:.4f} eV/atom")
@@ -215,14 +215,14 @@ def main():
         if output_path.suffix == ".xlsx":
             try:
                 df.to_excel(output_path, index=False)
-                print(f"\n✅ Saved {len(df)} predictions to Excel: {output_path}")
+                print(f"\n[OK] Saved {len(df)} predictions to Excel: {output_path}")
             except ImportError:
-                print("\n⚠️  pandas openpyxl missing. Falling back to CSV.")
+                print("\n[WARN] pandas openpyxl missing. Falling back to CSV.")
                 df.to_csv(output_path.with_suffix(".csv"), index=False)
-                print(f"✅ Saved predictions to CSV: {output_path.with_suffix('.csv')}")
+                print(f"[OK] Saved predictions to CSV: {output_path.with_suffix('.csv')}")
         else:
             df.to_csv(output_path, index=False)
-            print(f"\n✅ Saved {len(df)} predictions to CSV: {output_path}")
+            print(f"\n[OK] Saved {len(df)} predictions to CSV: {output_path}")
             
         # Preview Results Table
         print("\n" + "="*50)
@@ -256,7 +256,7 @@ def main():
             pred_val = pred_norm.item() * predictor.normalizer["std"] + predictor.normalizer["mean"]
             
         actual = sample.formation_energy.item()
-        print(f"\n🔮 Random Test Sample (Index {idx})")
+        print(f"\n[INFO] Random Test Sample (Index {idx})")
         print(f"   JID:       {getattr(sample, 'jid', 'unknown')}")
         print(f"   Predicted: {pred_val:.4f} eV/atom")
         print(f"   Actual:    {actual:.4f} eV/atom")

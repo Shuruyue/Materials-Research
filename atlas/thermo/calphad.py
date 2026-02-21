@@ -346,6 +346,32 @@ class CalphadCalculator:
         # plt.show()
         plt.close(fig)
 
+    def print_equilibrium_table(
+        self,
+        alloy: Union[str, Dict[str, float]],
+        T_range: tuple[float, float] = (400, 550),
+        step: float = 5.0,
+    ):
+        """
+        Print a compact temperature-phase equilibrium table to stdout.
+        """
+        t_lo, t_hi = float(T_range[0]), float(T_range[1])
+        if t_hi < t_lo:
+            t_lo, t_hi = t_hi, t_lo
+        temperatures = np.arange(t_lo, t_hi + 0.5 * step, step)
+
+        print("\n  T(K)   T(C)  Stable phases (fraction)")
+        print("  -----  ----- ---------------------------------------------")
+        for t in temperatures:
+            eq = self.equilibrium_at(alloy, float(t))
+            if not eq.phase_fractions:
+                phase_text = "-"
+            else:
+                phase_text = ", ".join(
+                    f"{p}:{f:.3f}" for p, f in sorted(eq.phase_fractions.items(), key=lambda x: -x[1])
+                )
+            print(f"  {t:5.0f}  {t - 273.15:5.1f} {phase_text}")
+
     def plot_binary(self, elem_x: str, elem_y: str, T_range=(373, 1073)):
         """Plot binary diagram (wrapper for pycalphad binplot)."""
         from pycalphad import binplot, variables as v

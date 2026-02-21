@@ -299,7 +299,11 @@ def main():
     
     # Multi-Task Wrapper
     # Note: CGCNN.encode returns (B, hidden_dim)
-    model = MultiTaskGNN(encoder, latent_dim=preset["hidden-dim"], task_names=PROPERTIES).to(device)
+    model = MultiTaskGNN(
+        encoder=encoder,
+        tasks={p: {"type": "scalar"} for p in PROPERTIES},
+        embed_dim=preset["hidden-dim"],
+    ).to(device)
     
     # Optim
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)

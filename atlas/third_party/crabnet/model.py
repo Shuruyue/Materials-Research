@@ -152,7 +152,7 @@ class Model():
             self.optimizer.discard_count += 1
             print(f'Epoch {self.epoch} failed to improve.')
             print(f'Discarded: {self.optimizer.discard_count}/'
-                  f'{self.discard_n} weight updates ♻🗑️')
+                  f'{self.discard_n} weight updates (discarded)')
 
         dt = time() - ti
         datalen = len(self.train_loader.dataset)
@@ -313,7 +313,7 @@ class Model():
             if self.optimizer.discard_count >= self.discard_n:
                 print(f'Discarded: {self.optimizer.discard_count}/'
                       f'{self.discard_n} weight updates, '
-                      f'early-stopping now 🙅🛑')
+                      f'early-stopping now')
                 self.optimizer.swap_swa_sgd()
                 break
 

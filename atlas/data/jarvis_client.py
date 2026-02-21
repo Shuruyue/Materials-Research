@@ -85,6 +85,21 @@ class JARVISClient:
         self._dft_3d = df
         return df
 
+    def stats(self) -> dict:
+        """
+        Return compact dataset statistics for CLI reporting.
+        """
+        df = self.load_dft_3d()
+        out = {
+            "n_materials_total": int(len(df)),
+            "n_with_atoms": int(df["atoms"].notna().sum()) if "atoms" in df.columns else 0,
+            "n_with_bandgap": int(df["optb88vdw_bandgap"].notna().sum()) if "optb88vdw_bandgap" in df.columns else 0,
+            "n_with_formation_energy": int(df["formation_energy_peratom"].notna().sum()) if "formation_energy_peratom" in df.columns else 0,
+            "n_with_ehull": int(df["ehull"].notna().sum()) if "ehull" in df.columns else 0,
+            "n_with_spillage": int(df["spillage"].notna().sum()) if "spillage" in df.columns else 0,
+        }
+        return out
+
     def _download_file(self, url: str, dest_path: Path, max_retries: int = 3):
         """Download file with progress bar and retries."""
         print(f"  Downloading data from {url}...")

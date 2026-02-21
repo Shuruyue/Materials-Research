@@ -23,6 +23,31 @@ import torch.nn as nn
 from typing import Optional, Dict
 import torch.nn.functional as F
 
+# Common architecture presets used by phase scripts.
+SMALL_PRESET = {
+    "irreps": "16x0e + 8x1o",
+    "max_ell": 1,
+    "n_layers": 2,
+    "n_radial": 10,
+    "radial_hidden": 32,
+}
+
+MEDIUM_PRESET = {
+    "irreps": "64x0e + 32x1o + 16x2e",
+    "max_ell": 2,
+    "n_layers": 3,
+    "n_radial": 20,
+    "radial_hidden": 128,
+}
+
+LARGE_PRESET = {
+    "irreps": "128x0e + 64x1o + 32x2e",
+    "max_ell": 2,
+    "n_layers": 4,
+    "n_radial": 32,
+    "radial_hidden": 256,
+}
+
 class AtomRef(nn.Module):
     """
     Atomic Reference Energy.

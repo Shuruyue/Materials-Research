@@ -106,7 +106,7 @@ def main():
     print(f"  Found {len(filtered)} structures with only {args.elements}")
 
     if len(filtered) == 0:
-        print("  ⚠ No structures found! Try a broader element set or higher ehull.")
+        print("  [WARN] No structures found. Try a broader element set or higher ehull.")
         return
 
     # Limit
@@ -163,7 +163,7 @@ def main():
     print(f"  Train:        {len(train_atoms)} → {train_file}")
     print(f"  Validation:   {len(val_atoms)} → {val_file}")
     print(f"  Test:         {len(test_atoms)} → {test_file}")
-    print(f"\n✓ MACE training data ready!")
+    print(f"\n[OK] MACE training data ready.")
 
 
 if __name__ == "__main__":

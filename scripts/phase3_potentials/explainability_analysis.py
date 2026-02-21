@@ -209,9 +209,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║     Phase 5: Explainability & Latent Space Analysis            ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
+    print("=" * 70)
+    print("Phase 5: Explainability and Latent Space Analysis")
+    print("=" * 70)
 
     # Load model
     print(f"\n  Loading model from {model_dir}...")
@@ -233,7 +233,7 @@ def main():
 
     # The model must be reconstructed based on what was trained.
     # For now, provide guidance:
-    print("\n  ⚠️  Model reconstruction: please set up model before running.")
+    print("\n  [WARN] Model reconstruction: please set up model before running.")
     print("      (This script provides analysis functions; integrate with your model)")
     print("      Example usage:")
     print("        model = EquivariantGNN(...).to(device)")

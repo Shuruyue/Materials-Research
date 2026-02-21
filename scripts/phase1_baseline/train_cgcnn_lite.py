@@ -17,6 +17,7 @@ import argparse
 import torch
 import torch.nn as nn
 import json
+import time
 from pathlib import Path
 
 import sys
@@ -114,7 +115,7 @@ def main():
     config = get_config()
 
     print("=" * 60)
-    print(f"  🟢 CGCNN LITE (Debug Mode)")
+    print("  CGCNN LITE (Debug Mode)")
     print(f"  Predicting: {args.property}")
     print(f"  Device: {device}")
     if device == "cuda":
@@ -155,6 +156,10 @@ def main():
         batch_size=args.batch_size, shuffle=False,
         num_workers=0, pin_memory=True
     )
+    print(
+        f"  Dataset sizes: train={len(datasets['train'])}, "
+        f"val={len(datasets['val'])}, test={len(datasets['test'])}"
+    )
 
     # ── Model ──
     print("\n  [2/3] Building CGCNN...")
@@ -185,17 +190,24 @@ def main():
 
     best_val_mae = float("inf")
     patience_counter = 0
-    history = {"train_loss": [], "val_mae": []}
+    history = {"train_loss": [], "val_mae": [], "val_rmse": [], "val_r2": [], "lr": []}
+    t_train = time.time()
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, args.property, device)
         val_metrics = evaluate(model, val_loader, args.property, device)
 
         val_mae = val_metrics.get(f"{args.property}_MAE", float("inf"))
+        val_rmse = val_metrics.get(f"{args.property}_RMSE", float("nan"))
+        val_r2 = val_metrics.get(f"{args.property}_R2", float("nan"))
         scheduler.step(val_mae)
 
         history["train_loss"].append(train_loss)
         history["val_mae"].append(val_mae)
+        history["val_rmse"].append(val_rmse)
+        history["val_r2"].append(val_r2)
+        lr = optimizer.param_groups[0]["lr"]
+        history["lr"].append(lr)
 
         if val_mae < best_val_mae:
             best_val_mae = val_mae
@@ -204,16 +216,16 @@ def main():
         else:
             patience_counter += 1
 
-        if epoch % 10 == 0 or epoch == 1:
-            lr = optimizer.param_groups[0]["lr"]
-            print(
-                f"  Epoch {epoch:4d} | "
-                f"train_loss: {train_loss:.4f} | "
-                f"val_MAE: {val_mae:.4f} | "
-                f"best: {best_val_mae:.4f} | "
-                f"lr: {lr:.2e} | "
-                f"patience: {patience_counter}/{args.patience}"
-            )
+        print(
+            f"  Epoch {epoch:4d}/{args.epochs:4d} | "
+            f"train_mse: {train_loss:.4f} | "
+            f"val_mae: {val_mae:.4f} | "
+            f"val_rmse: {val_rmse:.4f} | "
+            f"val_r2: {val_r2:.4f} | "
+            f"best_val_mae: {best_val_mae:.4f} | "
+            f"lr: {lr:.2e} | "
+            f"patience: {patience_counter}/{args.patience}"
+        )
 
         if patience_counter >= args.patience:
             print(f"\n  Early stopping at epoch {epoch}")
@@ -227,9 +239,6 @@ def main():
     model.load_state_dict(torch.load(save_dir / "best.pt", weights_only=True))
     test_metrics = evaluate(model, test_loader, args.property, device)
 
-    for k, v in test_metrics.items():
-        print(f"  {k}: {v:.4f}")
-
     # ── Targets ──
     targets = {
         "formation_energy": {"MAE_target": 0.063, "unit": "eV/atom"},
@@ -237,15 +246,23 @@ def main():
         "bulk_modulus": {"MAE_target": 10.0, "unit": "GPa"},
         "shear_modulus": {"MAE_target": 8.0, "unit": "GPa"},
     }
-
     t = targets.get(args.property, {})
-    test_mae = test_metrics.get(f"{args.property}_MAE", float("inf"))
     target_mae = t.get("MAE_target", float("inf"))
     unit = t.get("unit", "")
-    passed = "✅ PASS" if test_mae <= target_mae else "❌ FAIL"
+
+    for suffix in ["MAE", "RMSE", "R2", "MaxAE"]:
+        key = f"{args.property}_{suffix}"
+        if key in test_metrics:
+            val = test_metrics[key]
+            metric_unit = unit if suffix in {"MAE", "RMSE", "MaxAE"} else ""
+            print(f"  {key}: {val:.4f} {metric_unit}".rstrip())
+
+    test_mae = test_metrics.get(f"{args.property}_MAE", float("inf"))
+    passed = "PASS" if test_mae <= target_mae else "FAIL"
     print(f"\n  Target MAE: {target_mae} {unit}")
     print(f"  Actual MAE: {test_mae:.4f} {unit}")
     print(f"  Result: {passed}")
+    train_time = time.time() - t_train
 
     # Save results
     results = {
@@ -258,9 +275,23 @@ def main():
         "n_test": len(datasets["test"]),
         "n_params": n_params,
         "best_epoch": epoch - patience_counter,
+        "total_epochs": epoch,
+        "training_time_minutes": train_time / 60,
+        "hyperparameters": {
+            "hidden_dim": args.hidden_dim,
+            "n_conv": args.n_conv,
+            "lr": args.lr,
+            "batch_size": args.batch_size,
+            "patience": args.patience,
+            "max_samples": args.max_samples,
+            "optimizer": "Adam",
+            "scheduler": "ReduceLROnPlateau",
+        },
     }
     with open(save_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2)
+    with open(save_dir / "history.json", "w") as f:
+        json.dump(history, f, indent=2)
 
     print(f"\n  Results saved to {save_dir}")
 

@@ -101,7 +101,7 @@ def get_cpp_module():
     global _cpp_module
     if _cpp_module is None:
         try:
-            print("⚙️ Compiling C++ Extension for Graph Building... (Might take a minute)")
+            print("[INFO] Compiling C++ extension for graph building... (might take a minute)")
             _cpp_module = load_inline(
                 name='radius_graph_cpp',
                 cpp_sources=cpp_source,
@@ -109,9 +109,9 @@ def get_cpp_module():
                 verbose=True,
                 with_cuda=False # Keep it CPU-compatible for dataloader workers
             )
-            print("✅ C++ Extension Compiled Successfully!")
+            print("[OK] C++ extension compiled successfully.")
         except Exception as e:
-            print(f"❌ C++ Compilation Failed: {e}")
+            print(f"[ERROR] C++ compilation failed: {e}")
             print("  (Make sure you have Visual Studio Build Tools C++ installed)")
             return None
     return _cpp_module

@@ -55,6 +55,24 @@ BENCHMARKS = {
 }
 
 
+def _metric_key(property_name: str, suffix: str) -> str:
+    return f"{property_name}_{suffix}"
+
+
+def _metric(metrics: dict, property_name: str, suffix: str, default=float("nan")) -> float:
+    return float(metrics.get(_metric_key(property_name, suffix), default))
+
+
+def _print_metric_block(metrics: dict, property_name: str, unit: str) -> None:
+    for suffix in ["MAE", "RMSE", "R2", "MaxAE"]:
+        key = _metric_key(property_name, suffix)
+        if key not in metrics:
+            continue
+        value = float(metrics[key])
+        metric_unit = unit if suffix in {"MAE", "RMSE", "MaxAE"} else ""
+        print(f"  {key}: {value:.4f} {metric_unit}".rstrip())
+
+
 def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     """
     Remove extreme outliers from dataset and save them for inspection.
@@ -87,7 +105,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     
     if n_removed > 0:
         print(f"    Outlier filter: removed {n_removed} samples "
-              f"(|val - {mean:.2f}| > {n_sigma}σ = {n_sigma*std:.2f})")
+              f"(|val - {mean:.2f}| > {n_sigma}*std = {n_sigma*std:.2f})")
         
         # Save outliers for inspection (Critical for discovery)
         outlier_indices = np.where(~mask)[0]
@@ -199,7 +217,7 @@ def train_single_property(args, property_name: str):
     benchmark = BENCHMARKS[property_name]
 
     print("\n" + "=" * 70)
-    print(f"  CGCNN Full-Scale — Property: {property_name}")
+    print(f"  CGCNN Full-Scale - Property: {property_name}")
     print(f"  Device: {device}")
     if device == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name()}")
@@ -224,7 +242,7 @@ def train_single_property(args, property_name: str):
 
     stats = datasets["train"].property_statistics()
     for prop, s in stats.items():
-        print(f"    {prop}: n={s['count']}, μ={s['mean']:.3f}, σ={s['std']:.3f}")
+        print(f"    {prop}: n={s['count']}, mean={s['mean']:.3f}, std={s['std']:.3f}")
 
     data_time = time.time() - t0
     print(f"    Data loading: {data_time:.1f}s")
@@ -235,11 +253,6 @@ def train_single_property(args, property_name: str):
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
-    if not args.no_filter:
-        print("    Applying strict outlier filter (4.0 sigma)...")
-        # Pass save_dir to save outliers.csv
-        train_data = filter_outliers(datasets["train"], property_name, save_dir, n_sigma=4.0)
-  # Filter extreme outliers from all splits (Strict 4.0 sigma)
     if not args.no_filter:
         print("    Applying strict outlier filter (4.0 sigma)...")
         # Pass save_dir to save outliers.csv
@@ -266,6 +279,10 @@ def train_single_property(args, property_name: str):
                            num_workers=0, pin_memory=True)
     test_loader = PyGLoader(test_data, batch_size=args.batch_size, shuffle=False,
                             num_workers=0, pin_memory=True)
+    print(
+        f"    Dataset sizes used: train={len(train_data)}, "
+        f"val={len(val_data)}, test={len(test_data)}"
+    )
 
     # ── Model (maximum accuracy config) ──
     print("\n  [2/3] Building CGCNN (max accuracy)...")
@@ -306,12 +323,12 @@ def train_single_property(args, property_name: str):
     print(f"\n  [3/3] Training for up to {args.epochs} epochs...")
     print(f"    Patience: {args.patience}")
     print(f"    Strategy: OneCycleLR + GradClip(0.5)")
-    print(f"    Loss: Huber (delta=0.2) — robust to outliers")
+    print("    Loss: Huber (delta=0.2) - robust to outliers")
     print("-" * 70)
 
     best_val_mae = float("inf")
     patience_counter = 0
-    history = {"train_loss": [], "val_mae": [], "lr": []}
+    history = {"train_loss": [], "val_mae": [], "val_rmse": [], "val_r2": [], "lr": []}
     start_epoch = 1
 
     # Resume logic
@@ -343,13 +360,17 @@ def train_single_property(args, property_name: str):
             normalizer=normalizer,
         )
         val_metrics = evaluate(model, val_loader, property_name, device, normalizer=normalizer)
-        val_mae = val_metrics.get(f"{property_name}_MAE", float("inf"))
+        val_mae = _metric(val_metrics, property_name, "MAE", float("inf"))
+        val_rmse = _metric(val_metrics, property_name, "RMSE")
+        val_r2 = _metric(val_metrics, property_name, "R2")
 
         # Current LR
         lr = optimizer.param_groups[0]["lr"]
 
         history["train_loss"].append(train_loss)
         history["val_mae"].append(val_mae)
+        history["val_rmse"].append(val_rmse)
+        history["val_r2"].append(val_r2)
         history["lr"].append(lr)
 
         # NaN epoch detection
@@ -391,10 +412,12 @@ def train_single_property(args, property_name: str):
 
         # Log EVERY epoch as requested
         print(
-            f"  Epoch {epoch:4d} | "
-            f"loss: {train_loss:.4f} | "
-            f"val_MAE: {val_mae:.4f} | "
-            f"best: {best_val_mae:.4f} | "
+            f"  Epoch {epoch:4d}/{args.epochs:4d} | "
+            f"train_huber: {train_loss:.4f} | "
+            f"val_mae: {val_mae:.4f} | "
+            f"val_rmse: {val_rmse:.4f} | "
+            f"val_r2: {val_r2:.4f} | "
+            f"best_val_mae: {best_val_mae:.4f} | "
             f"lr: {lr:.2e} | "
             f"patience: {patience_counter}/{args.patience} | "
             f"{dt_ep:.1f}s"
@@ -422,20 +445,19 @@ def train_single_property(args, property_name: str):
 
     test_metrics = evaluate(model, test_loader, property_name, device, normalizer=normalizer)
 
-    for k, v in test_metrics.items():
-        print(f"  {k}: {v:.4f}")
+    _print_metric_block(test_metrics, property_name, benchmark["unit"])
 
-    test_mae = test_metrics.get(f"{property_name}_MAE", float("inf"))
+    test_mae = _metric(test_metrics, property_name, "MAE", float("inf"))
     unit = benchmark["unit"]
-    print(f"\n  ┌─────────────────────────────────────────┐")
-    print(f"  │  Property: {property_name:<30s}│")
-    print(f"  │  Test MAE: {test_mae:.4f} {unit:<26s}│")
-    print(f"  │  Target: {benchmark['target_mae']:.4f} {unit:<27s}│")
+    print("\n  -------------------------------------------")
+    print(f"  Property:   {property_name}")
+    print(f"  Test MAE:   {test_mae:.4f} {unit}")
+    print(f"  Target MAE: {benchmark['target_mae']:.4f} {unit}")
     passed = test_mae <= benchmark["target_mae"]
     status = "[PASS]" if passed else "[FAIL]"
-    print(f"  │  Result: {status:<32s}│")
-    print(f"  │  Best epoch: {best_epoch:<27d}│")
-    print(f"  └─────────────────────────────────────────┘")
+    print(f"  Result:     {status}")
+    print(f"  Best epoch: {best_epoch}")
+    print("  -------------------------------------------")
 
     # Save results
     results = {
@@ -448,7 +470,11 @@ def train_single_property(args, property_name: str):
         "n_train": len(datasets["train"]),
         "n_val": len(datasets["val"]),
         "n_test": len(datasets["test"]),
+        "n_train_used": len(train_data),
+        "n_val_used": len(val_data),
+        "n_test_used": len(test_data),
         "n_params": n_params,
+        "best_val_mae": float(best_val_mae),
         "best_epoch": best_epoch,
         "total_epochs": epoch,
         "training_time_minutes": train_time / 60,
@@ -501,10 +527,10 @@ def main():
                         help="Disable outlier filtering (use all data)")
     args = parser.parse_args()
 
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print(f"║ {'CGCNN STANDARD (Dev Mode)'.center(64)} ║")
-    print(f"║ {'Balanced for Development & Tuning'.center(64)} ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
+    print("=" * 70)
+    print("CGCNN STANDARD (Dev Mode)")
+    print("Balanced for Development and Tuning")
+    print("=" * 70)
 
     train_single_property(args, args.property)
 

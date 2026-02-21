@@ -176,7 +176,7 @@ def main():
 
     t_total = time.time() - t_start
     print(f"\n  Total runtime: {t_total:.1f}s ({t_total/60:.1f} min)")
-    print(f"\n✓ Discovery complete!")
+    print(f"\n[OK] Discovery complete.")
     print(f"  Results: {cfg.paths.data_dir / 'discovery_results'}")
 
 

@@ -43,15 +43,15 @@ def main():
     ti = db.query(topo_class="TI")
     print(f"\n  Topological Insulators ({len(ti)}):")
     for _, row in ti.iterrows():
-        print(f"    {row['material_id']:12s}  {row['formula']:15s}  "
+        print(f"    {row['jid']:12s}  {row['formula']:15s}  "
               f"Eg={row['band_gap']:.3f} eV")
 
     tsm = db.query(topo_class="TSM")
     print(f"\n  Topological Semimetals ({len(tsm)}):")
     for _, row in tsm.iterrows():
-        print(f"    {row['material_id']:12s}  {row['formula']:15s}")
+        print(f"    {row['jid']:12s}  {row['formula']:15s}")
 
-    print(f"\n✓ Database initialized at: {db.db_file}")
+    print(f"\n[OK] Database initialized at: {db.db_file}")
 
 
 if __name__ == "__main__":

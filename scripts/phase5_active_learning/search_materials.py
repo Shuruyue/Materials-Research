@@ -222,7 +222,7 @@ def main():
         results.to_csv(args.save, index=False)
         print(f"\n  Saved {len(results)} results to {args.save}")
 
-    print(f"\n✓ Search complete!")
+    print(f"\n[OK] Search complete.")
 
 
 if __name__ == "__main__":

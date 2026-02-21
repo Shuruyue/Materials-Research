@@ -70,7 +70,7 @@ def main():
     try:
         est = AlloyEstimator.from_preset(args.alloy)
     except ValueError as e:
-        print(f"\n  ✗ {e}")
+        print(f"\n  [ERROR] {e}")
         return
 
     key = args.alloy.upper().replace("-", "").replace(" ", "")
