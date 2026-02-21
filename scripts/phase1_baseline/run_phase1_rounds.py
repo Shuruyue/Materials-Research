@@ -59,14 +59,19 @@ def _latest_pro_run(base_dir: Path) -> Path | None:
     return runs[-1] if runs else None
 
 
+def _latest_or_base(base_dir: Path) -> Path | None:
+    latest = _latest_pro_run(base_dir)
+    if latest is not None:
+        return latest
+    return base_dir if base_dir.exists() else None
+
+
 def _resolve_model_dir(stage_name: str, property_name: str) -> Path | None:
     models_dir = PROJECT_ROOT / "models"
     if stage_name in {"smoke", "lite"}:
-        p = models_dir / f"cgcnn_lite_{property_name}"
-        return p if p.exists() else None
+        return _latest_or_base(models_dir / f"cgcnn_lite_{property_name}")
     if stage_name in {"std", "competition"}:
-        p = models_dir / f"cgcnn_std_{property_name}"
-        return p if p.exists() else None
+        return _latest_or_base(models_dir / f"cgcnn_std_{property_name}")
     if stage_name == "max":
         return _latest_pro_run(models_dir / f"cgcnn_pro_{property_name}")
     return None

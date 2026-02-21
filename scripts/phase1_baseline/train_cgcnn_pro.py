@@ -36,6 +36,7 @@ try:
     from atlas.training.metrics import scalar_metrics
     from atlas.training.normalizers import TargetNormalizer
     from atlas.training.checkpoint import CheckpointManager
+    from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -247,33 +248,31 @@ def train_single_property(args, property_name: str):
     data_time = time.time() - t0
     print(f"    Data loading: {data_time:.1f}s")
 
-    # Filter extreme outliers from all splits (Strict 4.0 sigma)
     # ── Output Directory ──
-    # Create timestamped run folder to preserve history of experiments
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Base model folder
     base_dir = config.paths.models_dir / f"cgcnn_pro_{property_name}"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Specific run folder (e.g. run_20231027_153000)
-    # If resuming, use the EXISTING latest run folder unless specified
-    if args.resume:
-        # Resume from latest run directory
-        runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
-        if runs:
-            save_dir = runs[-1]
-            print(f"  [INFO] Resuming in existing run folder: {save_dir.name}")
-        else:
-            # Fallback if no runs found
-            save_dir = base_dir / f"run_{timestamp}"
-            save_dir.mkdir()
-    else:
-        # Start new run
-        save_dir = base_dir / f"run_{timestamp}"
-        save_dir.mkdir()
-        print(f"  [INFO] Starting new experiment run: {save_dir.name}")
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"  [ERROR] {e}")
+        return {}
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "started",
+            "phase": "phase1",
+            "model_family": "cgcnn_pro",
+            "property": property_name,
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
     if not args.no_filter:
@@ -359,9 +358,12 @@ def train_single_property(args, property_name: str):
     if args.resume and checkpoint_path.exists():
         print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         normalizer_state = checkpoint.get("normalizer")
         if normalizer_state:
             normalizer.mean = normalizer_state["mean"]
@@ -372,11 +374,13 @@ def train_single_property(args, property_name: str):
         best_val_mae = checkpoint.get("best_val_mae", float("inf"))
         patience_counter = checkpoint.get("patience_counter", 0)
         print(f"  -> Resuming at epoch {start_epoch}")
+    elif args.resume:
+        print(f"  [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
 
     t_train = time.time()
 
 
-    manager = CheckpointManager(save_dir, top_k=3, keep_last_k=3)
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
 
     for epoch in range(start_epoch, args.epochs + 1):
         t_ep = time.time()
@@ -425,9 +429,12 @@ def train_single_property(args, property_name: str):
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             patience_counter = 0
+            state["best_val_mae"] = best_val_mae
+            state["patience_counter"] = patience_counter
             manager.save_best(state, val_mae, epoch)
         else:
             patience_counter += 1
+            state["patience_counter"] = patience_counter
 
         # Save Checkpoint (Rotating last-k)
         manager.save_checkpoint(state, epoch)
@@ -486,6 +493,7 @@ def train_single_property(args, property_name: str):
     # Save results
     results = {
         "property": property_name,
+        "run_id": save_dir.name,
         "test_metrics": test_metrics,
         "target_mae": benchmark["target_mae"],
         "cgcnn_literature_mae": benchmark["cgcnn_mae"],
@@ -512,6 +520,8 @@ def train_single_property(args, property_name: str):
             "loss": "huber_delta0.2",
             "optimizer": "AdamW",
             "scheduler": "OneCycleLR",
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
         },
     }
     with open(save_dir / "results.json", "w") as f:
@@ -521,12 +531,26 @@ def train_single_property(args, property_name: str):
     hist_ser = {k: [float(v) for v in vs] for k, vs in history.items()}
     with open(save_dir / "history.json", "w") as f:
         json.dump(hist_ser, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_epoch": int(best_epoch),
+                "total_epochs": int(epoch),
+                "passed": bool(passed),
+                "test_mae": float(test_mae),
+            },
+        },
+    )
 
     print(f"  Results saved to {save_dir}")
     return results
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="CGCNN Production Training (High Precision)"
     )
@@ -549,6 +573,12 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--resume", action="store_true",
                         help="Resume training from latest checkpoint")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     parser.add_argument("--no-filter", action="store_true",
                         help="Disable outlier filtering (use all data)")
     # Removed AMP argument to enforce float32
@@ -559,10 +589,11 @@ def main():
     print("High Precision / SOTA Challenge")
     print("=" * 70)
 
-    train_single_property(args, args.property)
+    result = train_single_property(args, args.property)
+    return 0 if result else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
 

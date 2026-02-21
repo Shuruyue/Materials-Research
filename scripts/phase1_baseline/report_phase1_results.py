@@ -94,15 +94,20 @@ def collect_results(property_name: str, latest_pro_only: bool = False) -> list[R
     rows: list[ResultRow] = []
     models_dir = PROJECT_ROOT / "models"
 
-    lite_path = models_dir / f"cgcnn_lite_{property_name}" / "results.json"
-    std_path = models_dir / f"cgcnn_std_{property_name}" / "results.json"
-
-    lite_row = _collect_one(lite_path, tier="lite", run_id="-")
-    std_row = _collect_one(std_path, tier="std", run_id="-")
-    if lite_row:
-        rows.append(lite_row)
-    if std_row:
-        rows.append(std_row)
+    for tier, base_name in [("lite", f"cgcnn_lite_{property_name}"), ("std", f"cgcnn_std_{property_name}")]:
+        base_dir = models_dir / base_name
+        direct_row = _collect_one(base_dir / "results.json", tier=tier, run_id="-")
+        if direct_row:
+            rows.append(direct_row)
+        if base_dir.exists():
+            runs = sorted(
+                [d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+                key=lambda p: p.name,
+            )
+            for run_dir in runs:
+                row = _collect_one(run_dir / "results.json", tier=tier, run_id=run_dir.name)
+                if row:
+                    rows.append(row)
 
     pro_base = models_dir / f"cgcnn_pro_{property_name}"
     if pro_base.exists():

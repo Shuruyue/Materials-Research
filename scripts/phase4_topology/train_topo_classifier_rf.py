@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
 from atlas.data.jarvis_client import JARVISClient
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 
 MAX_Z = 86
@@ -147,6 +149,30 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray):
     }
 
 
+def _prune_top_runs(base_dir: Path, keep_top_runs: int) -> None:
+    """Keep only top runs by test F1 score."""
+    if keep_top_runs <= 0 or not base_dir.exists():
+        return
+    run_dirs = [d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
+    scored: list[tuple[float, Path]] = []
+    for run_dir in run_dirs:
+        info_path = run_dir / "training_info.json"
+        if not info_path.exists():
+            continue
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                info = json.load(f)
+            score = float(info.get("test", {}).get("f1", float("-inf")))
+        except Exception:
+            score = float("-inf")
+        scored.append((score, run_dir))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for _, old_run in scored[keep_top_runs:]:
+        shutil.rmtree(old_run, ignore_errors=True)
+        print(f"[INFO] Pruned run outside top-{keep_top_runs}: {old_run.name}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train RandomForest topology baseline")
     parser.add_argument("--max-samples", type=int, default=5000, help="Maximum balanced sample count")
@@ -154,11 +180,38 @@ def main() -> int:
     parser.add_argument("--max-depth", type=int, default=24)
     parser.add_argument("--min-samples-leaf", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse latest/specified run folder (RF does full retrain)")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--keep-top-runs", type=int, default=3,
+                        help="Keep top-N RF runs by test F1")
     args = parser.parse_args()
 
     cfg = get_config()
-    model_dir = cfg.paths.models_dir / "topo_classifier_rf"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = cfg.paths.models_dir / "topo_classifier_rf"
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"[ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"[INFO] {run_msg}: {save_dir.name}")
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase4",
+            "model_family": "rf_topology",
+        },
+    )
+    print(f"[INFO] Run manifest: {manifest_path}")
 
     print("=== Phase 4 RF Baseline ===")
     print(f"  max_samples:      {args.max_samples}")
@@ -199,9 +252,10 @@ def main() -> int:
     print(f"  Recall:    {test_metrics['recall']:.3f}")
     print(f"  F1:        {test_metrics['f1']:.3f}")
 
-    joblib.dump(model, model_dir / "rf_model.joblib")
+    joblib.dump(model, save_dir / "rf_model.joblib")
     report = {
         "algorithm": "random_forest_composition",
+        "run_id": save_dir.name,
         "config": {
             "max_samples": args.max_samples,
             "n_estimators": args.n_estimators,
@@ -213,10 +267,26 @@ def main() -> int:
         "validation": val_metrics,
         "test": test_metrics,
     }
-    with open(model_dir / "training_info.json", "w", encoding="utf-8") as f:
+    with open(save_dir / "training_info.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+    with open(save_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "completed",
+            "result": {
+                "validation_f1": float(val_metrics["f1"]),
+                "test_f1": float(test_metrics["f1"]),
+                "test_accuracy": float(test_metrics["accuracy"]),
+            },
+        },
+    )
 
-    print(f"\nSaved model/report to: {model_dir}")
+    _prune_top_runs(base_dir, keep_top_runs=args.keep_top_runs)
+    print(f"\nSaved model/report to: {save_dir}")
     return 0
 
 

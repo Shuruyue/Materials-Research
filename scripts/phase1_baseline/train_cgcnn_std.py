@@ -34,8 +34,10 @@ try:
     from atlas.data.crystal_dataset import CrystalPropertyDataset
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
+    from atlas.training.checkpoint import CheckpointManager
     from atlas.training.metrics import scalar_metrics
     from atlas.training.normalizers import TargetNormalizer
+    from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -249,8 +251,31 @@ def train_single_property(args, property_name: str):
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
     # ── Output Directory ──
-    save_dir = config.paths.models_dir / f"cgcnn_std_{property_name}"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = config.paths.models_dir / f"cgcnn_std_{property_name}"
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"  [ERROR] {e}")
+        return {}
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "started",
+            "phase": "phase1",
+            "model_family": "cgcnn_std",
+            "property": property_name,
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     # Filter extreme outliers from all splits (Strict 4.0 sigma)
     if not args.no_filter:
@@ -336,9 +361,12 @@ def train_single_property(args, property_name: str):
     if args.resume and checkpoint_path.exists():
         print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         normalizer_state = checkpoint.get("normalizer")
         if normalizer_state:
             normalizer.mean = normalizer_state["mean"]
@@ -349,10 +377,14 @@ def train_single_property(args, property_name: str):
         best_val_mae = checkpoint.get("best_val_mae", float("inf"))
         patience_counter = checkpoint.get("patience_counter", 0)
         print(f"  -> Resuming at epoch {start_epoch}")
+    elif args.resume:
+        print(f"  [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
 
     t_train = time.time()
+    last_epoch = start_epoch - 1
 
     for epoch in range(start_epoch, args.epochs + 1):
+        last_epoch = epoch
         t_ep = time.time()
 
         train_loss = train_epoch(
@@ -382,22 +414,7 @@ def train_single_property(args, property_name: str):
                 break
             continue
 
-        if val_mae < best_val_mae:
-            best_val_mae = val_mae
-            patience_counter = 0
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_mae": val_mae,
-                "property": property_name,
-                "normalizer": normalizer.state_dict(),
-            }, save_dir / "best.pt")
-        else:
-            patience_counter += 1
-
-        # Save latest checkpoint
-        torch.save({
+        state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -406,7 +423,21 @@ def train_single_property(args, property_name: str):
             "history": history,
             "best_val_mae": best_val_mae,
             "patience_counter": patience_counter,
-        }, checkpoint_path)
+            "property": property_name,
+        }
+
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
+            patience_counter = 0
+            state["best_val_mae"] = best_val_mae
+            state["patience_counter"] = patience_counter
+            state["val_mae"] = val_mae
+            manager.save_best(state, val_mae, epoch)
+        else:
+            patience_counter += 1
+            state["patience_counter"] = patience_counter
+
+        manager.save_checkpoint(state, epoch)
 
         dt_ep = time.time() - t_ep
 
@@ -435,10 +466,15 @@ def train_single_property(args, property_name: str):
     print("  FINAL TEST SET EVALUATION")
     print("=" * 70)
 
-    if (save_dir / "best.pt").exists():
-        checkpoint = torch.load(save_dir / "best.pt", weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        best_epoch = checkpoint["epoch"]
+    best_path = save_dir / "best.pt"
+    if best_path.exists():
+        checkpoint = torch.load(best_path, weights_only=False)
+        if "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+            best_epoch = checkpoint.get("epoch", -1)
+        else:
+            model.load_state_dict(checkpoint)
+            best_epoch = -1
     else:
         print("  Warning: No best model found (NaNs?). Using current model.")
         best_epoch = -1
@@ -462,6 +498,7 @@ def train_single_property(args, property_name: str):
     # Save results
     results = {
         "property": property_name,
+        "run_id": save_dir.name,
         "test_metrics": test_metrics,
         "target_mae": benchmark["target_mae"],
         "cgcnn_literature_mae": benchmark["cgcnn_mae"],
@@ -476,7 +513,7 @@ def train_single_property(args, property_name: str):
         "n_params": n_params,
         "best_val_mae": float(best_val_mae),
         "best_epoch": best_epoch,
-        "total_epochs": epoch,
+        "total_epochs": last_epoch,
         "training_time_minutes": train_time / 60,
         "hyperparameters": {
             "hidden_dim": args.hidden_dim,
@@ -488,6 +525,8 @@ def train_single_property(args, property_name: str):
             "loss": "huber_delta0.2",
             "optimizer": "AdamW",
             "scheduler": "OneCycleLR",
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
         },
     }
     with open(save_dir / "results.json", "w") as f:
@@ -497,12 +536,26 @@ def train_single_property(args, property_name: str):
     hist_ser = {k: [float(v) for v in vs] for k, vs in history.items()}
     with open(save_dir / "history.json", "w") as f:
         json.dump(hist_ser, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_epoch": int(best_epoch),
+                "total_epochs": int(last_epoch),
+                "passed": bool(passed),
+                "test_mae": float(test_mae),
+            },
+        },
+    )
 
     print(f"  Results saved to {save_dir}")
     return results
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="CGCNN Standard Training (Dev/Tuning)"
     )
@@ -523,6 +576,12 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--resume", action="store_true",
                         help="Resume training from latest checkpoint")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     parser.add_argument("--no-filter", action="store_true",
                         help="Disable outlier filtering (use all data)")
     args = parser.parse_args()
@@ -532,10 +591,11 @@ def main():
     print("Balanced for Development and Tuning")
     print("=" * 70)
 
-    train_single_property(args, args.property)
+    result = train_single_property(args, args.property)
+    return 0 if result else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
 

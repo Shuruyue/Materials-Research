@@ -32,7 +32,7 @@ PHASE2_PROFILES = {
         "lite": {
             "script": "scripts/phase2_multitask/train_multitask_lite.py",
             "args": [],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": False,
         },
@@ -62,35 +62,35 @@ PHASE2_PROFILES = {
         "smoke": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
             "args": ["--preset", "small", "--epochs", "5", "--batch-size", "64", "--max-samples", "800"],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "lite": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
             "args": ["--preset", "small", "--epochs", "40", "--batch-size", "96", "--max-samples", "3000"],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "std": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
             "args": ["--preset", "medium", "--epochs", "200", "--batch-size", "128"],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "pro": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
             "args": ["--preset", "large", "--epochs", "300", "--batch-size", "128"],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "max": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
             "args": ["--preset", "large", "--epochs", "500", "--batch-size", "160", "--lr", "0.0007"],
-            "supports_resume": False,
+            "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
@@ -108,7 +108,7 @@ PHASE2_COMPETITION = {
     "cgcnn": {
         "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
         "args": ["--preset", "medium", "--epochs", "280", "--batch-size", "128", "--lr", "0.0009"],
-        "supports_resume": False,
+        "supports_resume": True,
         "supports_all_properties": False,
         "supports_max_samples": True,
     },
@@ -149,6 +149,13 @@ def build_command(args: argparse.Namespace) -> list[str]:
     elif args.max_samples is not None:
         print("[WARN] --max-samples is only supported by Phase 2 CGCNN baseline")
 
+    if args.run_id:
+        cmd.extend(["--run-id", args.run_id])
+    if args.top_k is not None:
+        cmd.extend(["--top-k", str(args.top_k)])
+    if args.keep_last_k is not None:
+        cmd.extend(["--keep-last-k", str(args.keep_last_k)])
+
     return cmd
 
 
@@ -173,6 +180,9 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--preset", choices=["small", "medium", "large"], default=None)
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--keep-last-k", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

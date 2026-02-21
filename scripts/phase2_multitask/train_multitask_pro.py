@@ -36,6 +36,7 @@ from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 from atlas.training.filters import filter_outliers
 from atlas.training.checkpoint import CheckpointManager
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 # ── Pro Tier Config ──
 # Full discovery mode activated by --all-properties
@@ -202,7 +203,7 @@ def evaluate(model, loader, device, normalizer=None):
 
 # ── Main ──
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--no-filter", action="store_true", help="Disable outlier filter")
@@ -210,6 +211,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=4) # Lowered to 4 for extreme VRAM limits
     parser.add_argument("--lr", type=float, default=0.0005)
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
     # Dynamic Property Selection
@@ -224,33 +231,35 @@ def main():
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print(f"║ {'E3NN PRO (Production Mode)'.center(64)} ║")
-    print(f"║ {f'Tasks: {len(PROPERTIES)} Properties'.center(64)} ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
-    
-    # ── Output Directory ──
-    # Create timestamped run folder to preserve history of experiments
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    print("=" * 66)
+    print("E3NN PRO (Production Mode)")
+    print(f"Tasks: {len(PROPERTIES)} Properties")
+    print("=" * 66)
     
     base_dir = config.paths.models_dir / "multitask_pro_e3nn"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Specific run folder (e.g. run_20231027_153000)
-    if args.resume:
-        # Resume from latest run directory
-        runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
-        if runs:
-            save_dir = runs[-1]
-            print(f"  [INFO] Resuming in existing run folder: {save_dir.name}")
-        else:
-            save_dir = base_dir / f"run_{timestamp}"
-            save_dir.mkdir()
-    else:
-        save_dir = base_dir / f"run_{timestamp}"
-        save_dir.mkdir()
-        print(f"  [INFO] Starting new experiment run: {save_dir.name}")
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"  [ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase2",
+            "model_family": "multitask_pro_e3nn",
+            "all_properties": bool(args.all_properties),
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     # 1. Data
     print("\n[1/5] Loading Dataset...")
@@ -265,10 +274,12 @@ def main():
         print("\n[2/5] Filtering Outliers (Pro: 4.0 sigma)...")
         train_data = filter_outliers(datasets["train"], PROPERTIES, save_dir, n_sigma=4.0)
         val_data = filter_outliers(datasets["val"], PROPERTIES, save_dir, n_sigma=4.0)
+        test_data = filter_outliers(datasets["test"], PROPERTIES, save_dir, n_sigma=4.0)
     else:
         print("\n[2/5] [WARN] Outlier Filter DISABLED (--no-filter). Discovery Mode ON.")
         train_data = datasets["train"]
         val_data = datasets["val"]
+        test_data = datasets["test"]
     
     # 3. Normalizer
     print("\n[3/5] Normalizing Targets...")
@@ -280,6 +291,8 @@ def main():
                               num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_data, batch_size=args.batch_size,
                             num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_data, batch_size=args.batch_size,
+                             num_workers=0, pin_memory=True)
     
     print(f"\n[INFO] Device: {device}")
     if device == "cuda":
@@ -331,17 +344,24 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         best_val_mae = ckpt["best_val_mae"]
         history = ckpt["history"]
+    elif args.resume:
+        print(f"    [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
 
     # 5. Train
     print(f"\n[5/5] Training for {args.epochs} epochs...")
     
-    manager = CheckpointManager(save_dir, top_k=3, keep_last_k=3)
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
 
+    last_epoch = start_epoch - 1
+    best_epoch = -1
+    last_val_metrics = {}
     for epoch in range(start_epoch, args.epochs + 1):
+        last_epoch = epoch
         t0 = time.time()
         loss = train_epoch(model, loss_fn, train_loader, optimizer, device, normalizer)
         
         val_metrics = evaluate(model, val_loader, device, normalizer)
+        last_val_metrics = val_metrics
         val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
         avg_val_mae = sum(val_maes) / len(val_maes) if val_maes else float('inf')
         
@@ -388,12 +408,65 @@ def main():
         # Save Best
         if avg_val_mae < best_val_mae:
             best_val_mae = avg_val_mae
+            best_epoch = epoch
             print(f"    * New Best! ({best_val_mae:.4f})")
             manager.save_best(state, best_val_mae, epoch)
             
         # Save Checkpoint (Rotating last-k)
         manager.save_checkpoint(state, epoch)
 
+    best_path = save_dir / "best.pt"
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, weights_only=False)
+        if "model_state_dict" in best_ckpt:
+            model.load_state_dict(best_ckpt["model_state_dict"])
+            best_epoch = int(best_ckpt.get("epoch", best_epoch))
+    test_metrics = evaluate(model, test_loader, device, normalizer)
+    test_maes = [test_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in test_metrics]
+    avg_test_mae = float(sum(test_maes) / len(test_maes)) if test_maes else float("inf")
+
+    results = {
+        "algorithm": "e3nn_multitask_pro",
+        "run_id": save_dir.name,
+        "all_properties": bool(args.all_properties),
+        "best_val_mae": float(best_val_mae),
+        "best_epoch": int(best_epoch),
+        "total_epochs": int(last_epoch),
+        "n_train": len(train_data),
+        "n_val": len(val_data),
+        "n_test": len(test_data),
+        "val_metrics_last_epoch": last_val_metrics,
+        "test_metrics": test_metrics,
+        "avg_test_mae": avg_test_mae,
+        "hyperparameters": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
+            "outlier_filter_enabled": bool(not args.no_filter),
+        },
+    }
+    with open(save_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    with open(save_dir / "history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_val_mae": float(best_val_mae),
+                "best_epoch": int(best_epoch),
+                "total_epochs": int(last_epoch),
+                "avg_test_mae": float(avg_test_mae),
+            },
+        },
+    )
+    return 0
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 

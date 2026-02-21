@@ -27,8 +27,10 @@ from atlas.config import get_config
 from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
 from atlas.models.cgcnn import CGCNN
 from atlas.models.multi_task import MultiTaskGNN, ScalarHead
+from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 
 PROPERTIES = DEFAULT_PROPERTIES
@@ -230,27 +232,56 @@ def evaluate(model, loader, device, normalizer=None):
 
 # ── Main ──
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--preset", type=str, default="medium", choices=MODEL_PRESETS.keys())
     parser.add_argument("--batch-size", type=int, default=128)  # CGCNN usually handles large batch
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     args = parser.parse_args()
-    
+
     # Apply preset
     preset = MODEL_PRESETS[args.preset]
     print(f"\n[Config] Applying preset '{args.preset}': {preset['description']}")
     for k, v in preset.items():
         if k != "description":
             print(f"  - {k}: {v}")
-            
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
-    
+
+    config = get_config()
+    base_dir = config.paths.models_dir / "multitask_cgcnn"
+    try:
+        save_dir, created_new = resolve_run_dir(base_dir, resume=args.resume, run_id=args.run_id)
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"[ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"[INFO] {run_msg}: {save_dir.name}")
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase2",
+            "model_family": "multitask_cgcnn",
+        },
+    )
+    print(f"[INFO] Run manifest: {manifest_path}")
+
     # Data
     print("\n[1/5] Loading multi-property dataset...")
     datasets = {}
@@ -309,33 +340,136 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
-    
+
+    start_epoch = 1
+    best_val_mae = float('inf')
+    history = {"train_loss": [], "val_mae": [], "lr": []}
+    checkpoint_path = save_dir / "checkpoint.pt"
+    if args.resume and checkpoint_path.exists():
+        print(f"[INFO] Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "loss_fn_state_dict" in ckpt:
+            loss_fn.load_state_dict(ckpt["loss_fn_state_dict"])
+        if "normalizer" in ckpt:
+            normalizer.load_state_dict(ckpt["normalizer"])
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        best_val_mae = float(ckpt.get("best_val_mae", best_val_mae))
+        history = ckpt.get("history", history)
+        print(f"[INFO] Resume epoch: {start_epoch}")
+    elif args.resume:
+        print(f"[WARN] --resume requested but checkpoint not found: {checkpoint_path}")
+
     # Train
     print(f"\n[4/5] Training for {args.epochs} epochs...")
-    best_val_mae = float('inf')
-    
-    for epoch in range(1, args.epochs + 1):
+    last_epoch = start_epoch - 1
+    for epoch in range(start_epoch, args.epochs + 1):
+        last_epoch = epoch
         t0 = time.time()
         loss = train_epoch(model, loss_fn, train_loader, optimizer, device, normalizer)
-        
-        if epoch % 5 == 0 or epoch == 1:
-            val_metrics = evaluate(model, val_loader, device, normalizer)
-            val_mae = sum([val_metrics[f"{p}_MAE"] for p in PROPERTIES]) / len(PROPERTIES)
-            
-            scheduler.step(val_mae)
-            
-            is_best = val_mae < best_val_mae
-            if is_best:
-                best_val_mae = val_mae
-                
-            weights = loss_fn.get_weights()
-            dt = time.time() - t0
-            
-            log = f"Epoch {epoch:3d} | Loss: {loss:.4f} | Val MAE: {val_mae:.3f}"
-            for p in PROPERTIES:
-                 log += f" {p[:3]}:{val_metrics[f'{p}_MAE']:.2f}"
-            log += f" | {dt:.1f}s"
-            print(log)
+
+        val_metrics = evaluate(model, val_loader, device, normalizer)
+        val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
+        val_mae = float(sum(val_maes) / len(val_maes)) if val_maes else float("inf")
+
+        scheduler.step(val_mae)
+        dt = time.time() - t0
+        lr = float(optimizer.param_groups[0]["lr"])
+
+        history["train_loss"].append(float(loss))
+        history["val_mae"].append(val_mae)
+        history["lr"].append(lr)
+
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "loss_fn_state_dict": loss_fn.state_dict(),
+            "normalizer": normalizer.state_dict(),
+            "history": history,
+            "best_val_mae": best_val_mae,
+            "val_mae": val_mae,
+            "preset": args.preset,
+        }
+
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
+            state["best_val_mae"] = best_val_mae
+            manager.save_best(state, val_mae, epoch)
+
+        manager.save_checkpoint(state, epoch)
+
+        log = f"Epoch {epoch:3d} | Loss: {loss:.4f} | Val MAE: {val_mae:.3f}"
+        for p in PROPERTIES:
+            key = f"{p}_MAE"
+            if key in val_metrics:
+                log += f" {p[:3]}:{val_metrics[key]:.2f}"
+        log += f" | lr:{lr:.2e} | {dt:.1f}s"
+        print(log)
+
+    # Final test evaluation with best checkpoint
+    best_path = save_dir / "best.pt"
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, weights_only=False)
+        if "model_state_dict" in best_ckpt:
+            model.load_state_dict(best_ckpt["model_state_dict"])
+            best_epoch = int(best_ckpt.get("epoch", -1))
+        else:
+            best_epoch = -1
+    else:
+        best_epoch = -1
+
+    test_metrics = evaluate(model, test_loader, device, normalizer)
+    test_maes = [test_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in test_metrics]
+    avg_test_mae = float(sum(test_maes) / len(test_maes)) if test_maes else float("inf")
+
+    results = {
+        "algorithm": "cgcnn_multitask",
+        "run_id": save_dir.name,
+        "preset": args.preset,
+        "test_metrics": test_metrics,
+        "avg_test_mae": avg_test_mae,
+        "best_val_mae": best_val_mae,
+        "best_epoch": best_epoch,
+        "total_epochs": last_epoch,
+        "n_train": len(train_data),
+        "n_val": len(datasets["val"]),
+        "n_test": len(datasets["test"]),
+        "hyperparameters": {
+            "preset": args.preset,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "max_samples": args.max_samples,
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
+        },
+    }
+    with open(save_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    with open(save_dir / "history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_epoch": int(best_epoch),
+                "total_epochs": int(last_epoch),
+                "avg_test_mae": float(avg_test_mae),
+            },
+        },
+    )
+    print(f"\n[5/5] [OK] Results saved to {save_dir}")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

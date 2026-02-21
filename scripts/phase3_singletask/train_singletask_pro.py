@@ -30,8 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from atlas.config import get_config
 from atlas.data.crystal_dataset import CrystalPropertyDataset
 from atlas.models.equivariant import EquivariantGNN, LARGE_PRESET
+from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 
 # ── Literature benchmarks ──
@@ -125,12 +127,12 @@ def filter_outliers(dataset, property_name, n_sigma=8.0):
     mask = np.abs(arr - mean) <= n_sigma * std
     n_removed = (~mask).sum()
     if n_removed > 0:
-        print(f"    Outlier filter ({n_sigma}σ): removed {n_removed} samples")
+        print(f"    Outlier filter ({n_sigma} sigma): removed {n_removed} samples")
         indices = np.where(mask)[0].tolist()
         from torch.utils.data import Subset
         dataset = Subset(dataset, indices)
     else:
-        print(f"    Outlier filter ({n_sigma}σ): no outliers found")
+        print(f"    Outlier filter ({n_sigma} sigma): no outliers found")
     return dataset
 
 
@@ -228,14 +230,14 @@ def format_time(seconds):
     else: return f"{seconds / 3600:.1f}h"
 
 
-def train_single_property(args, property_name: str):
+def train_single_property(args, property_name: str) -> bool:
     """Train equivariant GNN for one property."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     config = get_config()
     benchmark = BENCHMARKS[property_name]
 
     print("\n" + "=" * 70)
-    print(f"  EquivariantGNN PRO — Property: {property_name}")
+    print(f"  EquivariantGNN PRO - Property: {property_name}")
     print(f"  Mode: {'Fine-Tuning' if args.finetune_from else 'Scratch'}")
     print(f"  SWA: {'Enabled' if args.use_swa else 'Disabled'}")
     print(f"  Acc. Steps: {args.acc_steps}")
@@ -254,7 +256,7 @@ def train_single_property(args, property_name: str):
         datasets[split] = ds
 
     # ── Outlier filtering ──
-    print(f"\n  [2/4] Filtering outliers ({args.outlier_sigma}σ)...")
+    print(f"\n  [2/4] Filtering outliers ({args.outlier_sigma} sigma)...")
     for split in ["train", "val", "test"]:
         datasets[split]._data_list = filter_outliers(
             [datasets[split][i] for i in range(len(datasets[split]))],
@@ -316,16 +318,69 @@ def train_single_property(args, property_name: str):
 
     # ── Training ──
     print(f"\n  [5/5] Training for up to {args.epochs} epochs...")
-    save_dir = config.paths.models_dir / f"specialist_{property_name}"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = config.paths.models_dir / f"specialist_{property_name}"
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"  [ERROR] {e}")
+        return False
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase3",
+            "model_family": "equivariant_specialist",
+            "property": property_name,
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     best_val_mae = float("inf")
     best_ema_val_mae = float("inf")
     patience_counter = 0
+    start_epoch = 1
+    history = {"train_loss": [], "val_mae": [], "ema_val_mae": []}
     t_train = time.time()
     epoch_times = []
+    checkpoint_path = save_dir / "checkpoint.pt"
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume and checkpoint_path.exists():
+        print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            except Exception:
+                print("  [WARN] Scheduler state mismatch; using fresh scheduler state.")
+        if "normalizer" in ckpt:
+            normalizer.load_state_dict(ckpt["normalizer"])
+        if ema is not None and "ema_shadow" in ckpt and isinstance(ckpt["ema_shadow"], dict):
+            ema.shadow = ckpt["ema_shadow"]
+        best_val_mae = float(ckpt.get("best_val_mae", best_val_mae))
+        best_ema_val_mae = float(ckpt.get("best_ema_val_mae", best_ema_val_mae))
+        patience_counter = int(ckpt.get("patience_counter", patience_counter))
+        history = ckpt.get("history", history)
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        print(f"  [INFO] Resume epoch: {start_epoch}")
+    elif args.resume:
+        print(f"  [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
+
+    last_epoch = start_epoch - 1
+    for epoch in range(start_epoch, args.epochs + 1):
+        last_epoch = epoch
         t_ep = time.time()
         
         # SWA Phase Logic
@@ -363,9 +418,11 @@ def train_single_property(args, property_name: str):
 
         # Checkpointing
         improved = False
+        raw_improved = False
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             improved = True
+            raw_improved = True
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -388,6 +445,27 @@ def train_single_property(args, property_name: str):
         if improved: patience_counter = 0
         else: patience_counter += 1
 
+        history["train_loss"].append(float(train_loss))
+        history["val_mae"].append(float(val_mae))
+        history["ema_val_mae"].append(float(ema_val_mae))
+
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "normalizer": normalizer.state_dict(),
+            "history": history,
+            "best_val_mae": best_val_mae,
+            "best_ema_val_mae": best_ema_val_mae,
+            "patience_counter": patience_counter,
+            "property": property_name,
+            "ema_shadow": ema.shadow if ema is not None else None,
+        }
+        if raw_improved:
+            manager.save_best(state, val_mae, epoch)
+        manager.save_checkpoint(state, epoch)
+
         dt_ep = time.time() - t_ep
         epoch_times.append(dt_ep)
 
@@ -405,11 +483,106 @@ def train_single_property(args, property_name: str):
     if args.use_swa:
         torch.save(swa_model.state_dict(), save_dir / "swa_final.pt")
 
+    best_epoch = -1
+    best_path = save_dir / "best.pt"
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, weights_only=False)
+        if "model_state_dict" in best_ckpt:
+            model.load_state_dict(best_ckpt["model_state_dict"])
+            best_epoch = int(best_ckpt.get("epoch", -1))
+
+    test_metrics = evaluate(model, test_loader, property_name, device, normalizer=normalizer)
+    test_mae = float(test_metrics.get(f"{property_name}_MAE", float("inf")))
+
+    ema_test_mae = None
+    ema_test_metrics = None
+    best_ema_path = save_dir / "best_ema.pt"
+    if best_ema_path.exists():
+        ema_ckpt = torch.load(best_ema_path, weights_only=False)
+        if "model_state_dict" in ema_ckpt:
+            ema_model = copy.deepcopy(model)
+            ema_model.load_state_dict(ema_ckpt["model_state_dict"])
+            ema_test_metrics = evaluate(
+                ema_model,
+                test_loader,
+                property_name,
+                device,
+                normalizer=normalizer,
+            )
+            ema_test_mae = float(ema_test_metrics.get(f"{property_name}_MAE", float("inf")))
+
+    candidate_maes = [test_mae]
+    if ema_test_mae is not None:
+        candidate_maes.append(ema_test_mae)
+    effective_test_mae = float(min(candidate_maes))
+    target_mae = float(benchmark["target_mae"])
+    passed = bool(effective_test_mae <= target_mae)
+    training_time_minutes = float((time.time() - t_train) / 60.0)
+
+    results = {
+        "property": property_name,
+        "run_id": save_dir.name,
+        "best_val_mae": float(best_val_mae),
+        "best_ema_val_mae": float(best_ema_val_mae),
+        "best_epoch": int(best_epoch),
+        "total_epochs": int(last_epoch),
+        "test_metrics": test_metrics,
+        "ema_test_metrics": ema_test_metrics,
+        "test_mae": float(test_mae),
+        "ema_test_mae": ema_test_mae,
+        "effective_test_mae": effective_test_mae,
+        "target_mae": target_mae,
+        "passed": passed,
+        "n_train": len(datasets["train"]),
+        "n_val": len(datasets["val"]),
+        "n_test": len(datasets["test"]),
+        "training_time_minutes": training_time_minutes,
+        "hyperparameters": {
+            "epochs": int(args.epochs),
+            "batch_size": int(args.batch_size),
+            "acc_steps": int(args.acc_steps),
+            "lr": float(args.lr),
+            "weight_decay": float(args.weight_decay),
+            "patience": int(args.patience),
+            "ema_decay": float(args.ema_decay),
+            "outlier_sigma": float(args.outlier_sigma),
+            "use_swa": bool(args.use_swa),
+            "finetune_from": args.finetune_from,
+            "freeze_encoder": bool(args.freeze_encoder),
+            "max_samples": args.max_samples,
+            "top_k": int(args.top_k),
+            "keep_last_k": int(args.keep_last_k),
+        },
+    }
+    with open(save_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    with open(save_dir / "history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_val_mae": float(best_val_mae),
+                "best_ema_val_mae": float(best_ema_val_mae),
+                "total_epochs": int(last_epoch),
+                "best_epoch": int(best_epoch),
+                "test_mae": float(test_mae),
+                "ema_test_mae": ema_test_mae,
+                "effective_test_mae": effective_test_mae,
+                "passed": passed,
+            },
+        },
+    )
+
     print(f"\n[DONE] Training Complete.")
-    return save_dir
+    return True
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="E(3)-Equivariant GNN Specialist Training (Phase 3)")
     parser.add_argument("--property", type=str, default="formation_energy", choices=list(BENCHMARKS.keys()))
     parser.add_argument("--all-properties", action="store_true", help="Train all properties")
@@ -429,20 +602,34 @@ def main():
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--outlier-sigma", type=float, default=8.0)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
 
     args = parser.parse_args()
 
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print(f"║ {'PHASE 3: SPECIALIST PRO TRAINING'.center(64)} ║")
-    print(f"║ {'Fine-Tuning / SWA'.center(64)} ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
+    print("=" * 66)
+    print("PHASE 3: SPECIALIST PRO TRAINING")
+    print("Fine-Tuning / SWA")
+    print("=" * 66)
 
     if args.all_properties:
+        failed = []
         for prop in BENCHMARKS:
-            train_single_property(args, prop)
-    else:
-        train_single_property(args, args.property)
+            ok = train_single_property(args, prop)
+            if not ok:
+                failed.append(prop)
+        if failed:
+            print(f"[ERROR] Failed properties: {failed}")
+            return 1
+        return 0
+    ok = train_single_property(args, args.property)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

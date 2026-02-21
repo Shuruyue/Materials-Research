@@ -100,6 +100,10 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(profile_args)
         if args.with_forces:
             cmd.append("--with-forces")
+        if args.resume:
+            cmd.append("--resume")
+        if args.run_id:
+            cmd.extend(["--run-id", args.run_id])
 
         overrides = {
             "--epochs": args.epochs,
@@ -123,6 +127,15 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         cmd.append("--all-properties")
     else:
         cmd.extend(["--property", args.property])
+
+    if args.resume:
+        cmd.append("--resume")
+    if args.run_id:
+        cmd.extend(["--run-id", args.run_id])
+    if args.top_k is not None:
+        cmd.extend(["--top-k", str(args.top_k)])
+    if args.keep_last_k is not None:
+        cmd.extend(["--keep-last-k", str(args.keep_last_k)])
 
     if args.finetune_from:
         cmd.extend(["--finetune-from", args.finetune_from])
@@ -190,6 +203,10 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--keep-last-k", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

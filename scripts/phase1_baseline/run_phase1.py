@@ -24,13 +24,13 @@ PHASE1_LEVELS = {
     "smoke": {
         "script": "scripts/phase1_baseline/train_cgcnn_lite.py",
         "args": ["--epochs", "2", "--max-samples", "256", "--batch-size", "16"],
-        "supports_resume": False,
+        "supports_resume": True,
         "supports_no_filter": False,
     },
     "lite": {
         "script": "scripts/phase1_baseline/train_cgcnn_lite.py",
         "args": [],
-        "supports_resume": False,
+        "supports_resume": True,
         "supports_no_filter": False,
     },
     "std": {
@@ -113,6 +113,13 @@ def build_command(args: argparse.Namespace) -> list[str]:
         if value is not None:
             cmd.extend([key, str(value)])
 
+    if args.run_id:
+        cmd.extend(["--run-id", args.run_id])
+    if args.top_k is not None:
+        cmd.extend(["--top-k", str(args.top_k)])
+    if args.keep_last_k is not None:
+        cmd.extend(["--keep-last-k", str(args.keep_last_k)])
+
     return cmd
 
 
@@ -139,6 +146,9 @@ def main() -> int:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=None)
     parser.add_argument("--n-conv", type=int, default=None)
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--keep-last-k", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

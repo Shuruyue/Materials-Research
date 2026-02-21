@@ -92,3 +92,27 @@ For every run, capture:
 - Phase 4:
   - `models/topo_classifier`
   - `models/topo_classifier_rf`
+
+## 8. Theory-Backed Adaptive 3-Round Tuning
+
+Use this when you want automatic round-to-round parameter adjustment.
+
+```bash
+# All phase1-4 model families, 3 rounds, default stage order:
+python scripts/training/run_adaptive_rounds.py --phase all --rounds 3 --property formation_energy
+
+# Only phase1
+python scripts/training/run_adaptive_rounds.py --phase phase1 --rounds 3 --property formation_energy
+
+# Only phase4 RF + TopoGNN
+python scripts/training/run_adaptive_rounds.py --phase phase4 --rounds 3
+```
+
+Output summary:
+
+- `artifacts/adaptive_tuning/<session_id>/summary.json`
+- `artifacts/adaptive_tuning/<session_id>/summary.csv`
+
+Reference file:
+
+- `docs/THEORY_BACKED_TUNING.md`

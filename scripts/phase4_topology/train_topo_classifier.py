@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.config import get_config
 from atlas.data.jarvis_client import JARVISClient
+from atlas.training.checkpoint import CheckpointManager
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 from atlas.topology.classifier import CrystalGraphBuilder, TopoGNN
 
 
@@ -223,13 +226,20 @@ def evaluate(model, loader, criterion, device):
     return total_loss / total, correct / total, all_preds, all_labels
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Train topological classifier")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--max", type=int, default=5000, help="Max samples")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--hidden", type=int, default=128, help="Hidden dim")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
     cfg = get_config()
@@ -283,18 +293,59 @@ def main():
     )
     criterion = nn.BCEWithLogitsLoss()
 
-    model_dir = cfg.paths.models_dir / "topo_classifier"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = cfg.paths.models_dir / "topo_classifier"
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"\n  [ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase4",
+            "model_family": "topognn",
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     best_val_acc = 0
     best_epoch = 0
+    start_epoch = 1
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "lr": []}
+    checkpoint_path = save_dir / "checkpoint.pt"
+    if args.resume and checkpoint_path.exists():
+        print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        best_val_acc = float(ckpt.get("best_val_acc", best_val_acc))
+        best_epoch = int(ckpt.get("best_epoch", best_epoch))
+        history = ckpt.get("history", history)
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        print(f"  [INFO] Resume epoch: {start_epoch}")
+    elif args.resume:
+        print(f"  [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
 
     print(f"\n{'='*60}")
     print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Train Acc':>9} | "
           f"{'Val Loss':>8} | {'Val Acc':>7} | {'LR':>8}")
     print(f"{'='*60}")
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
         train_loss, train_acc = train_epoch(
@@ -309,10 +360,31 @@ def main():
             print(f"{epoch:5d} | {train_loss:10.4f} | {train_acc:8.1%} | "
                   f"{val_loss:8.4f} | {val_acc:6.1%} | {lr:.1e}")
 
+        history["train_loss"].append(float(train_loss))
+        history["train_acc"].append(float(train_acc))
+        history["val_loss"].append(float(val_loss))
+        history["val_acc"].append(float(val_acc))
+        history["lr"].append(float(lr))
+
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_val_acc": best_val_acc,
+            "best_epoch": best_epoch,
+            "history": history,
+        }
+
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_epoch = epoch
-            torch.save(model.state_dict(), model_dir / "best_model.pt")
+            torch.save(model.state_dict(), save_dir / "best_model.pt")
+            state["best_val_acc"] = best_val_acc
+            state["best_epoch"] = best_epoch
+            manager.save_best(state, 1.0 - val_acc, epoch)
+
+        manager.save_checkpoint(state, epoch)
 
         # Early stopping
         if epoch - best_epoch > 30:
@@ -321,7 +393,7 @@ def main():
             break
 
     # Load best model and evaluate on test set
-    model.load_state_dict(torch.load(model_dir / "best_model.pt", weights_only=True))
+    model.load_state_dict(torch.load(save_dir / "best_model.pt", weights_only=True))
     test_loss, test_acc, preds, labels = evaluate(
         model, test_loader, criterion, device
     )
@@ -356,6 +428,8 @@ def main():
 
     # Save model info
     info = {
+        "algorithm": "topognn",
+        "run_id": save_dir.name,
         "best_epoch": best_epoch,
         "best_val_acc": best_val_acc,
         "test_acc": test_acc,
@@ -366,15 +440,43 @@ def main():
         "n_train": len(train_ds),
         "n_val": len(val_ds),
         "n_test": len(test_ds),
+        "hyperparameters": {
+            "epochs": args.epochs,
+            "max_samples": args.max,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "hidden": args.hidden,
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
+        },
     }
 
-    import json
-    with open(model_dir / "training_info.json", "w") as f:
+    with open(save_dir / "training_info.json", "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2)
+    with open(save_dir / "results.json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
 
-    print(f"\n[OK] Model saved to {model_dir}")
+    with open(save_dir / "history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_epoch": int(best_epoch),
+                "best_val_acc": float(best_val_acc),
+                "test_acc": float(test_acc),
+                "f1": float(f1),
+            },
+        },
+    )
+
+    print(f"\n[OK] Model saved to {save_dir}")
     print("[OK] Training complete.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

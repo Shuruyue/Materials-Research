@@ -33,7 +33,9 @@ try:
     from atlas.data.crystal_dataset import CrystalPropertyDataset
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
+    from atlas.training.checkpoint import CheckpointManager
     from atlas.training.metrics import scalar_metrics
+    from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -91,7 +93,7 @@ def evaluate(model, loader, property_name, device):
     return scalar_metrics(pred, target, prefix=property_name)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="CGCNN Lite Training (Fast Debug)")
     parser.add_argument(
         "--property", type=str, default="formation_energy",
@@ -109,6 +111,14 @@ def main():
     # Lite Default: Small model
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--n-conv", type=int, default=2)
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from latest checkpoint in selected run")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="Keep top-k best checkpoints")
+    parser.add_argument("--keep-last-k", type=int, default=3,
+                        help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -146,7 +156,7 @@ def main():
 
     train_loader = datasets["train"].to_pyg_loader(
         batch_size=args.batch_size, shuffle=True,
-        num_workers=0, pin_memory=True
+        num_workers=0, pin_memory=True, drop_last=True
     )
     val_loader = datasets["val"].to_pyg_loader(
         batch_size=args.batch_size, shuffle=False,
@@ -185,15 +195,60 @@ def main():
     print(f"  Early stopping patience: {args.patience}")
     print("-" * 60)
 
-    save_dir = config.paths.models_dir / f"cgcnn_lite_{args.property}"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = config.paths.models_dir / f"cgcnn_lite_{args.property}"
+    try:
+        save_dir, created_new = resolve_run_dir(
+            base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"  [ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {save_dir.name}")
+    manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
+    manifest_path = write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "started",
+            "phase": "phase1",
+            "model_family": "cgcnn_lite",
+            "property": args.property,
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     best_val_mae = float("inf")
     patience_counter = 0
     history = {"train_loss": [], "val_mae": [], "val_rmse": [], "val_r2": [], "lr": []}
-    t_train = time.time()
+    start_epoch = 1
+    checkpoint_path = save_dir / "checkpoint.pt"
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume and checkpoint_path.exists():
+        print(f"  [INFO] Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, weights_only=False)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        best_val_mae = ckpt.get("best_val_mae", best_val_mae)
+        patience_counter = ckpt.get("patience_counter", patience_counter)
+        history = ckpt.get("history", history)
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        print(f"  [INFO] Resume epoch: {start_epoch}")
+    elif args.resume:
+        print(f"  [WARN] --resume requested but checkpoint not found: {checkpoint_path}")
+
+    t_train = time.time()
+    last_epoch = start_epoch - 1
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        last_epoch = epoch
         train_loss = train_epoch(model, train_loader, optimizer, args.property, device)
         val_metrics = evaluate(model, val_loader, args.property, device)
 
@@ -209,12 +264,29 @@ def main():
         lr = optimizer.param_groups[0]["lr"]
         history["lr"].append(lr)
 
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_val_mae": best_val_mae,
+            "patience_counter": patience_counter,
+            "history": history,
+            "property": args.property,
+        }
+
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             patience_counter = 0
-            torch.save(model.state_dict(), save_dir / "best.pt")
+            state["best_val_mae"] = best_val_mae
+            state["patience_counter"] = patience_counter
+            state["val_mae"] = val_mae
+            manager.save_best(state, val_mae, epoch)
         else:
             patience_counter += 1
+            state["patience_counter"] = patience_counter
+
+        manager.save_checkpoint(state, epoch)
 
         print(
             f"  Epoch {epoch:4d}/{args.epochs:4d} | "
@@ -236,7 +308,18 @@ def main():
     print("  Test Set Evaluation")
     print("=" * 60)
 
-    model.load_state_dict(torch.load(save_dir / "best.pt", weights_only=True))
+    best_path = save_dir / "best.pt"
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, weights_only=False)
+        if "model_state_dict" in best_ckpt:
+            model.load_state_dict(best_ckpt["model_state_dict"])
+            best_epoch = int(best_ckpt.get("epoch", -1))
+        else:
+            model.load_state_dict(best_ckpt)
+            best_epoch = -1
+    else:
+        print(f"  [WARN] best.pt not found under {save_dir}, using current weights")
+        best_epoch = -1
     test_metrics = evaluate(model, test_loader, args.property, device)
 
     # ── Targets ──
@@ -267,6 +350,7 @@ def main():
     # Save results
     results = {
         "property": args.property,
+        "run_id": save_dir.name,
         "test_metrics": test_metrics,
         "target_mae": target_mae,
         "passed": test_mae <= target_mae,
@@ -274,8 +358,8 @@ def main():
         "n_val": len(datasets["val"]),
         "n_test": len(datasets["test"]),
         "n_params": n_params,
-        "best_epoch": epoch - patience_counter,
-        "total_epochs": epoch,
+        "best_epoch": best_epoch,
+        "total_epochs": last_epoch,
         "training_time_minutes": train_time / 60,
         "hyperparameters": {
             "hidden_dim": args.hidden_dim,
@@ -284,6 +368,8 @@ def main():
             "batch_size": args.batch_size,
             "patience": args.patience,
             "max_samples": args.max_samples,
+            "top_k": args.top_k,
+            "keep_last_k": args.keep_last_k,
             "optimizer": "Adam",
             "scheduler": "ReduceLROnPlateau",
         },
@@ -292,10 +378,25 @@ def main():
         json.dump(results, f, indent=2)
     with open(save_dir / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+    write_run_manifest(
+        save_dir,
+        args=args,
+        project_root=PROJECT_ROOT,
+        extra={
+            "status": "completed",
+            "result": {
+                "best_epoch": best_epoch,
+                "total_epochs": last_epoch,
+                "passed": bool(results["passed"]),
+                "test_mae": float(test_mae),
+            },
+        },
+    )
 
     print(f"\n  Results saved to {save_dir}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 

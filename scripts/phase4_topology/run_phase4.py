@@ -59,6 +59,14 @@ def build_command(args: argparse.Namespace) -> list[str]:
         for key, value in overrides.items():
             if value is not None:
                 cmd.extend([key, str(value)])
+        if args.resume:
+            cmd.append("--resume")
+        if args.run_id:
+            cmd.extend(["--run-id", args.run_id])
+        if args.top_k is not None:
+            cmd.extend(["--top-k", str(args.top_k)])
+        if args.keep_last_k is not None:
+            cmd.extend(["--keep-last-k", str(args.keep_last_k)])
 
         if args.n_estimators is not None or args.max_depth is not None or args.min_samples_leaf is not None:
             print("[WARN] RF-only args ignored for algorithm='topognn'")
@@ -76,9 +84,17 @@ def build_command(args: argparse.Namespace) -> list[str]:
     for key, value in overrides.items():
         if value is not None:
             cmd.extend([key, str(value)])
+    if args.resume:
+        cmd.append("--resume")
+    if args.run_id:
+        cmd.extend(["--run-id", args.run_id])
+    if args.top_k is not None:
+        cmd.extend(["--keep-top-runs", str(args.top_k)])
 
     if args.epochs is not None or args.batch_size is not None or args.lr is not None or args.hidden is not None:
         print("[WARN] GNN-only args ignored for algorithm='rf'")
+    if args.keep_last_k is not None:
+        print("[WARN] --keep-last-k is only used by algorithm='topognn'")
     return cmd
 
 
@@ -98,6 +114,10 @@ def main() -> int:
     )
 
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--keep-last-k", type=int, default=None)
 
     # TopoGNN overrides
     parser.add_argument("--epochs", type=int, default=None)

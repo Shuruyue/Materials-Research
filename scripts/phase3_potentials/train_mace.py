@@ -17,12 +17,15 @@ Usage:
 """
 
 import argparse
+import json
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 
 def check_gpu():
@@ -31,7 +34,11 @@ def check_gpu():
         import torch
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
-            gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+            props = torch.cuda.get_device_properties(0)
+            total_memory = getattr(props, "total_memory", None)
+            if total_memory is None:
+                total_memory = getattr(props, "total_mem", 0)
+            gpu_mem = float(total_memory) / 1e9 if total_memory else 0.0
             print(f"  GPU: {gpu_name} ({gpu_mem:.1f} GB)")
             return "cuda"
         else:
@@ -42,12 +49,42 @@ def check_gpu():
         return "cpu"
 
 
-def main():
+def _mace_cli_supports(flag: str) -> bool:
+    """Check whether MACE CLI supports a specific flag."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "mace.cli.run_train", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return False
+    hay = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    return flag in hay
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Train MACE model")
     parser.add_argument("--epochs", type=int, default=None, help="Override max epochs")
-    parser.add_argument("--r-max", type=float, default=None, help="Cutoff radius (Å)")
+    parser.add_argument("--r-max", type=float, default=None, help="Cutoff radius (Angstrom)")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest run checkpoint if supported")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run id (without or with 'run_' prefix)")
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=3,
+        help="Compatibility flag with unified launchers (unused by MACE CLI backend)",
+    )
+    parser.add_argument(
+        "--keep-last-k",
+        type=int,
+        default=3,
+        help="Compatibility flag with unified launchers (unused by MACE CLI backend)",
+    )
     parser.add_argument(
         "--energy-only",
         dest="energy_only",
@@ -84,7 +121,7 @@ def main():
     if not train_file.exists():
         print(f"\n  [ERROR] Training data not found at {train_file}")
         print(f"  Run first: python scripts/phase3_potentials/prepare_mace_data.py")
-        return
+        return 2
 
     # Count structures
     from ase.io import read as ase_read
@@ -94,11 +131,32 @@ def main():
     print(f"  Validation structures: {n_val}")
 
     # Set up MACE training
-    model_dir = cfg.paths.models_dir / "mace"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    model_base_dir = cfg.paths.models_dir / "mace"
+    try:
+        run_dir, created_new = resolve_run_dir(
+            model_base_dir,
+            resume=args.resume,
+            run_id=args.run_id,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"\n  [ERROR] {e}")
+        return 2
+    run_msg = "Starting new run" if created_new else "Using existing run"
+    print(f"  [INFO] {run_msg}: {run_dir.name}")
+    manifest_path = write_run_manifest(
+        run_dir,
+        args=args,
+        project_root=Path(__file__).resolve().parent.parent.parent,
+        extra={
+            "status": "started",
+            "phase": "phase3",
+            "model_family": "mace",
+        },
+    )
+    print(f"  [INFO] Run manifest: {manifest_path}")
 
     print(f"\n=== MACE Training Configuration ===")
-    print(f"  Cutoff (r_max):   {r_max} Å")
+    print(f"  Cutoff (r_max):   {r_max} Angstrom")
     print(f"  Max L:            {mace_cfg.max_ell}")
     print(f"  Interactions:     {mace_cfg.num_interactions}")
     print(f"  Hidden irreps:    {mace_cfg.hidden_irreps}")
@@ -106,15 +164,13 @@ def main():
     print(f"  Learning rate:    {lr}")
     print(f"  Max epochs:       {epochs}")
     print(f"  Device:           {device}")
-    print(f"  Model output:     {model_dir}")
+    print(f"  Model output:     {run_dir}")
 
     # Use MACE's built-in training script via subprocess
     # This is the recommended way to train MACE models
-    import subprocess
-
     mace_cmd = [
         sys.executable, "-m", "mace.cli.run_train",
-        "--name", "atlas_mace_v1",
+        "--name", run_dir.name,
         "--train_file", str(train_file),
         "--valid_file", str(val_file),
         "--test_file", str(test_file),
@@ -135,9 +191,13 @@ def main():
         "--energy_key", "REF_energy",
         "--device", device,
         "--seed", "42",
-        "--work_dir", str(model_dir),
+        "--work_dir", str(run_dir),
         "--save_cpu",
     ]
+    if args.resume and _mace_cli_supports("--restart_latest"):
+        mace_cmd.append("--restart_latest")
+    elif args.resume:
+        print("  [WARN] MACE CLI does not expose --restart_latest in this environment.")
 
     print(f"\n=== Starting MACE Training ===\n")
     print(f"  Command: {' '.join(mace_cmd[:6])} ...")
@@ -145,27 +205,69 @@ def main():
     try:
         result = subprocess.run(
             mace_cmd,
-            cwd=str(model_dir),
+            cwd=str(run_dir),
             capture_output=False,
             text=True,
         )
 
         if result.returncode == 0:
-            print(f"\n[OK] Training complete. Model saved to {model_dir}")
+            print(f"\n[OK] Training complete. Model saved to {run_dir}")
         else:
             print(f"\n[ERROR] Training failed with return code {result.returncode}")
+        with open(run_dir / "training_info.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "algorithm": "mace",
+                    "run_id": run_dir.name,
+                    "return_code": result.returncode,
+                    "config": {
+                        "epochs": epochs,
+                        "r_max": r_max,
+                        "batch_size": batch_size,
+                        "lr": lr,
+                        "energy_only": args.energy_only,
+                        "resume": args.resume,
+                    },
+                },
+                f,
+                indent=2,
+            )
+        write_run_manifest(
+            run_dir,
+            args=args,
+            project_root=Path(__file__).resolve().parent.parent.parent,
+            extra={
+                "status": "completed" if result.returncode == 0 else "failed",
+                "result": {
+                    "return_code": int(result.returncode),
+                },
+            },
+        )
+        return int(result.returncode)
 
     except FileNotFoundError:
         print("\n  [ERROR] MACE training script not found.")
         print("  Install MACE: pip install mace-torch")
         print("\n  Alternative: train using MACE Python API:")
         print_python_training_alternative(cfg, train_file, val_file, device)
+        write_run_manifest(
+            run_dir,
+            args=args,
+            project_root=Path(__file__).resolve().parent.parent.parent,
+            extra={
+                "status": "failed",
+                "result": {
+                    "error": "mace_cli_not_found",
+                },
+            },
+        )
+        return 127
 
 
 def print_python_training_alternative(cfg, train_file, val_file, device):
     """Print instructions for Python API training if CLI fails."""
     print(f"""
-    ─────────────────────────────────────────
+    -----------------------------------------
     You can also train MACE via the Python API:
 
     from mace.tools import build_default_arg_parser, run
@@ -178,9 +280,9 @@ def print_python_training_alternative(cfg, train_file, val_file, device):
         "--device", "{device}",
     ])
     run(args)
-    ─────────────────────────────────────────
+    -----------------------------------------
     """)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
