@@ -66,3 +66,7 @@ scripts/phase6_analysis/outputs/*.html
 references/
 !references/task.md
 !references/miner_results.json
+
+# Local third_party snapshots (too large / reproducible from source)
+atlas/third_party/jarvis/
+atlas/third_party/matminer/
