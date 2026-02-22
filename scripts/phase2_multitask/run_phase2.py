@@ -13,12 +13,23 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from atlas.console_style import install_console_style
+
+install_console_style()
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 PHASE2_PROFILES = {
     "e3nn": {
@@ -117,7 +128,7 @@ PHASE2_COMPETITION = {
 
 def build_command(args: argparse.Namespace) -> list[str]:
     profile = PHASE2_COMPETITION[args.algorithm] if args.competition else PHASE2_PROFILES[args.algorithm][args.level]
-    cmd = [sys.executable, str(PROJECT_ROOT / profile["script"])]
+    cmd = [sys.executable, "-u", str(PROJECT_ROOT / profile["script"])]
     cmd.extend(profile["args"])
 
     if args.resume:
@@ -196,8 +207,11 @@ def main() -> int:
         print("[Phase2] Dry run only, not executing.")
         return 0
 
-    return subprocess.run(cmd, cwd=str(PROJECT_ROOT)).returncode
+    env = dict(os.environ)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    return subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env).returncode
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

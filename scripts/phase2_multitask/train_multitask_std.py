@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import copy
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -35,6 +36,9 @@ from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 from atlas.training.filters import filter_outliers
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 # ── Std Tier Config ──
 PROPERTIES = DEFAULT_PROPERTIES  # ["formation_energy", "band_gap", "bulk_modulus", "shear_modulus"]
@@ -80,12 +84,18 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
     model.train()
     total_loss = 0
     n = 0
-    
-    # Add tqdm for progress tracking
-    from tqdm import tqdm
-    pbar = tqdm(loader, desc="   Training", leave=False)
-    
-    for batch in pbar:
+
+    show_progress = sys.stdout.isatty() and os.environ.get("ATLAS_TQDM", "1") != "0"
+    heartbeat_every = int(os.environ.get("ATLAS_HEARTBEAT_EVERY", "200"))
+    total_steps = len(loader) if hasattr(loader, "__len__") else None
+
+    if show_progress:
+        from tqdm import tqdm
+        iterator = tqdm(loader, desc="   Training", leave=False, mininterval=1.0)
+    else:
+        iterator = loader
+
+    for step, batch in enumerate(iterator, start=1):
         batch = batch.to(device)
         optimizer.zero_grad()
         preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
@@ -124,10 +134,23 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
         optimizer.step()
         total_loss += loss.item()
         n += 1
-        
-        # Update progress bar
+
         current_loss = total_loss / max(n, 1)
-        pbar.set_postfix({"loss": f"{current_loss:.4f}"})
+        if show_progress:
+            iterator.set_postfix({"loss": f"{current_loss:.4f}"})
+        elif heartbeat_every > 0 and step % heartbeat_every == 0:
+            if total_steps is not None:
+                print(
+                    f"    [INFO] Train progress: {step}/{total_steps} batches | "
+                    f"mean_loss: {current_loss:.4f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"    [INFO] Train progress: {step} batches | "
+                    f"mean_loss: {current_loss:.4f}",
+                    flush=True,
+                )
     return total_loss / max(n, 1)
 
 @torch.no_grad()
@@ -405,4 +428,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

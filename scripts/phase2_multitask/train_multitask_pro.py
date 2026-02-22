@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import copy
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -37,6 +38,9 @@ from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 from atlas.training.filters import filter_outliers
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 # ── Pro Tier Config ──
 # Full discovery mode activated by --all-properties
@@ -106,18 +110,26 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
     model.train()
     total_loss = 0
     n = 0
-    
+
     optimizer.zero_grad()
-    
-    # Add tqdm for progress tracking
-    from tqdm import tqdm
-    pbar = tqdm(loader, desc="   Training", leave=False)
-    
-    for i, batch in enumerate(pbar):
+
+    pending_backward = 0
+
+    show_progress = sys.stdout.isatty() and os.environ.get("ATLAS_TQDM", "1") != "0"
+    heartbeat_every = int(os.environ.get("ATLAS_HEARTBEAT_EVERY", "200"))
+    total_steps = len(loader) if hasattr(loader, "__len__") else None
+
+    if show_progress:
+        from tqdm import tqdm
+        iterator = tqdm(loader, desc="   Training", leave=False, mininterval=1.0)
+    else:
+        iterator = loader
+
+    for step, batch in enumerate(iterator, start=1):
         batch = batch.to(device)
-        
+
         preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
-        
+
         task_losses = []
         valid_tasks = 0
         for prop in PROPERTIES:
@@ -125,43 +137,58 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
             target = getattr(batch, prop).view(-1, 1)
             mask = ~torch.isnan(target)
             if mask.sum() == 0: continue
-            
+
             target = target[mask].view(-1, 1)
             pred = preds[prop][mask].view(-1, 1)
-            
+
             if normalizer:
                 target_norm = normalizer.normalize(prop, target)
             else:
                 target_norm = target
-                
+
             loss = nn.functional.huber_loss(pred, target_norm, delta=1.0)
             if not torch.isnan(loss):
                 task_losses.append(loss)
                 valid_tasks += 1
-                
+
         if valid_tasks == 0: continue
-        
+
         while len(task_losses) < len(PROPERTIES):
             task_losses.append(torch.tensor(0.0, device=device))
-            
+
         loss = loss_fn(task_losses)
         loss = loss / accumulation_steps
         loss.backward()
-        
-        if (i + 1) % accumulation_steps == 0:
+
+        pending_backward += 1
+        if pending_backward >= accumulation_steps:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             optimizer.zero_grad()
-            
+            pending_backward = 0
+
         total_loss += loss.item() * accumulation_steps
         n += 1
-        
-        # Update progress bar
+
         current_loss = total_loss / max(n, 1)
-        pbar.set_postfix({"loss": f"{current_loss:.4f}"})
-        
+        if show_progress:
+            iterator.set_postfix({"loss": f"{current_loss:.4f}"})
+        elif heartbeat_every > 0 and step % heartbeat_every == 0:
+            if total_steps is not None:
+                print(
+                    f"    [INFO] Train progress: {step}/{total_steps} batches | "
+                    f"mean_loss: {current_loss:.4f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"    [INFO] Train progress: {step} batches | "
+                    f"mean_loss: {current_loss:.4f}",
+                    flush=True,
+                )
+
     # Handle remaining gradients
-    if (i + 1) % accumulation_steps != 0:
+    if pending_backward > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         optimizer.zero_grad()
@@ -469,4 +496,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

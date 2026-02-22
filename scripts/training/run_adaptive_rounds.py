@@ -14,6 +14,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import subprocess
 import sys
 import time
@@ -27,10 +28,23 @@ from atlas.training.theory_tuning import (
     extract_score_from_manifest,
     get_profile,
 )
+from atlas.console_style import install_console_style
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_ROOT = PROJECT_ROOT / "models"
+
+install_console_style()
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    return env
 
 RUNNERS = {
     "phase1": PROJECT_ROOT / "scripts/phase1_baseline/run_phase1.py",
@@ -144,6 +158,7 @@ def build_command(
     if phase == "phase1":
         cmd = [
             sys.executable,
+            "-u",
             str(RUNNERS[phase]),
             "--algorithm",
             algorithm,
@@ -164,7 +179,7 @@ def build_command(
         return cmd
 
     if phase == "phase2":
-        cmd = [sys.executable, str(RUNNERS[phase]), "--algorithm", algorithm]
+        cmd = [sys.executable, "-u", str(RUNNERS[phase]), "--algorithm", algorithm]
         if params.get("competition") or stage == "competition":
             cmd.append("--competition")
         else:
@@ -181,7 +196,7 @@ def build_command(
         return cmd
 
     if phase == "phase3":
-        cmd = [sys.executable, str(RUNNERS[phase]), "--algorithm", algorithm]
+        cmd = [sys.executable, "-u", str(RUNNERS[phase]), "--algorithm", algorithm]
         if params.get("competition") or stage == "competition":
             cmd.append("--competition")
         else:
@@ -206,7 +221,7 @@ def build_command(
         return cmd
 
     if phase == "phase4":
-        cmd = [sys.executable, str(RUNNERS[phase]), "--algorithm", algorithm]
+        cmd = [sys.executable, "-u", str(RUNNERS[phase]), "--algorithm", algorithm]
         if params.get("competition") or stage == "competition":
             cmd.append("--competition")
         else:
@@ -349,7 +364,11 @@ def main() -> int:
                     if args.dry_run:
                         rc = 0
                     else:
-                        rc = subprocess.run(cmd, cwd=str(PROJECT_ROOT)).returncode
+                        rc = subprocess.run(
+                            cmd,
+                            cwd=str(PROJECT_ROOT),
+                            env=_subprocess_env(),
+                        ).returncode
                     duration = time.time() - t0
 
                     manifest_path = _find_manifest_path(
@@ -422,3 +441,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
