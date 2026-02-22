@@ -9,12 +9,21 @@ import logging
 import sys
 from pathlib import Path
 
+import torch
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Phase2Verification")
+
+# PyTorch 2.6+ defaults torch.load(weights_only=True), while e3nn constants
+# use python's built-in `slice` in serialized content.
+try:
+    torch.serialization.add_safe_globals([slice])
+except AttributeError:
+    pass
 
 
 def verify_phase2() -> bool:

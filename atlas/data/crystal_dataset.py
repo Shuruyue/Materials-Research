@@ -54,6 +54,63 @@ DEFAULT_PROPERTIES = [
     "shear_modulus",
 ]
 
+PHASE2_PRIORITY_PROPERTIES = [
+    "formation_energy",
+    "ehull",
+    "band_gap",
+    "bulk_modulus",
+    "shear_modulus",
+    "band_gap_mbj",
+    "spillage",
+]
+
+PHASE2_SECONDARY_PROPERTIES = [
+    "dielectric",
+    "piezoelectric",
+]
+
+ALL_DISCOVERABLE_PROPERTIES = [
+    "formation_energy",
+    "band_gap",
+    "band_gap_mbj",
+    "bulk_modulus",
+    "shear_modulus",
+    "dielectric",
+    "piezoelectric",
+    "spillage",
+    "ehull",
+]
+
+PHASE2_PROPERTY_GROUPS = {
+    "core4": DEFAULT_PROPERTIES,
+    "priority7": PHASE2_PRIORITY_PROPERTIES,
+    "secondary2": PHASE2_SECONDARY_PROPERTIES,
+    "all9": ALL_DISCOVERABLE_PROPERTIES,
+}
+
+PHASE2_PROPERTY_GROUP_ALIASES = {
+    "core": "core4",
+    "default": "core4",
+    "priority": "priority7",
+    "primary": "priority7",
+    "secondary": "secondary2",
+    "all": "all9",
+}
+
+PHASE2_PROPERTY_GROUP_CHOICES = tuple(PHASE2_PROPERTY_GROUPS.keys())
+
+
+def resolve_phase2_property_group(group: str) -> list[str]:
+    """
+    Resolve a named Phase 2 property group to a concrete property list.
+    """
+    key = group.strip().lower()
+    key = PHASE2_PROPERTY_GROUP_ALIASES.get(key, key)
+    if key not in PHASE2_PROPERTY_GROUPS:
+        choices = ", ".join(sorted(PHASE2_PROPERTY_GROUP_CHOICES))
+        raise ValueError(f"Unknown Phase 2 property group '{group}'. Choices: {choices}")
+    return list(PHASE2_PROPERTY_GROUPS[key])
+
 
 def _worker_process_row(row_data: dict, properties: List[str], rev_map: Dict[str, str]) -> Optional[Any]:
     """

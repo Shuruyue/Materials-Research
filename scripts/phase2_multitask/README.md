@@ -36,6 +36,13 @@ Based on `jarvis-dft` data, we are now targeting:
 8.  **Spillage** (Magnetics)
 9.  **Ehull** (Synthesizability)
 
+### Property Group Strategy (Current Default)
+
+- `core4` (lite/smoke): formation_energy, band_gap, bulk_modulus, shear_modulus
+- `priority7` (std/competition/pro/max default): formation_energy, ehull, band_gap, bulk_modulus, shear_modulus, band_gap_mbj, spillage
+- `secondary2` (post-training): dielectric, piezoelectric
+- `all9`: full discoverable set
+
 ---
 
 ## Directory Structure
@@ -82,9 +89,14 @@ python scripts/phase2_multitask/train_multitask_lite.py
 # 2. STD: Standard Dev (Resume + Outlier Check)
 python scripts/phase2_multitask/train_multitask_std.py
 
-# 3. PRO: Production SOTA (9 Properties)
-# Add --all-properties to unlock full discovery mode
+# 3. PRO: Production SOTA (default: priority7)
+python scripts/phase2_multitask/train_multitask_pro.py
+
+# (Optional) full 9-property discovery
 python scripts/phase2_multitask/train_multitask_pro.py --all-properties
+
+# 4. Secondary post-training (dielectric + piezoelectric)
+python scripts/phase2_multitask/train_multitask_pro.py --property-group secondary2 --init-from models/multitask_pro_e3nn/run_<priority7_run_id>
 ```
 
 ### Single-Task: The Specialist (Deep Dive)

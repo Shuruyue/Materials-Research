@@ -9,6 +9,7 @@ It uses the exact same multi-task loss and data pipeline, just a different encod
 
 Usage:
     python scripts/phase2_multitask/train_multitask_cgcnn.py --preset medium
+    python scripts/phase2_multitask/train_multitask_cgcnn.py --preset medium --property-group priority7
 """
 
 import argparse
@@ -24,7 +25,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
+from atlas.data.crystal_dataset import (
+    CrystalPropertyDataset,
+    PHASE2_PROPERTY_GROUP_CHOICES,
+    resolve_phase2_property_group,
+)
 from atlas.models.cgcnn import CGCNN
 from atlas.models.multi_task import MultiTaskGNN, ScalarHead
 from atlas.training.checkpoint import CheckpointManager
@@ -36,7 +41,7 @@ from atlas.console_style import install_console_style
 install_console_style()
 
 
-PROPERTIES = DEFAULT_PROPERTIES
+PROPERTIES = resolve_phase2_property_group("priority7")
 
 # ── Model Presets ──
 
@@ -241,6 +246,12 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=128)  # CGCNN usually handles large batch
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument(
+        "--property-group",
+        choices=PHASE2_PROPERTY_GROUP_CHOICES,
+        default="priority7",
+        help="Phase 2 property group: core4/priority7/secondary2/all9",
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     parser.add_argument("--run-id", type=str, default=None,
@@ -251,7 +262,11 @@ def main() -> int:
                         help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
+    global PROPERTIES
+    PROPERTIES = resolve_phase2_property_group(args.property_group)
+
     # Apply preset
+    print(f"\n[Config] Property group '{args.property_group}' ({len(PROPERTIES)} tasks)")
     preset = MODEL_PRESETS[args.preset]
     print(f"\n[Config] Applying preset '{args.preset}': {preset['description']}")
     for k, v in preset.items():
@@ -439,6 +454,8 @@ def main() -> int:
         "algorithm": "cgcnn_multitask",
         "run_id": save_dir.name,
         "preset": args.preset,
+        "property_group": args.property_group,
+        "properties": list(PROPERTIES),
         "test_metrics": test_metrics,
         "avg_test_mae": avg_test_mae,
         "best_val_mae": best_val_mae,
@@ -452,6 +469,7 @@ def main() -> int:
             "batch_size": args.batch_size,
             "epochs": args.epochs,
             "lr": args.lr,
+            "property_group": args.property_group,
             "max_samples": args.max_samples,
             "top_k": args.top_k,
             "keep_last_k": args.keep_last_k,

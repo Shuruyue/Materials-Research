@@ -9,6 +9,7 @@ Designed for rapid validation of the pipeline.
 
 Usage:
     python scripts/phase2_multitask/train_multitask_lite.py
+    python scripts/phase2_multitask/train_multitask_lite.py --property-group core4
 """
 
 import argparse
@@ -24,7 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset
+from atlas.data.crystal_dataset import (
+    CrystalPropertyDataset,
+    PHASE2_PROPERTY_GROUP_CHOICES,
+    resolve_phase2_property_group,
+)
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.checkpoint import CheckpointManager
@@ -35,8 +40,7 @@ from atlas.console_style import install_console_style
 install_console_style()
 
 # ── Lite Config ──
-# 1. Targeting only the 4 core properties for speed, but code supports 9
-CORE_PROPERTIES = ["formation_energy", "band_gap", "bulk_modulus", "shear_modulus"]
+PROPERTIES = resolve_phase2_property_group("core4")
 
 # 2. Tiny Model Preset
 LITE_PRESET = {
@@ -56,6 +60,12 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--train-samples", type=int, default=100)
     parser.add_argument("--eval-samples", type=int, default=20)
+    parser.add_argument(
+        "--property-group",
+        choices=PHASE2_PROPERTY_GROUP_CHOICES,
+        default="core4",
+        help="Phase 2 property group (lite defaults to core4)",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     parser.add_argument("--run-id", type=str, default=None,
                         help="Custom run id (without or with 'run_' prefix)")
@@ -65,9 +75,13 @@ def main() -> int:
                         help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
+    global PROPERTIES
+    PROPERTIES = resolve_phase2_property_group(args.property_group)
+
     print("=" * 66)
     print("E3NN LITE (Debug Mode)")
     print("Fast Validation / Smoke Test")
+    print(f"Property group: {args.property_group} ({len(PROPERTIES)} tasks)")
     print("=" * 66)
 
     config = get_config()
@@ -102,7 +116,7 @@ def main() -> int:
     datasets = {}
     for split in ["train", "val", "test"]:
         ds = CrystalPropertyDataset(
-            properties=CORE_PROPERTIES,
+            properties=PROPERTIES,
             max_samples=args.train_samples if split == "train" else args.eval_samples,
             split=split
         )
@@ -126,7 +140,7 @@ def main() -> int:
     
     model = MultiTaskGNN(
         encoder=encoder,
-        tasks={p: {"type": "scalar"} for p in CORE_PROPERTIES},
+        tasks={p: {"type": "scalar"} for p in PROPERTIES},
         embed_dim=encoder.scalar_dim
     ).to(device)
     
@@ -172,7 +186,7 @@ def main() -> int:
             
             # Simple loss (just checking gradients)
             loss = 0
-            for prop in CORE_PROPERTIES:
+            for prop in PROPERTIES:
                 if prop in preds:
                     target = getattr(batch, prop).view(-1, 1)
                     # Handle NaNs roughly for debug
@@ -209,6 +223,8 @@ def main() -> int:
     results = {
         "algorithm": "e3nn_multitask_lite",
         "run_id": save_dir.name,
+        "property_group": args.property_group,
+        "properties": list(PROPERTIES),
         "best_train_loss": best_train_loss,
         "total_epochs": last_epoch,
         "n_train": len(datasets["train"]),
@@ -218,6 +234,7 @@ def main() -> int:
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "property_group": args.property_group,
             "train_samples": args.train_samples,
             "eval_samples": args.eval_samples,
             "top_k": args.top_k,

@@ -10,6 +10,7 @@ The workhorse script for tuning and development.
 Usage:
     python scripts/phase2_multitask/train_multitask_std.py
     python scripts/phase2_multitask/train_multitask_std.py --resume
+    python scripts/phase2_multitask/train_multitask_std.py --property-group priority7
 """
 
 import argparse
@@ -28,7 +29,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
+from atlas.data.crystal_dataset import (
+    CrystalPropertyDataset,
+    PHASE2_PROPERTY_GROUP_CHOICES,
+    resolve_phase2_property_group,
+)
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.metrics import scalar_metrics
@@ -41,7 +46,7 @@ from atlas.console_style import install_console_style
 install_console_style()
 
 # ── Std Tier Config ──
-PROPERTIES = DEFAULT_PROPERTIES  # ["formation_energy", "band_gap", "bulk_modulus", "shear_modulus"]
+PROPERTIES = resolve_phase2_property_group("priority7")
 
 STD_PRESET = {
     "irreps": "64x0e + 32x1o + 16x2e",
@@ -78,6 +83,41 @@ class UncertaintyWeightedLoss(nn.Module):
             precision = torch.exp(-self.log_vars[i])
             total += precision * loss + self.log_vars[i]
         return total
+
+
+def _resolve_checkpoint_path(source: str) -> Path:
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = (Path(__file__).resolve().parents[2] / path).resolve()
+
+    if path.is_file():
+        return path
+    if path.is_dir():
+        best = path / "best.pt"
+        latest = path / "checkpoint.pt"
+        if best.exists():
+            return best
+        if latest.exists():
+            return latest
+        raise FileNotFoundError(f"No best.pt/checkpoint.pt found in: {path}")
+    raise FileNotFoundError(f"Checkpoint path not found: {path}")
+
+
+def _load_warm_start(model: nn.Module, source: str, device: str) -> None:
+    ckpt_path = _resolve_checkpoint_path(source)
+    payload = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{ckpt_path} does not contain 'model_state_dict'")
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    loaded_keys = len(state_dict) - len(incompatible.unexpected_keys)
+    print(f"    [INFO] Warm start from: {ckpt_path}")
+    print(
+        "    [INFO] Warm-start load summary: "
+        f"loaded={loaded_keys}, missing={len(incompatible.missing_keys)}, "
+        f"unexpected={len(incompatible.unexpected_keys)}"
+    )
 
 
 def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad_clip=0.5):
@@ -191,6 +231,18 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16) # Reduced from 32 for VRAM safety
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument(
+        "--property-group",
+        choices=PHASE2_PROPERTY_GROUP_CHOICES,
+        default="priority7",
+        help="Phase 2 property group: core4/priority7/secondary2/all9",
+    )
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Warm-start checkpoint path or run directory (ignored when --resume)",
+    )
     parser.add_argument("--run-id", type=str, default=None,
                         help="Custom run id (without or with 'run_' prefix)")
     parser.add_argument("--top-k", type=int, default=3,
@@ -199,12 +251,16 @@ def main() -> int:
                         help="Keep latest rotating checkpoints")
     args = parser.parse_args()
 
+    global PROPERTIES
+    PROPERTIES = resolve_phase2_property_group(args.property_group)
+
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("=" * 66)
     print("E3NN STD (Dev Mode)")
     print("Balanced Performance / Resume Capability")
+    print(f"Property group: {args.property_group} ({len(PROPERTIES)} tasks)")
     print("=" * 66)
     
     base_dir = config.paths.models_dir / "multitask_std_e3nn"
@@ -279,6 +335,15 @@ def main() -> int:
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
         embed_dim=encoder.scalar_dim
     ).to(device)
+
+    if args.init_from and args.resume:
+        print("[WARN] --init-from ignored because --resume was requested.")
+    elif args.init_from:
+        try:
+            _load_warm_start(model, args.init_from, device)
+        except Exception as e:
+            print(f"  [ERROR] Warm-start failed: {e}")
+            return 2
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)
@@ -388,6 +453,8 @@ def main() -> int:
     results = {
         "algorithm": "e3nn_multitask_std",
         "run_id": save_dir.name,
+        "property_group": args.property_group,
+        "properties": list(PROPERTIES),
         "best_val_mae": float(best_val_mae),
         "best_epoch": int(best_epoch),
         "total_epochs": int(last_epoch),
@@ -401,6 +468,7 @@ def main() -> int:
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "property_group": args.property_group,
             "top_k": args.top_k,
             "keep_last_k": args.keep_last_k,
             "outlier_sigma": 4.0,

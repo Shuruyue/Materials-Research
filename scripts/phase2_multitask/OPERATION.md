@@ -23,6 +23,24 @@ python scripts/phase2_multitask/process_data_phase2.py --workers 8
 
 ## 3. Hyperparameter Levels (5 Levels)
 
+### Property Groups (Phase 2)
+
+- `core4`: `formation_energy`, `band_gap`, `bulk_modulus`, `shear_modulus`
+- `priority7`: `formation_energy`, `ehull`, `band_gap`, `bulk_modulus`, `shear_modulus`, `band_gap_mbj`, `spillage`
+- `secondary2`: `dielectric`, `piezoelectric`
+- `all9`: all discoverable properties
+
+Launcher defaults:
+- `lite` / `smoke`: `core4`
+- `std` / `competition` / `pro` / `max`: `priority7`
+
+Override with:
+
+```bash
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --property-group secondary2
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --all-properties
+```
+
 ### E3NN Track
 
 | Level | Backend Script | Default Main Hyperparameters | Use Case |
@@ -72,7 +90,10 @@ python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --competition
 # E3NN standard development run
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level std
 
-# E3NN production on all 9 properties
+# E3NN production run (default: priority7)
+python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro
+
+# E3NN production on all 9 properties (alias)
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --all-properties
 
 # Resume E3NN run
@@ -91,6 +112,17 @@ Common overrides:
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --epochs 700 --lr 0.0004
 python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --level std --preset large --max-samples 12000
 python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition --epochs 320
+```
+
+Secondary post-training example (2-property fine-tune):
+
+```bash
+python scripts/phase2_multitask/run_phase2.py \
+  --algorithm e3nn --level pro \
+  --property-group secondary2 \
+  --init-from models/multitask_pro_e3nn/run_<priority7_run_id> \
+  --epochs 120 --batch-size 4 --lr 0.0002 \
+  --run-id p2_secondary_r1
 ```
 
 ## 6. Inference

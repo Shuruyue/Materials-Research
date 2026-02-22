@@ -31,6 +31,8 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(line_buffering=True)
 
+PROPERTY_GROUP_CHOICES = ("core4", "priority7", "secondary2", "all9")
+
 PHASE2_PROFILES = {
     "e3nn": {
         "smoke": {
@@ -126,6 +128,14 @@ PHASE2_COMPETITION = {
 }
 
 
+def _default_property_group(algorithm: str, level: str, competition: bool) -> str:
+    if competition:
+        return "priority7"
+    if level in {"smoke", "lite"}:
+        return "core4"
+    return "priority7"
+
+
 def build_command(args: argparse.Namespace) -> list[str]:
     profile = PHASE2_COMPETITION[args.algorithm] if args.competition else PHASE2_PROFILES[args.algorithm][args.level]
     cmd = [sys.executable, "-u", str(PROJECT_ROOT / profile["script"])]
@@ -137,11 +147,12 @@ def build_command(args: argparse.Namespace) -> list[str]:
         else:
             print(f"[WARN] --resume ignored for algorithm={args.algorithm}, level={args.level}")
 
+    selected_group = args.property_group
     if args.all_properties:
-        if profile["supports_all_properties"]:
-            cmd.append("--all-properties")
-        else:
-            print(f"[WARN] --all-properties ignored for algorithm={args.algorithm}, level={args.level}")
+        selected_group = "all9"
+    if selected_group is None:
+        selected_group = _default_property_group(args.algorithm, args.level, args.competition)
+    cmd.extend(["--property-group", selected_group])
 
     overrides = {
         "--epochs": args.epochs,
@@ -162,6 +173,13 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
     if args.run_id:
         cmd.extend(["--run-id", args.run_id])
+    if args.init_from:
+        if args.algorithm == "e3nn" and str(profile["script"]).endswith(
+            ("train_multitask_std.py", "train_multitask_pro.py")
+        ):
+            cmd.extend(["--init-from", args.init_from])
+        else:
+            print("[WARN] --init-from is only supported by e3nn std/pro/competition runs")
     if args.top_k is not None:
         cmd.extend(["--top-k", str(args.top_k)])
     if args.keep_last_k is not None:
@@ -185,13 +203,20 @@ def main() -> int:
         help="Use competition-optimized profile (independent from --level)",
     )
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--all-properties", action="store_true")
+    parser.add_argument(
+        "--property-group",
+        choices=PROPERTY_GROUP_CHOICES,
+        default=None,
+        help="Override property group (defaults: lite/smoke=core4, std+=priority7)",
+    )
+    parser.add_argument("--all-properties", action="store_true", help="Alias for --property-group all9")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--preset", choices=["small", "medium", "large"], default=None)
     parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--init-from", type=str, default=None)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--keep-last-k", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")

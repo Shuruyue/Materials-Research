@@ -12,6 +12,8 @@ Usage:
     python scripts/phase2_multitask/train_multitask_pro.py
     python scripts/phase2_multitask/train_multitask_pro.py --resume
     python scripts/phase2_multitask/train_multitask_pro.py --no-filter  (Discovery Mode)
+    python scripts/phase2_multitask/train_multitask_pro.py --property-group all9
+    python scripts/phase2_multitask/train_multitask_pro.py --property-group secondary2 --init-from models/multitask_pro_e3nn/run_xxx
 """
 
 import argparse
@@ -30,7 +32,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
+from atlas.data.crystal_dataset import (
+    CrystalPropertyDataset,
+    PHASE2_PROPERTY_GROUP_CHOICES,
+    resolve_phase2_property_group,
+)
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.metrics import scalar_metrics
@@ -43,20 +49,7 @@ from atlas.console_style import install_console_style
 install_console_style()
 
 # ── Pro Tier Config ──
-# Full discovery mode activated by --all-properties
-CORE_PROPERTIES = DEFAULT_PROPERTIES
-
-ALL_PROPERTIES = [
-    "formation_energy",
-    "band_gap",
-    "band_gap_mbj",
-    "bulk_modulus",
-    "shear_modulus",
-    "dielectric",
-    "piezoelectric",
-    "spillage",
-    "ehull",
-]
+PROPERTIES = resolve_phase2_property_group("priority7")
 
 PRO_PRESET = {
     "irreps": "128x0e + 64x1o + 32x2e", # Optimized High capacity (Removed 3o for speed)
@@ -99,6 +92,48 @@ class UncertaintyWeightedLoss(nn.Module):
     def get_weights(self):
         return {p: round(float(torch.exp(-self.log_vars[i])), 4) for i, p in enumerate(PROPERTIES)}
 
+
+def _resolve_checkpoint_path(source: str) -> Path:
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = (Path(__file__).resolve().parents[2] / path).resolve()
+
+    if path.is_file():
+        return path
+    if path.is_dir():
+        best = path / "best.pt"
+        latest = path / "checkpoint.pt"
+        if best.exists():
+            return best
+        if latest.exists():
+            return latest
+        raise FileNotFoundError(f"No best.pt/checkpoint.pt found in: {path}")
+    raise FileNotFoundError(f"Checkpoint path not found: {path}")
+
+
+def _load_warm_start(model: nn.Module, source: str, device: str) -> None:
+    ckpt_path = _resolve_checkpoint_path(source)
+    payload = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{ckpt_path} does not contain 'model_state_dict'")
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    loaded_keys = len(state_dict) - len(incompatible.unexpected_keys)
+    print(f"    [INFO] Warm start from: {ckpt_path}")
+    print(
+        "    [INFO] Warm-start load summary: "
+        f"loaded={loaded_keys}, missing={len(incompatible.missing_keys)}, "
+        f"unexpected={len(incompatible.unexpected_keys)}"
+    )
+    if incompatible.missing_keys:
+        sample = ", ".join(incompatible.missing_keys[:4])
+        suffix = " ..." if len(incompatible.missing_keys) > 4 else ""
+        print(f"    [WARN] Missing keys example: {sample}{suffix}")
+    if incompatible.unexpected_keys:
+        sample = ", ".join(incompatible.unexpected_keys[:4])
+        suffix = " ..." if len(incompatible.unexpected_keys) > 4 else ""
+        print(f"    [WARN] Unexpected keys example: {sample}{suffix}")
 
 
 
@@ -234,10 +269,22 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--no-filter", action="store_true", help="Disable outlier filter")
-    parser.add_argument("--all-properties", action="store_true", help="Train on ALL 9 properties (Discovery Mode)")
+    parser.add_argument(
+        "--property-group",
+        choices=PHASE2_PROPERTY_GROUP_CHOICES,
+        default="priority7",
+        help="Phase 2 property group: core4/priority7/secondary2/all9",
+    )
+    parser.add_argument("--all-properties", action="store_true", help="Alias for --property-group all9")
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=4) # Lowered to 4 for extreme VRAM limits
     parser.add_argument("--lr", type=float, default=0.0005)
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Warm-start checkpoint path or run directory (ignored when --resume)",
+    )
     parser.add_argument("--run-id", type=str, default=None,
                         help="Custom run id (without or with 'run_' prefix)")
     parser.add_argument("--top-k", type=int, default=3,
@@ -248,19 +295,26 @@ def main() -> int:
 
     # Dynamic Property Selection
     global PROPERTIES
-    if args.all_properties:
-        PROPERTIES = ALL_PROPERTIES
-        print("[INFO] DISCOVERY MODE: Training on ALL 9 properties!")
+    selected_group = "all9" if args.all_properties else args.property_group
+    PROPERTIES = resolve_phase2_property_group(selected_group)
+    args.property_group = selected_group
+    is_all_properties = selected_group == "all9"
+
+    if selected_group == "all9":
+        print("[INFO] DISCOVERY MODE: Training on ALL 9 properties.")
+    elif selected_group == "priority7":
+        print("[INFO] PRIORITY MODE: Training on primary 7 properties.")
+    elif selected_group == "secondary2":
+        print("[INFO] SECONDARY MODE: Training on dielectric + piezoelectric only.")
     else:
-        PROPERTIES = CORE_PROPERTIES
-        print("[INFO] STANDARD MODE: Training on core 4 properties.")
+        print("[INFO] CORE MODE: Training on core 4 properties.")
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("=" * 66)
     print("E3NN PRO (Production Mode)")
-    print(f"Tasks: {len(PROPERTIES)} Properties")
+    print(f"Property group: {selected_group} | Tasks: {len(PROPERTIES)}")
     print("=" * 66)
     
     base_dir = config.paths.models_dir / "multitask_pro_e3nn"
@@ -283,7 +337,8 @@ def main() -> int:
             "status": "started",
             "phase": "phase2",
             "model_family": "multitask_pro_e3nn",
-            "all_properties": bool(args.all_properties),
+            "all_properties": bool(is_all_properties),
+            "property_group": selected_group,
         },
     )
     print(f"  [INFO] Run manifest: {manifest_path}")
@@ -303,7 +358,7 @@ def main() -> int:
         val_data = filter_outliers(datasets["val"], PROPERTIES, save_dir, n_sigma=4.0)
         test_data = filter_outliers(datasets["test"], PROPERTIES, save_dir, n_sigma=4.0)
     else:
-        print("\n[2/5] [WARN] Outlier Filter DISABLED (--no-filter). Discovery Mode ON.")
+        print("\n[2/5] [WARN] Outlier Filter DISABLED (--no-filter).")
         train_data = datasets["train"]
         val_data = datasets["val"]
         test_data = datasets["test"]
@@ -342,6 +397,15 @@ def main() -> int:
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
         embed_dim=encoder.scalar_dim
     ).to(device)
+
+    if args.init_from and args.resume:
+        print("[WARN] --init-from ignored because --resume was requested.")
+    elif args.init_from:
+        try:
+            _load_warm_start(model, args.init_from, device)
+        except Exception as e:
+            print(f"  [ERROR] Warm-start failed: {e}")
+            return 2
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)
@@ -455,7 +519,9 @@ def main() -> int:
     results = {
         "algorithm": "e3nn_multitask_pro",
         "run_id": save_dir.name,
-        "all_properties": bool(args.all_properties),
+        "all_properties": bool(is_all_properties),
+        "property_group": selected_group,
+        "properties": list(PROPERTIES),
         "best_val_mae": float(best_val_mae),
         "best_epoch": int(best_epoch),
         "total_epochs": int(last_epoch),
@@ -469,6 +535,7 @@ def main() -> int:
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "property_group": selected_group,
             "top_k": args.top_k,
             "keep_last_k": args.keep_last_k,
             "outlier_filter_enabled": bool(not args.no_filter),
