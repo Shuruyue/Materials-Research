@@ -26,6 +26,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.config import get_config
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 
 def check_gpu():
@@ -286,3 +289,4 @@ def print_python_training_alternative(cfg, train_file, val_file, device):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

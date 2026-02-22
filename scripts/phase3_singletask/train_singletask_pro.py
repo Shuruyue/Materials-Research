@@ -34,6 +34,9 @@ from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 
 # ── Literature benchmarks ──
@@ -633,3 +636,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

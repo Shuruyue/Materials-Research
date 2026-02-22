@@ -17,6 +17,13 @@ from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.utils import load_phase2_model
 from jarvis.core.atoms import Atoms
 
+PHASE2_MODEL_FAMILIES = (
+    "multitask_lite_e3nn",
+    "multitask_std_e3nn",
+    "multitask_pro_e3nn",
+    "multitask_cgcnn",
+)
+
 
 class AtlasMultitaskPredictor:
     def __init__(self, model_dir: Path):
@@ -33,6 +40,9 @@ class AtlasMultitaskPredictor:
         print(f"[INFO] Loading model from {ckpt_path.name}...")
         self.model, self.normalizer = load_phase2_model(str(ckpt_path), self.device)
         self.tasks = list(getattr(self.model, "task_names", DEFAULT_PROPERTIES))
+        encoder = getattr(self.model, "encoder", None)
+        # e3nn uses edge_vec; CGCNN uses edge_attr
+        self._use_edge_vec = bool(hasattr(encoder, "sh_irreps"))
         print(f"[INFO] Model loaded. Tasks: {self.tasks}")
 
     def _process_atoms(self, atoms):
@@ -52,9 +62,10 @@ class AtlasMultitaskPredictor:
         data = self._process_atoms(atoms)
         data.batch = torch.zeros(data.x.shape[0], dtype=torch.long)
         data = data.to(self.device)
+        edge_features = data.edge_vec if self._use_edge_vec else data.edge_attr
 
         with torch.no_grad():
-            preds = self.model(data.x, data.edge_index, data.edge_vec, data.batch)
+            preds = self.model(data.x, data.edge_index, edge_features, data.batch)
 
         result = {}
         for prop in self.tasks:
@@ -80,8 +91,10 @@ class AtlasMultitaskPredictor:
         return pd.DataFrame(rows)
 
 
-def _detect_latest_model_dir(project_root: Path) -> Path:
-    base_dir = project_root / "models" / "multitask_pro_e3nn"
+def _detect_latest_model_dir(project_root: Path, family: str) -> Path:
+    base_dir = project_root / "models" / family
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Model family directory not found: {base_dir}")
     runs = sorted(
         [d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
     )
@@ -91,10 +104,22 @@ def _detect_latest_model_dir(project_root: Path) -> Path:
     return runs[-1]
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Atlas Phase 2 Multi-Task Inference")
     parser.add_argument("--cif", type=Path, help="Path to a single CIF file")
     parser.add_argument("--dir", type=Path, help="Directory containing CIF files")
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=None,
+        help="Explicit model run directory (overrides --family auto-detect)",
+    )
+    parser.add_argument(
+        "--family",
+        choices=PHASE2_MODEL_FAMILIES,
+        default="multitask_pro_e3nn",
+        help="Model family for auto-selecting latest run",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -107,11 +132,11 @@ def main():
     project_root = Path(__file__).resolve().parent.parent.parent
 
     try:
-        model_dir = _detect_latest_model_dir(project_root)
+        model_dir = args.model_dir if args.model_dir is not None else _detect_latest_model_dir(project_root, args.family)
         predictor = AtlasMultitaskPredictor(model_dir)
     except Exception as exc:
         print(f"Failed to initialize predictor: {exc}")
-        return
+        return 2
 
     if args.cif:
         atoms = Atoms.from_cif(str(args.cif))
@@ -120,13 +145,13 @@ def main():
         for prop in predictor.tasks:
             if prop in predictions:
                 print(f"  {prop:20s}: {predictions[prop]:.4f}")
-        return
+        return 0
 
     if args.dir:
         cifs = list(args.dir.glob("*.cif"))
         if not cifs:
             print("No CIF files found.")
-            return
+            return 2
 
         df = predictor.predict_batch(cifs)
         if args.output.suffix.lower() == ".xlsx":
@@ -143,14 +168,15 @@ def main():
 
         if not df.empty:
             print("\n" + df.head().to_markdown(index=False, tablefmt="grid"))
-        return
+        return 0
 
     if args.test_random:
         print("Random validation sampling is not implemented in this CLI yet.")
-        return
+        return 0
 
     parser.print_help()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

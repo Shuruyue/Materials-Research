@@ -34,6 +34,9 @@ from atlas.data.jarvis_client import JARVISClient
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 from atlas.topology.classifier import CrystalGraphBuilder, TopoGNN
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 
 class TopoDataset(Dataset):
@@ -480,3 +483,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

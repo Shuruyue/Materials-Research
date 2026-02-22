@@ -10,12 +10,15 @@ This is the execution guide for teammates running multi-task material-property t
   - `cgcnn`: CGCNN multi-task baseline (comparison track).
 - Recommended entry point: `scripts/phase2_multitask/run_phase2.py`.
 
-## 2. Pre-step (Data Processing)
+## 2. Data Preparation Notes
 
-Run once before training:
+- Default training scripts (`train_multitask_*.py`) already build/cache datasets automatically via `CrystalPropertyDataset`.
+- `process_data_phase2.py` is optional for bulk precompute workflows, but it is not a required step for standard training.
+
+Optional command:
 
 ```bash
-python scripts/phase2_multitask/process_data_phase2.py
+python scripts/phase2_multitask/process_data_phase2.py --workers 8
 ```
 
 ## 3. Hyperparameter Levels (5 Levels)
@@ -103,9 +106,9 @@ python scripts/phase2_multitask/inference_multitask.py --dir data/structures --o
   - `models/multitask_std_e3nn/run_*/`
   - `models/multitask_pro_e3nn/run_*/`
 - CGCNN baseline:
-  - `models/multitask_cgcnn_*`
+  - `models/multitask_cgcnn/run_*/`
 - Key artifacts:
-  - `best.pt`, `checkpoint.pt`, `history.json`, metrics JSON/CSV logs.
+  - `best.pt`, `checkpoint.pt`, `history.json`, `results.json`, `run_manifest.json`.
 
 ## 8. Team Handoff Checklist
 

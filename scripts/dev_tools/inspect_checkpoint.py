@@ -1,147 +1,197 @@
-import torch
-import sys
+#!/usr/bin/env python3
+"""
+Inspect Phase 2 run artifacts without re-running evaluation.
+
+Shows:
+- run metadata (manifest/args/git)
+- checkpoint summary (epoch, best metric, parameter count)
+- stored metrics (results.json)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
 from pathlib import Path
-import pandas as pd
+from typing import Any
 
-# Add project root to path
+import torch
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT)) # Insert at 0 to prioritize local modules
-
-# Import necessary modules
-try:
-    from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
-    from atlas.models.equivariant import EquivariantGNN
-    from atlas.models.multi_task import MultiTaskGNN
-    from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
-except ImportError as e:
-    print(f"[ERROR] ImportError: {e}")
-    print(f"   sys.path: {sys.path}")
-    sys.exit(1)
-
-import numpy as np
+MODELS_ROOT = PROJECT_ROOT / "models"
+FAMILIES = (
+    "multitask_lite_e3nn",
+    "multitask_std_e3nn",
+    "multitask_pro_e3nn",
+    "multitask_cgcnn",
+)
 
 
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
-# Define STD_PRESET locally to avoid script import issues
-STD_PRESET = {
-    "irreps": "64x0e + 32x1o + 16x2e",
-    "max_ell": 2,
-    "n_layers": 3,
-    "n_radial": 20,
-    "radial_hidden": 128,
-    "head_hidden": 64,
-}
-from torch_geometric.loader import DataLoader
-from sklearn.metrics import mean_absolute_error
 
-def evaluate_run(run_dir):
-    print(f"\n[INFO] Inspecting run: {run_dir}")
-    run_path = Path(run_dir)
-    checkpoint_path = run_path / "best.pt"
-    
-    if not checkpoint_path.exists():
-        print(f"[ERROR] No best.pt found in {run_dir}")
-        return
+def _find_run_dir(
+    *,
+    run_dir: Path | None,
+    family: str,
+    run_id: str | None,
+) -> Path:
+    if run_dir is not None:
+        if not run_dir.exists():
+            raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
+        return run_dir
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"   Device: {device}")
+    base_dir = MODELS_ROOT / family
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Model family directory does not exist: {base_dir}")
 
-    # Load Checkpoint
-    print("   Loading Checkpoint...")
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # Reconstruct Model (Assuming Std architecture based on folder name 'std')
-    # If Pro, we need Large Preset. But usually Std is what users run first.
-    # Let's try to infer from checkpoint structure or just use Std preset.
-    print("   Building Model...")
-    encoder = EquivariantGNN(
-        irreps_hidden=STD_PRESET["irreps"],
-        max_ell=STD_PRESET["max_ell"],
-        n_layers=STD_PRESET["n_layers"],
-        max_radius=5.0,
-        n_species=86,
-        n_radial_basis=STD_PRESET["n_radial"],
-        radial_hidden=STD_PRESET["radial_hidden"],
-        output_dim=1
-    ).to(device)
-    
-    # Get properties from dataset or default
-    properties = DEFAULT_PROPERTIES 
-    
-    model = MultiTaskGNN(
-        encoder=encoder,
-        tasks={p: {"type": "scalar"} for p in properties},
-        embed_dim=encoder.scalar_dim
-    ).to(device)
-    
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    
-    # Load Normalizer
-    print("   Loading Normalizer...")
-    # We need a dummy dataset to init normalizer structure, then load state
-    dummy_ds = CrystalPropertyDataset(split="val", max_samples=10).prepare()
-    normalizer = MultiTargetNormalizer(dummy_ds, properties)
-    normalizer.load_state_dict(ckpt["normalizer"])
+    if run_id is not None:
+        run_name = run_id if run_id.startswith("run_") else f"run_{run_id}"
+        target = base_dir / run_name
+        if not target.exists():
+            raise FileNotFoundError(f"Run not found: {target}")
+        return target
 
-    # Load Validation Data
-    print("   Loading Validation Data...")
-    val_data = CrystalPropertyDataset(split="val").prepare()
-    val_loader = DataLoader(val_data, batch_size=16, shuffle=False)
-    
-    # Evaluate
-    print("   Evaluating...")
-    all_preds = {p: [] for p in properties}
-    all_targets = {p: [] for p in properties}
-    
-    with torch.no_grad():
-        for batch in val_loader:
-            batch = batch.to(device)
-            preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
-            
-            for prop in properties:
-                if prop not in preds: continue
-                target = getattr(batch, prop).view(-1, 1)
-                mask = ~torch.isnan(target)
-                if mask.sum() == 0: continue
-                
-                target = target[mask].view(-1, 1)
-                pred = preds[prop][mask].view(-1, 1)
-                
-                # Denormalize
-                pred_denorm = normalizer.denormalize(prop, pred)
-                
-                all_preds[prop].append(pred_denorm.cpu())
-                all_targets[prop].append(target.cpu())
-
-    # Calculate Metrics
-    print("\n   Validation Metrics (MAE):")
-    print(f"   {'Property':<20} | {'MAE':<10} | {'Target (approx)'}")
-    print("-" * 50)
-    
-    avg_mae = 0
-    count = 0
-    
-    for prop in properties:
-        if all_preds[prop]:
-            y_pred = torch.cat(all_preds[prop]).numpy()
-            y_true = torch.cat(all_targets[prop]).numpy()
-            mae = mean_absolute_error(y_true, y_pred)
-            
-            target_mae = "0.05" if "energy" in prop else "10.0" if "modulus" in prop else "0.3"
-            print(f"   {prop:<20} | {mae:.4f}     | < {target_mae}")
-            
-            avg_mae += mae
-            count += 1
-            
-    print("-" * 50)
-    import glob
-    import os
-    # Auto-find latest run in std folder
-    base_dir = PROJECT_ROOT / "models" / "multitask_std_e3nn"
     runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
-    if runs:
-        latest = runs[-1]
-        evaluate_run(latest)
-    else:
-        print("No run folder found.")
+    if not runs:
+        raise FileNotFoundError(f"No run_* directories found under: {base_dir}")
+    return runs[-1]
+
+
+def _choose_checkpoint(run_dir: Path, preferred: str) -> Path:
+    best = run_dir / "best.pt"
+    latest = run_dir / "checkpoint.pt"
+    if preferred == "best":
+        if not best.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {best}")
+        return best
+    if preferred == "checkpoint":
+        if not latest.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {latest}")
+        return latest
+    if best.exists():
+        return best
+    if latest.exists():
+        return latest
+    raise FileNotFoundError(f"No checkpoint found in {run_dir} (expected best.pt/checkpoint.pt)")
+
+
+def _extract_head_names(state_dict: dict[str, Any]) -> list[str]:
+    names = set()
+    for key in state_dict:
+        if key.startswith("heads."):
+            parts = key.split(".")
+            if len(parts) >= 2:
+                names.add(parts[1])
+    return sorted(names)
+
+
+def _state_param_count(state_dict: dict[str, Any]) -> int:
+    total = 0
+    for value in state_dict.values():
+        if isinstance(value, torch.Tensor):
+            total += int(value.numel())
+    return total
+
+
+def _print_kv(title: str, payload: dict[str, Any] | None) -> None:
+    if not payload:
+        print(f"{title}: <none>")
+        return
+    print(title + ":")
+    for key in sorted(payload.keys()):
+        print(f"  - {key}: {payload[key]}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Inspect Phase 2 run artifacts")
+    parser.add_argument("--run-dir", type=Path, default=None, help="Explicit run directory path")
+    parser.add_argument("--family", choices=FAMILIES, default="multitask_pro_e3nn")
+    parser.add_argument("--run-id", type=str, default=None, help="Run id (with or without 'run_')")
+    parser.add_argument(
+        "--checkpoint",
+        choices=("auto", "best", "checkpoint"),
+        default="auto",
+        help="Which checkpoint file to inspect",
+    )
+    parser.add_argument("--show-heads", action="store_true", help="Print all task head names")
+    args = parser.parse_args()
+
+    try:
+        run_dir = _find_run_dir(run_dir=args.run_dir, family=args.family, run_id=args.run_id)
+        ckpt_path = _choose_checkpoint(run_dir, args.checkpoint)
+    except FileNotFoundError as exc:
+        print(f"[ERROR] {exc}")
+        return 2
+
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    state_dict = payload.get("model_state_dict")
+    if not isinstance(state_dict, dict):
+        print(f"[ERROR] Invalid checkpoint (missing model_state_dict): {ckpt_path}")
+        return 2
+
+    manifest = _load_json(run_dir / "run_manifest.json")
+    results = _load_json(run_dir / "results.json")
+    history = _load_json(run_dir / "history.json")
+    task_names = _extract_head_names(state_dict)
+
+    print("=" * 80)
+    print("Phase 2 Checkpoint Inspector")
+    print("=" * 80)
+    print(f"Run dir     : {run_dir}")
+    print(f"Checkpoint  : {ckpt_path.name}")
+    print(f"Epoch       : {payload.get('epoch', 'n/a')}")
+    print(f"Best val MAE: {payload.get('best_val_mae', 'n/a')}")
+    print(f"Current MAE : {payload.get('val_mae', 'n/a')}")
+    print(f"Task count  : {len(task_names)}")
+    print(f"Param count : {_state_param_count(state_dict):,}")
+
+    if args.show_heads:
+        print("Task heads  : " + (", ".join(task_names) if task_names else "<none>"))
+
+    if manifest:
+        print("-" * 80)
+        print("Manifest")
+        _print_kv("Args", manifest.get("args") if isinstance(manifest.get("args"), dict) else None)
+        _print_kv("Result", manifest.get("result") if isinstance(manifest.get("result"), dict) else None)
+        runtime = manifest.get("runtime")
+        if isinstance(runtime, dict):
+            git = runtime.get("git")
+            _print_kv("Git", git if isinstance(git, dict) else None)
+
+    if results:
+        print("-" * 80)
+        print("results.json")
+        _print_kv("Core", {
+            "algorithm": results.get("algorithm"),
+            "run_id": results.get("run_id"),
+            "best_epoch": results.get("best_epoch"),
+            "best_val_mae": results.get("best_val_mae"),
+            "avg_test_mae": results.get("avg_test_mae"),
+            "total_epochs": results.get("total_epochs"),
+        })
+        hyper = results.get("hyperparameters")
+        _print_kv("Hyperparameters", hyper if isinstance(hyper, dict) else None)
+
+    if history and isinstance(history, dict):
+        print("-" * 80)
+        print("history.json")
+        for key in ("train_loss", "val_mae", "weights", "lr"):
+            val = history.get(key)
+            if isinstance(val, list):
+                print(f"  - {key}: length={len(val)}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

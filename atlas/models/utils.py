@@ -67,6 +67,35 @@ def _build_cgcnn_multitask(tasks: Iterable[str]) -> MultiTaskGNN:
     )
 
 
+def _normalize_state_dict_keys(state_dict: dict) -> dict:
+    """
+    Normalize legacy checkpoint key layouts.
+
+    Supported conversions:
+    - DDP/DataParallel prefix: module.*
+    - legacy phase2 CGCNN wrapper: encoder.cgcnn.* -> encoder.*
+    """
+    normalized = dict(state_dict)
+
+    if any(key.startswith("module.") for key in normalized):
+        normalized = {
+            (key[len("module."):] if key.startswith("module.") else key): value
+            for key, value in normalized.items()
+        }
+
+    if any(key.startswith("encoder.cgcnn.") for key in normalized):
+        normalized = {
+            (
+                "encoder." + key[len("encoder.cgcnn."):]
+                if key.startswith("encoder.cgcnn.")
+                else key
+            ): value
+            for key, value in normalized.items()
+        }
+
+    return normalized
+
+
 def _try_load_candidates(state_dict: dict, tasks: list[str]) -> MultiTaskGNN:
     # Try phase-2 equivariant presets first, then CGCNN multitask fallback.
     for preset in _PHASE2_PRESETS:
@@ -104,6 +133,7 @@ def load_phase2_model(checkpoint_path: str | Path, device: str | torch.device = 
         raise KeyError(f"{ckpt_path} does not contain 'model_state_dict'")
 
     state_dict = payload["model_state_dict"]
+    state_dict = _normalize_state_dict_keys(state_dict)
     tasks = _extract_tasks_from_state_dict(state_dict)
     model = _try_load_candidates(state_dict, tasks)
     model.to(device)
@@ -111,4 +141,3 @@ def load_phase2_model(checkpoint_path: str | Path, device: str | torch.device = 
 
     normalizer = _load_normalizer(payload)
     return model, normalizer
-

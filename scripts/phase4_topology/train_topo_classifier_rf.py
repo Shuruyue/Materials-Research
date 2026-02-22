@@ -29,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from atlas.config import get_config
 from atlas.data.jarvis_client import JARVISClient
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+from atlas.console_style import install_console_style
+
+install_console_style()
 
 
 MAX_Z = 86
@@ -292,4 +295,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

@@ -37,10 +37,13 @@ try:
     from atlas.training.normalizers import TargetNormalizer
     from atlas.training.checkpoint import CheckpointManager
     from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+    from atlas.console_style import install_console_style
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
     sys.exit(1)
+
+install_console_style()
 
 import numpy as np
 
@@ -595,5 +598,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

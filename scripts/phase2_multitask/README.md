@@ -40,10 +40,10 @@ Based on `jarvis-dft` data, we are now targeting:
 
 ## Directory Structure
 
-### Step 0: The Foundation
+### Step 0: Optional Data Precompute
 | Script | Role |
 | :--- | :--- |
-| `process_data_phase2.py` | **Data Prep**. Pre-computes 3-body angles for ALL 29 models.<br>Updated to extract **all 9 properties**. |
+| `process_data_phase2.py` | **Optional Data Prep**. Pre-computes 3-body graphs/properties for offline workflows.<br>Standard training scripts already auto-build/cache dataset graphs. |
 
 
 ### Step 1: Multi-Task Models (Main Track)

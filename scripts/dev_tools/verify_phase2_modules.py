@@ -1,70 +1,101 @@
+#!/usr/bin/env python3
+"""
+Verification script for current Phase 2 pipeline modules.
+"""
 
-"""
-Verification Script for Phase 2 Optimization
-"""
+from __future__ import annotations
+
+import logging
 import sys
 from pathlib import Path
-# Add project root to sys.path
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-import logging
-import torch
 
-# Configure check
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Phase2Verification")
 
-def verify_modules():
-    logger.info("Verifying ATLAS Phase 2 Modules...")
-    
-    # 1. Models
+
+def verify_phase2() -> bool:
+    logger.info("Verifying Phase 2 modules...")
+
+    # 1) Core model imports + lightweight instantiation
     try:
-        from atlas.models import M3GNet, MultiTaskGNN, EvidentialHead, CrystalGraphBuilder
-        logger.info("[Pass] Models import successful")
-        
-        # Instantiate
-        model = M3GNet(n_species=86, embed_dim=16)
-        logger.info("[Pass] M3GNet instantiation successful")
-        
-        head = EvidentialHead(embed_dim=16)
-        logger.info("[Pass] EvidentialHead instantiation successful")
-        
-        builder = CrystalGraphBuilder(compute_3body=True)
-        logger.info("[Pass] CrystalGraphBuilder (3-body) instantiation successful")
-        
-    except Exception as e:
-        logger.error(f"[Fail] Models verification failed: {e}")
+        from atlas.models.cgcnn import CGCNN
+        from atlas.models.equivariant import EquivariantGNN
+        from atlas.models.graph_builder import CrystalGraphBuilder
+        from atlas.models.multi_task import MultiTaskGNN
+
+        cgcnn = CGCNN(hidden_dim=32, n_conv=2, n_fc=1)
+        e3nn = EquivariantGNN(
+            irreps_hidden="16x0e + 8x1o",
+            max_ell=1,
+            n_layers=2,
+            n_radial_basis=8,
+            radial_hidden=32,
+        )
+        _ = MultiTaskGNN(
+            encoder=e3nn,
+            tasks={
+                "formation_energy": {"type": "scalar"},
+                "band_gap": {"type": "scalar"},
+            },
+            embed_dim=e3nn.scalar_dim,
+        )
+        _ = CrystalGraphBuilder(compute_3body=True)
+
+        logger.info("[PASS] Core model modules are importable/instantiable")
+        logger.info("[PASS] CGCNN hidden_dim=%s", cgcnn.hidden_dim)
+    except Exception as exc:
+        logger.error("[FAIL] Core model verification failed: %s", exc)
         return False
 
-    # 2. Training (Losses)
+    # 2) Training utilities used by phase2 scripts
     try:
-        from atlas.training.losses import EvidentialLoss, MultiTaskLoss
-        loss = EvidentialLoss()
-        logger.info("[Pass] EvidentialLoss instantiation successful")
-    except Exception as e:
-        logger.error(f"[Fail] Training verification failed: {e}")
+        from atlas.training.checkpoint import CheckpointManager
+        from atlas.training.normalizers import MultiTargetNormalizer
+        from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+
+        _ = CheckpointManager(PROJECT_ROOT / "artifacts" / "_verify_phase2_tmp")
+        _ = MultiTargetNormalizer()
+        _ = resolve_run_dir  # symbol check
+        _ = write_run_manifest  # symbol check
+        logger.info("[PASS] Training utility modules are available")
+    except Exception as exc:
+        logger.error("[FAIL] Training utility verification failed: %s", exc)
         return False
 
-    # 3. Active Learning
+    # 3) Inference loader utility
     try:
-        from atlas.active_learning import DiscoveryController, expected_improvement
-        logger.info("[Pass] Active Learning import successful")
-    except Exception as e:
-        logger.error(f"[Fail] Active Learning verification failed: {e}")
+        from atlas.models.utils import load_phase2_model
+
+        _ = load_phase2_model  # symbol check
+        logger.info("[PASS] Phase 2 model loader utility is available")
+    except Exception as exc:
+        logger.error("[FAIL] Inference utility verification failed: %s", exc)
         return False
 
-    # 4. Thermo
-    try:
-        from atlas.thermo import PhaseStabilityAnalyst
-        analyst = PhaseStabilityAnalyst()
-        logger.info("[Pass] PhaseStabilityAnalyst instantiation successful")
-    except Exception as e:
-        logger.error(f"[Fail] Thermo verification failed: {e}")
+    # 4) Ensure key phase2 scripts exist
+    required_scripts = [
+        PROJECT_ROOT / "scripts/phase2_multitask/run_phase2.py",
+        PROJECT_ROOT / "scripts/phase2_multitask/train_multitask_lite.py",
+        PROJECT_ROOT / "scripts/phase2_multitask/train_multitask_std.py",
+        PROJECT_ROOT / "scripts/phase2_multitask/train_multitask_pro.py",
+        PROJECT_ROOT / "scripts/phase2_multitask/train_multitask_cgcnn.py",
+        PROJECT_ROOT / "scripts/phase2_multitask/inference_multitask.py",
+    ]
+    missing = [p for p in required_scripts if not p.exists()]
+    if missing:
+        for path in missing:
+            logger.error("[FAIL] Missing script: %s", path)
         return False
-        
-    logger.info("\nALL SYSTEMS GO! Phase 2 Optimization Verified.")
+    logger.info("[PASS] Phase 2 script set is complete")
+
+    logger.info("ALL SYSTEMS GO: Phase 2 module verification passed.")
     return True
 
+
 if __name__ == "__main__":
-    success = verify_modules()
-    sys.exit(0 if success else 1)
+    ok = verify_phase2()
+    raise SystemExit(0 if ok else 1)
