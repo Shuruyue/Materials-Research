@@ -70,3 +70,12 @@ references/
 # Local third_party snapshots (too large / reproducible from source)
 atlas/third_party/jarvis/
 atlas/third_party/matminer/
+
+# Local experimental model integrations (keep local unless explicitly promoted)
+atlas/models/engines/
+atlas/models/extractors/
+atlas/models/matgl_wrapper.py
+atlas/models/nequip_wrapper.py
+atlas/models/scaling.py
+atlas/third_party/matgl/models/
+atlas/third_party/mlip_arena/models/
