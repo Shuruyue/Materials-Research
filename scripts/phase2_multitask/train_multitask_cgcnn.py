@@ -318,8 +318,11 @@ def main() -> int:
             self.cgcnn = CGCNN(node_dim, edge_dim, hidden_dim, n_conv, n_fc, output_dim=1, dropout=dropout)
             self.hidden_dim = hidden_dim # CGCNN usually has hidden_dim/2 after pooling, let's check
             
-        def forward(self, x, edge_index, edge_attr, batch):
+        def encode(self, x, edge_index, edge_attr, batch):
             return self.cgcnn.encode(x, edge_index, edge_attr, batch)
+
+        def forward(self, x, edge_index, edge_attr, batch):
+            return self.encode(x, edge_index, edge_attr, batch)
 
     # Need to check CGCNN.encode output dim. 
     # Usually CGCNN code creates encoding of size hidden_dim.

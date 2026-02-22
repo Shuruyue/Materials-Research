@@ -48,6 +48,7 @@ class JARVISClient:
         """
         cache_file = self.cache_dir / "dft_3d.pkl"
         json_file = self.cache_dir / "dft_3d.json"
+        dft_3d = None
 
         if not force_reload and cache_file.exists():
             print(f"  Loading cached JARVIS-DFT data from {cache_file}")
@@ -62,8 +63,16 @@ class JARVISClient:
             self._download_file(JARVIS_DFT_3D_URL, json_file)
 
         print("  Processing JARVIS-DFT data...")
-        with open(json_file, "r") as f:
-            dft_3d = json.load(f)
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                dft_3d = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load local JSON cache: {e}. Falling back to jarvis.db.figshare.")
+            try:
+                from jarvis.db.figshare import data as jdata
+                dft_3d = jdata("dft_3d")
+            except Exception as fig_e:
+                raise RuntimeError("Failed to load JARVIS-DFT data from both local cache and figshare backend.") from fig_e
 
         # Convert to DataFrame
         df = pd.DataFrame(dft_3d)
