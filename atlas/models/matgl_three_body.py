@@ -7,8 +7,6 @@ provides compact, dependency-light replacements with matching call signatures.
 
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import nn
 

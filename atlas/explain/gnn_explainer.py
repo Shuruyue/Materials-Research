@@ -9,12 +9,11 @@ Optimization:
 - Academic Plotting: Generates high-quality, static 3D structure plots with importance coloring.
 """
 
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, List, Tuple
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from pymatgen.core import Element, Structure
 
 # Configurations for academic style
@@ -32,7 +31,7 @@ class GNNExplainerWrapper:
         self.model = model
         self.task_name = task_name
 
-    def explain(self, data, n_epochs: int = 200) -> Dict[str, np.ndarray]:
+    def explain(self, data, n_epochs: int = 200) -> dict[str, np.ndarray]:
         """
         Explain prediction for a single material.
         """
@@ -46,7 +45,7 @@ class GNNExplainerWrapper:
                 node_mask_type="attributes", # or "object" if no node attrs
                 edge_mask_type="object",
             )
-            
+
             # Create a batch index if not present
             if not hasattr(data, 'batch') or data.batch is None:
                 batch = torch.zeros(data.num_nodes, dtype=torch.long, device=data.x.device)
@@ -74,7 +73,7 @@ class GNNExplainerWrapper:
         self,
         dataset,
         n_samples: int = 100
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Aggregates edge importance scores by bond type (e.g. "Bi-Se": 0.85).
         Useful for identifying chemically significant interactions.
@@ -84,7 +83,7 @@ class GNNExplainerWrapper:
 
         for i, data in enumerate(dataset):
             if i >= n_samples: break
-            
+
             res = self.explain(data, n_epochs=50) # Faster for aggregation
             edge_imp = res["edge_importance"]
             edge_index = res["edge_index"]
@@ -95,16 +94,16 @@ class GNNExplainerWrapper:
                 src, dst = edge_index[:, e_idx]
                 z1 = int(node_z[src])
                 z2 = int(node_z[dst])
-                
+
                 # Sort to ensure Bi-Se == Se-Bi
                 el1 = Element.from_Z(z1).symbol
                 el2 = Element.from_Z(z2).symbol
                 bond_name = "-".join(sorted([el1, el2]))
-                
+
                 if bond_name not in bond_scores:
                     bond_scores[bond_name] = 0.0
                     bond_counts[bond_name] = 0
-                
+
                 bond_scores[bond_name] +=  float(importance)
                 bond_counts[bond_name] += 1
 
@@ -115,9 +114,9 @@ class GNNExplainerWrapper:
     def plot_structure_importance(
         self,
         structure: Structure,
-        explanation: Dict[str, np.ndarray],
-        save_path: Optional[str] = None,
-        view_angle: Tuple[int, int] = (15, 45)
+        explanation: dict[str, np.ndarray],
+        save_path: str | None = None,
+        view_angle: tuple[int, int] = (15, 45)
     ):
         """
         Plot 3D crystal structure with atoms and bonds colored by importance.
@@ -133,15 +132,15 @@ class GNNExplainerWrapper:
         # Setup 3D plot
         fig = plt.figure(figsize=(6, 6), dpi=300)
         ax = fig.add_subplot(111, projection='3d')
-        
+
         # Plot Atoms
         coords = structure.cart_coords
         species = [str(s.specie) for s in structure]
-        
+
         # Use a colormap for importance (e.g., Reds)
         cmap = plt.get_cmap('Reds')
         colors = cmap(norm_node_imp)
-        
+
         # Atom sizes based on species (basic approximation)
         sizes = [Element(s).atomic_radius * 100 for s in species]
 
@@ -155,7 +154,7 @@ class GNNExplainerWrapper:
         # Re-computing neighbors here for visualization
         # In a real pipeline, reuse the GNN's edge_index to map importance strictly
         neighbors = structure.get_all_neighbors(3.0)
-        
+
         # Basic bond plotting (gray lines) - fully mapping GNN edges to 3D lines is complex
         # without index mapping. Here we draw geometric bonds for context.
         for i, nbrs in enumerate(neighbors):
@@ -165,15 +164,15 @@ class GNNExplainerWrapper:
                 # Dist check
                 if nbr.nn_distance < 3.0:
                     ax.plot(
-                        [start[0], end[0]], 
-                        [start[1], end[1]], 
-                        [start[2], end[2]], 
+                        [start[0], end[0]],
+                        [start[1], end[1]],
+                        [start[2], end[2]],
                         c='gray', alpha=0.3, linewidth=1.0
                     )
 
         # Clean up axes
         ax.set_axis_off()
-        
+
         # Title
         formula = structure.composition.reduced_formula
         plt.title(f"{formula} - Feature Importance", fontsize=12, fontweight='bold')

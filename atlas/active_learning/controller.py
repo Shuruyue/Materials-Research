@@ -10,21 +10,21 @@ Optimization:
 - Duplicate Prevention: Tracks known formulas across sessions
 """
 
-import json
-import time
-import logging
 import gc
-import torch
-from typing import Optional, List, Set
-from dataclasses import dataclass, asdict
+import json
+import logging
+import time
+from dataclasses import asdict, dataclass
 
-from atlas.config import get_config
-from atlas.active_learning.generator import StructureGenerator
+import torch
+
 from atlas.active_learning.acquisition import expected_improvement
+from atlas.active_learning.generator import StructureGenerator
 from atlas.active_learning.gp_surrogate import GPSurrogateAcquirer
-from atlas.research.workflow_reproducible_graph import WorkflowReproducibleGraph, IterationSnapshot
+from atlas.config import get_config
+from atlas.research.workflow_reproducible_graph import IterationSnapshot, WorkflowReproducibleGraph
+from atlas.utils.registry import EvaluatorFactory, ModelFactory, RelaxerFactory
 from atlas.utils.reproducibility import set_global_seed
-from atlas.utils.registry import ModelFactory, RelaxerFactory, EvaluatorFactory
 
 try:
     import rustworkx as rx
@@ -43,7 +43,7 @@ class Candidate:
     method: str = ""
     parent: str = ""
     mutations: str = ""
-    
+
     # Scores
     topo_probability: float = 0.0
     stability_score: float = 0.0
@@ -52,7 +52,7 @@ class Candidate:
     acquisition_value: float = 0.0
 
     # Properties
-    energy_per_atom: Optional[float] = None
+    energy_per_atom: float | None = None
     relaxed_structure: object = None
     converged: bool = False
 
@@ -101,8 +101,8 @@ class DiscoveryController:
         self.relaxer = relaxer
         self.classifier = classifier_model
         self.graph_builder = graph_builder
-        
-        
+
+
         self.cfg = get_config()
         self.profile = self.cfg.profile
 
@@ -122,7 +122,7 @@ class DiscoveryController:
                  logger.info(f"Dynamically loaded classifier model: {self.profile.model_name}")
              except Exception as e:
                  logger.warning(f"Could not load auto-classifier {self.profile.model_name}: {e}")
-                 
+
         self.synthesizability_evaluator = None
         if hasattr(self.profile, "evaluator_name"):
             try:
@@ -130,7 +130,7 @@ class DiscoveryController:
                 logger.info(f"Dynamically loaded synthesizability evaluator: {self.profile.evaluator_name}")
             except Exception:
                 logger.info("No synthesis evaluator attached.")
-                
+
         # Hyperparams
         self.weights = {
             "topo": w_topo,
@@ -151,10 +151,10 @@ class DiscoveryController:
 
         # State
         self.iteration = 0
-        self.known_formulas: Set[str] = set()
-        self.all_candidates: List[Candidate] = []
-        self.top_candidates: List[Candidate] = []
-        
+        self.known_formulas: set[str] = set()
+        self.all_candidates: list[Candidate] = []
+        self.top_candidates: list[Candidate] = []
+
         # Auto-load previous state
         self._load_checkpoint()
 
@@ -166,32 +166,32 @@ class DiscoveryController:
             return
 
         logger.info(f"Found {len(files)} checkpoints. Restoring state...")
-        
+
         # Load all history to populate known formulas
         for f in files:
             try:
-                with open(f, 'r') as fp:
+                with open(f) as fp:
                     data = json.load(fp)
                     iter_num = data.get("iteration", 0)
                     self.iteration = max(self.iteration, iter_num)
-                    
+
                     for cand_dict in data.get("candidates", []):
                         formula = cand_dict.get("formula")
                         if formula:
                             self.known_formulas.add(formula)
-                        # We don't load full objects to RAM to save space, 
+                        # We don't load full objects to RAM to save space,
                         # just formulas for novelty check.
-                        
+
             except Exception as e:
                 logger.warning(f"Failed to load checkpoint {f}: {e}")
 
         # Load top candidates from the VERY LAST iteration to seed the generator
         last_file = files[-1]
         try:
-            with open(last_file, 'r') as fp:
+            with open(last_file) as fp:
                 data = json.load(fp)
                 top_cands = [Candidate.from_dict(d) for d in data.get("candidates", [])]
-                
+
                 # Add good ones to generator logic
                 seeds = [c.relaxed_structure or c.structure for c in top_cands if c.acquisition_value > 0.3]
                 if seeds:
@@ -199,7 +199,7 @@ class DiscoveryController:
                     logger.info(f"Restored {len(seeds)} seeds from last iteration.")
         except Exception:
             pass
-            
+
         logger.info(f"Resuming from Iteration {self.iteration}. Known formulas: {len(self.known_formulas)}")
 
     def run_discovery_loop(
@@ -207,7 +207,7 @@ class DiscoveryController:
         n_iterations: int = 10,
         n_candidates_per_iter: int = 50,
         n_select_top: int = 10,
-    ) -> List[Candidate]:
+    ) -> list[Candidate]:
         """
         Run the discovery loop, resuming if necessary.
         Total iterations = current_iteration + n_iterations.
@@ -340,12 +340,12 @@ class DiscoveryController:
 
         return self.top_candidates
 
-    def _relax_candidates(self, raw_candidates: list[dict]) -> List[Candidate]:
+    def _relax_candidates(self, raw_candidates: list[dict]) -> list[Candidate]:
         candidates = []
         for rc in raw_candidates:
             struct = rc["structure"]
             formula = struct.composition.reduced_formula
-            
+
             # Default fallback values
             energy = None
             converged = False
@@ -391,13 +391,13 @@ class DiscoveryController:
 
         self.classifier.eval()
         device = next(self.classifier.parameters()).device
-        
+
         # Batch processing would be better, but loop is safer for now
         for c in candidates:
             try:
                 struct = c.relaxed_structure or c.structure
                 graph = self.graph_builder.structure_to_graph(struct)
-                
+
                 with torch.no_grad():
                     node_feats = torch.as_tensor(graph["node_features"], dtype=torch.float32, device=device)
                     edge_index = torch.as_tensor(graph["edge_index"], dtype=torch.long, device=device)
@@ -411,7 +411,7 @@ class DiscoveryController:
                         edge_features,
                         batch_idx,
                     )
-                    
+
                     # Handle Multi-Task Dictionary Output
                     if isinstance(pred, dict):
                         # 1. Topology (Band Gap or Classification)
@@ -435,7 +435,7 @@ class DiscoveryController:
                                 c.energy_std = std_fe
                             else:
                                 c.stability_score = max(0.0, min(1.0, -fe.item()))
-                                
+
                     else:
                         # Old binary classifier behavior
                         if pred.shape[-1] == 1:
@@ -454,26 +454,26 @@ class DiscoveryController:
 
         return candidates
 
-    def _score_and_select(self, candidates: List[Candidate], n_top: int) -> List[Candidate]:
+    def _score_and_select(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
         for c in candidates:
             # Novelty check (already screened, but good for scoring)
             is_new = c.formula not in self.known_formulas
             c.novelty_score = 1.0 if is_new else 0.0
-            
+
             if hasattr(c, "energy_mean") and hasattr(c, "energy_std"):
                 # Bayesian Acquisition (EI) for stability
                 # Target: Minimize Energy (Find stable phases)
                 # Best so far? Hard to define globally, assume -0.5 eV/atom
                 ei_val = expected_improvement(
-                    c.energy_mean, 
-                    c.energy_std, 
+                    c.energy_mean,
+                    c.energy_std,
                     best_f=-0.5, # Target
                     maximize=False # Minimize energy
                 ).item()
-                
+
                 # Hybrid Score: Topo (Exploitation) + Stability (Exploration/EI)
                 c.acquisition_value = (
-                    self.weights["topo"] * c.topo_probability + 
+                    self.weights["topo"] * c.topo_probability +
                     self.weights["stability"] * (ei_val * 10.0) + # Scale EI to be comparable
                     self.weights["heuristic"] * c.heuristic_topo_score +
                     self.weights["novelty"] * c.novelty_score
@@ -510,23 +510,23 @@ class DiscoveryController:
 
         return candidates
 
-    def _analyze_pathways(self, candidates: List[Candidate]):
+    def _analyze_pathways(self, candidates: list[Candidate]):
         """
-        Uses rustworkx (inspired by materialsproject/reaction-network) 
+        Uses rustworkx (inspired by materialsproject/reaction-network)
         to model basic synthesis pathways for top candidates.
         """
         logger.info("Analyzing synthesis pathways for top candidates...")
         # Create a basic graph network
         graph = rx.PyDiGraph()
-        
-        # In a full implementation, we would extract available precursors 
+
+        # In a full implementation, we would extract available precursors
         # from Materials Project/JARVIS and link them to the target candidates
         # via mass-balanced edges. Here we simulate the network builder.
-        
+
         for cand in candidates:
              # Add target node
              target_idx = graph.add_node(cand.formula)
-             
+
              if self.synthesizability_evaluator:
                  eval_result = self.synthesizability_evaluator.evaluate(cand.formula, cand.energy_per_atom)
                  if eval_result["synthesizable"]:
@@ -534,10 +534,10 @@ class DiscoveryController:
              elif cand.energy_per_atom and cand.energy_per_atom < -1.0:
                  graph.add_edge(0, target_idx, "Exothermic Formation")
                  cand.mutations += " [Synthesizable via direct elements]"
-                 
+
         logger.info(f"Built pathway graph with {graph.num_nodes()} nodes and {graph.num_edges()} edges.")
 
-    def _save_iteration(self, iteration: int, top_candidates: List[Candidate]):
+    def _save_iteration(self, iteration: int, top_candidates: list[Candidate]):
         data = {
             "iteration": iteration,
             "timestamp": time.time(),
@@ -572,7 +572,7 @@ class DiscoveryController:
             json.dump(payload, f, indent=2, default=str)
         logger.info(f"Final discovery report saved to {fpath}")
 
-    def _print_iteration_summary(self, top: List[Candidate], dt: float):
+    def _print_iteration_summary(self, top: list[Candidate], dt: float):
         print(f"\n  Top candidates ({dt:.1f}s):")
         print(f"  {'Rank':>4} {'Formula':>12} {'Method':>10} {'Topo%':>6} {'Stab':>5} {'Acq':>5}")
         print(f"  {'----':>4} {'-------':>12} {'------':>10} {'-----':>6} {'----':>5} {'---':>5}")

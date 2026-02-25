@@ -3,8 +3,9 @@ Registry and Factory Pattern implementation for ATLAS.
 Allows dynamic registration and instantiation of algorithms via configuration.
 """
 
-from typing import Callable, Dict, Any, Type
 import logging
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class Registry:
     """
     def __init__(self, name: str):
         self.name = name
-        self._registry: Dict[str, Any] = {}
+        self._registry: dict[str, Any] = {}
 
     def register(self, name: str) -> Callable:
         """

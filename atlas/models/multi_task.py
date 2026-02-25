@@ -5,12 +5,10 @@ Shared encoder with multiple task-specific prediction heads.
 Supports both scalar (Eg, Ef, K, G) and tensor (Cij, εij) outputs.
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Dict, List
-
-from atlas.models.cgcnn import CGCNN
 
 
 class EvidentialHead(nn.Module):
@@ -29,16 +27,16 @@ class EvidentialHead(nn.Module):
             nn.Linear(hidden_dim // 2, output_dim * 4),
         )
 
-    def forward(self, embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, embedding: torch.Tensor) -> dict[str, torch.Tensor]:
         """Returns dictionary of NIG parameters."""
         raw = self.net(embedding).reshape(-1, self.output_dim, 4)
-        
+
         # Enforce constraints (Softplus + epsilon)
         gamma = raw[..., 0]
         nu = F.softplus(raw[..., 1]) + 1e-6
         alpha = F.softplus(raw[..., 2]) + 1.0 + 1e-6
         beta = F.softplus(raw[..., 3]) + 1e-6
-        
+
         return {
             "gamma": gamma,
             "nu": nu,
@@ -118,9 +116,7 @@ class TensorHead(nn.Module):
         """
         if self.tensor_type == "elastic":
             return self._to_elastic_tensor(components)
-        elif self.tensor_type == "dielectric":
-            return self._to_dielectric_tensor(components)
-        elif self.tensor_type == "dielectric":
+        elif self.tensor_type == "dielectric" or self.tensor_type == "dielectric":
             return self._to_dielectric_tensor(components)
         else:
             return self._to_piezoelectric_tensor(components)
@@ -174,7 +170,7 @@ class MultiTaskGNN(nn.Module):
     def __init__(
         self,
         encoder: nn.Module,
-        tasks: Optional[Dict[str, dict]] = None,
+        tasks: dict[str, dict] | None = None,
         embed_dim: int = 128,
     ):
         super().__init__()
@@ -207,9 +203,9 @@ class MultiTaskGNN(nn.Module):
         node_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_feats: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
-        tasks: Optional[List[str]] = None,
-    ) -> Dict[str, torch.Tensor]:
+        batch: torch.Tensor | None = None,
+        tasks: list[str] | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Forward pass: predict multiple properties.
 

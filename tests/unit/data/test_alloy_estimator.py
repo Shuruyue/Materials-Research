@@ -1,7 +1,7 @@
 """Tests for atlas.data.alloy_estimator module."""
 
+
 import pytest
-import math
 
 
 @pytest.fixture

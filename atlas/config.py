@@ -10,9 +10,8 @@ Optimization:
 """
 
 import os
-from pathlib import Path
 from dataclasses import dataclass, field
-
+from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -74,7 +73,7 @@ class MACEConfig:
     max_epochs: int = 500
     patience: int = 50
     weight_decay: float = 5e-7
-    
+
     # Loss weights
     energy_weight: float = 1.0
     forces_weight: float = 10.0
@@ -89,7 +88,7 @@ class TrainConfig:
     deterministic: bool = True
     num_workers: int = 4
     pin_memory: bool = True
-    
+
 
 @dataclass
 class ProfileConfig:

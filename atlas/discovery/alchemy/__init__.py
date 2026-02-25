@@ -6,8 +6,8 @@ Ported and optimized from recisic/alchemical-mlip.
 """
 
 try:
-    from .model import AlchemicalModel, AlchemyManager
     from .calculator import AlchemicalMACECalculator
+    from .model import AlchemicalModel, AlchemyManager
     _ALCHEMY_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - optional heavy dependency path
     AlchemicalModel = None

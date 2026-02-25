@@ -1,13 +1,12 @@
 """Tests for atlas.active_learning.generator module."""
 
 import pytest
-import numpy as np
 
 
 @pytest.fixture
 def seed_structures():
     """Create a set of seed structures for testing."""
-    from pymatgen.core import Structure, Lattice
+    from pymatgen.core import Lattice, Structure
 
     structures = []
 
@@ -102,7 +101,7 @@ def test_heuristic_topo_score_range(generator):
 
 def test_add_seeds(generator):
     """add_seeds should increase seed count."""
-    from pymatgen.core import Structure, Lattice
+    from pymatgen.core import Lattice, Structure
 
     n_before = len(generator.seeds)
     new_struct = Structure(

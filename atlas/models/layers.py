@@ -6,10 +6,9 @@ Neural network layers for crystal property prediction:
 - GatedEquivariantBlock: E(3)-equivariant convolution (e3nn)
 """
 
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional
 
 
 class MessagePassingLayer(nn.Module):
@@ -127,11 +126,11 @@ class GatedEquivariantBlock(nn.Module):
 
             self._initialized = True
 
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
                 "e3nn is required for equivariant GNN. "
                 "Install via: pip install e3nn"
-            )
+            ) from e
 
     def forward(
         self,

@@ -1,7 +1,5 @@
 import logging
-from typing import Dict, Any, List
 
-import torch
 import torch.nn as nn
 
 try:
@@ -19,26 +17,26 @@ logger = logging.getLogger(__name__)
 class NativeCrabnetScreener(nn.Module):
     """
     Full architecture assimilation of the CrabNet predictor.
-    By natively launching the Original CrabNet module, we gain access to its intricate 
+    By natively launching the Original CrabNet module, we gain access to its intricate
     attention-map generation, robust fractional encoders, and all complex hyperparameters,
     while hiding it behind the clean ATLAS MODELS registry interface.
     """
-    def __init__(self, 
+    def __init__(self,
                  compute_device: str = "cpu",
                  d_model: int = 512,
-                 heads: int = 4, 
+                 heads: int = 4,
                  d_ffn: int = 2048,
                  N: int = 3,
                  pe_resolution: int = 5000,
                  f_prop: str = 'num_atoms',
                  **kwargs):
         super().__init__()
-        
+
         if OriginalCrabNet is None:
             raise RuntimeError("Assimilated CrabNet source is missing from atlas/third_party/crabnet.")
-            
+
         logger.info(f"Instantiating fully native CrabNet with d_model={d_model}, N={N} layers.")
-        
+
         # Instantiate natively directly from the original structure
         self.engine = OriginalCrabNet(
             compute_device=compute_device,
@@ -51,7 +49,7 @@ class NativeCrabnetScreener(nn.Module):
             f_prop=f_prop,
             **kwargs
         )
-        
+
     def forward(self, frac_idx, elem_idx):
         """
         Straight pass-through to Original CrabNet's forward method.

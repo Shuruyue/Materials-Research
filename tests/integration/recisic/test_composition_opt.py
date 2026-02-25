@@ -1,7 +1,7 @@
+import ase.build
 import numpy as np
 import pytest
 import torch
-import ase.build
 
 pytestmark = pytest.mark.integration
 

@@ -5,11 +5,11 @@ Manages model checkpoint persistence with top-k best models
 and rotating last-k checkpoints for training recovery.
 """
 
-import torch
+import logging
 import shutil
 from pathlib import Path
-from typing import List, Tuple
-import logging
+
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class CheckpointManager:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.top_k = top_k
         self.keep_last_k = keep_last_k
-        self.best_models: List[Tuple[float, int, str]] = []  # (mae, epoch, filename)
+        self.best_models: list[tuple[float, int, str]] = []  # (mae, epoch, filename)
 
     def save_best(self, state: dict, mae: float, epoch: int):
         """Save model if it qualifies as a top-k best."""

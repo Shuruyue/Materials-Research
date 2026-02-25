@@ -7,12 +7,11 @@ It intentionally preserves a legacy API used by existing tests/scripts.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import difflib
 import logging
-from pathlib import Path
 import sqlite3
-from typing import List, Optional
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import pandas as pd
 
@@ -83,7 +82,7 @@ class TopoDB:
         self.db_file: Path = self.db_dir / "topological_materials.csv"
         self.sql_path: Path = self.db_dir / "topological_materials.db"
         self.use_sql = use_sql
-        self._df: Optional[pd.DataFrame] = None
+        self._df: pd.DataFrame | None = None
 
         if self.use_sql and self.sql_path.exists():
             self._df = self._load_from_sql()
@@ -145,12 +144,12 @@ class TopoDB:
     def save(self):
         self.save_csv()
 
-    def save_csv(self, df: Optional[pd.DataFrame] = None):
+    def save_csv(self, df: pd.DataFrame | None = None):
         out = df if df is not None else self.df
         self.db_dir.mkdir(parents=True, exist_ok=True)
         out.to_csv(self.db_file, index=False)
 
-    def to_sql(self, db_path: Optional[Path] = None):
+    def to_sql(self, db_path: Path | None = None):
         path = db_path or self.sql_path
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path)
@@ -178,10 +177,10 @@ class TopoDB:
 
     def query(
         self,
-        topo_class: Optional[str] = None,
-        elements: Optional[List[str]] = None,
-        band_gap_range: Optional[tuple] = None,
-        exact_formula: Optional[str] = None,
+        topo_class: str | None = None,
+        elements: list[str] | None = None,
+        band_gap_range: tuple | None = None,
+        exact_formula: str | None = None,
     ) -> pd.DataFrame:
         df = self.df.copy()
 
@@ -217,7 +216,7 @@ class TopoDB:
         )
         self.add_materials([mat])
 
-    def add_materials(self, materials: List[TopoMaterial]):
+    def add_materials(self, materials: list[TopoMaterial]):
         if not materials:
             return
         new_df = pd.DataFrame([m.to_dict() for m in materials])

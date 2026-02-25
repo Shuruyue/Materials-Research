@@ -8,11 +8,11 @@ Loss functions that embed physical constraints:
 - Multi-task weighting: uncertainty-based or GradNorm
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import sys
-from typing import Dict, Optional, List
+
 
 class PropertyLoss(nn.Module):
     """
@@ -21,7 +21,7 @@ class PropertyLoss(nn.Module):
     def __init__(
         self,
         property_name: str = "band_gap",
-        constraint: Optional[str] = None,
+        constraint: str | None = None,
         constraint_weight: float = 0.1,
         loss_type: str = "mse"
     ):
@@ -36,7 +36,7 @@ class PropertyLoss(nn.Module):
         mask = ~torch.isnan(target)
         if mask.sum() == 0:
             return torch.tensor(0.0, device=pred.device, requires_grad=True)
-        
+
         pred = pred[mask]
         target = target[mask]
 
@@ -59,7 +59,7 @@ class PropertyLoss(nn.Module):
         elif self.constraint == "greater_than_one":
             penalty = torch.mean(F.relu(1.0 - pred))
             return base_loss + self.constraint_weight * penalty
-        
+
         return base_loss
 
 
@@ -73,12 +73,12 @@ class EvidentialLoss(nn.Module):
         super().__init__()
         self.coeff = coeff
 
-    def forward(self, pred: Dict[str, torch.Tensor], target: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred: dict[str, torch.Tensor], target: torch.Tensor) -> torch.Tensor:
         # Filter NaNs
         mask = ~torch.isnan(target)
         if mask.sum() == 0:
             return torch.tensor(0.0, device=target.device, requires_grad=True)
-            
+
         target = target[mask]
         gamma = pred["gamma"][mask]
         nu = pred["nu"][mask]
@@ -86,7 +86,7 @@ class EvidentialLoss(nn.Module):
         beta = pred["beta"][mask]
 
         error = (target - gamma).abs()
-        
+
         # Negative Log Likelihood
         nll = (
             0.5 * torch.log(torch.tensor(torch.pi, device=target.device) / nu)
@@ -94,10 +94,10 @@ class EvidentialLoss(nn.Module):
             + (alpha + 0.5) * torch.log(nu * error**2 + 2 * beta)
             + torch.lgamma(alpha) - torch.lgamma(alpha + 0.5)
         )
-        
+
         # Evidence Regularization (penalize high evidence for incorrect predictions)
         reg = error * (2 * nu + alpha)
-        
+
         return (nll + self.coeff * reg).mean()
 
 
@@ -109,10 +109,10 @@ class MultiTaskLoss(nn.Module):
     def __init__(
         self,
         task_names: list,
-        task_types: Optional[Dict[str, str]] = None, # "regression" or "classification"
-        task_weights: Optional[Dict[str, float]] = None,
+        task_types: dict[str, str] | None = None, # "regression" or "classification"
+        task_weights: dict[str, float] | None = None,
         strategy: str = "uncertainty",
-        constraints: Optional[Dict[str, str]] = None,
+        constraints: dict[str, str] | None = None,
     ):
         super().__init__()
         self.task_names = task_names
@@ -133,7 +133,7 @@ class MultiTaskLoss(nn.Module):
         self.task_losses = nn.ModuleDict()
         for name in task_names:
             t_type = self.task_types.get(name, "regression")
-            
+
             if t_type == "evidential":
                 self.task_losses[name] = EvidentialLoss()
             else:
@@ -146,10 +146,10 @@ class MultiTaskLoss(nn.Module):
 
     def forward(
         self,
-        predictions: Dict[str, torch.Tensor],
-        targets: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
-        
+        predictions: dict[str, torch.Tensor],
+        targets: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+
         losses = {}
         total = torch.tensor(0.0, device=next(iter(predictions.values())).device)
 
@@ -173,13 +173,13 @@ class MultiTaskLoss(nn.Module):
                 precision = torch.exp(-log_var)
                 # Classification (BCE) doesn't have the 0.5 factor typically in the uncertainty formulation
                 # But regression does: 0.5 * exp(-s) * loss + 0.5 * s
-                
-                
+
+
                 # Device check
                 dev = pred.device
                 if total.device != dev:
                     total = total.to(dev)
-                    
+
                 # Ensure log_var/precision on correct device
                 if self.task_types.get(name) == "evidential":
                     # Evidential loss already includes uncertainty (aleatoric)
@@ -190,10 +190,10 @@ class MultiTaskLoss(nn.Module):
                     # Homoscedastic uncertainty weighting for standard regression/classification
                     log_var = self.log_vars[name].to(dev)
                     precision = torch.exp(-log_var)
-                    
+
                     if task_loss.device != dev:
                         task_loss = task_loss.to(dev)
-                    
+
                     total = total + precision * task_loss + 0.5 * log_var
 
         losses["total"] = total

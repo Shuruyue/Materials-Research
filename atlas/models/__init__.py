@@ -10,10 +10,10 @@ Graph Neural Network architectures for crystal property prediction:
 
 from atlas.models.cgcnn import CGCNN
 from atlas.models.equivariant import EquivariantGNN
-from atlas.models.m3gnet import M3GNet
-from atlas.models.multi_task import MultiTaskGNN, ScalarHead, TensorHead, EvidentialHead
 from atlas.models.graph_builder import CrystalGraphBuilder
-from atlas.models.layers import MessagePassingLayer, GatedEquivariantBlock
+from atlas.models.layers import GatedEquivariantBlock, MessagePassingLayer
+from atlas.models.m3gnet import M3GNet
+from atlas.models.multi_task import EvidentialHead, MultiTaskGNN, ScalarHead, TensorHead
 
 __all__ = [
     "CGCNN",

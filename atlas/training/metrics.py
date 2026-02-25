@@ -7,10 +7,11 @@ Metrics for evaluating crystal property predictions:
 - Tensor: Frobenius norm error, eigenvalue agreement, symmetry violation
 """
 
-import torch
+
 import numpy as np
-from typing import Dict, Optional
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+import torch
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+
 
 def mae(pred: torch.Tensor, target: torch.Tensor) -> float:
     """Mean Absolute Error."""
@@ -37,7 +38,7 @@ def max_ae(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 def scalar_metrics(
     pred: torch.Tensor, target: torch.Tensor, prefix: str = ""
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute all scalar metrics.
     """
@@ -52,10 +53,10 @@ def scalar_metrics(
 
 def classification_metrics(
     logits: torch.Tensor, target: torch.Tensor, prefix: str = ""
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute classification metrics.
-    
+
     Args:
         logits: (N,) raw logits
         target: (N,) binary targets (0 or 1)
@@ -63,9 +64,9 @@ def classification_metrics(
     probs = torch.sigmoid(logits).cpu().numpy()
     preds = (probs > 0.5).astype(int)
     y_true = target.cpu().numpy().astype(int)
-    
+
     p = prefix + "_" if prefix else ""
-    
+
     try:
         auc = roc_auc_score(y_true, probs)
     except ValueError:
@@ -119,7 +120,7 @@ def eigenvalue_agreement(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 def tensor_metrics(
     pred: torch.Tensor, target: torch.Tensor, prefix: str = ""
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute all tensor metrics.
     """

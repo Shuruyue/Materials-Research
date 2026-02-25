@@ -8,7 +8,6 @@ with explicit source names and citations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 
 @dataclass(frozen=True)
@@ -18,7 +17,7 @@ class DataSourceSpec:
     key: str
     name: str
     domain: str
-    primary_targets: List[str] = field(default_factory=list)
+    primary_targets: list[str] = field(default_factory=list)
     url: str = ""
     citation: str = ""
 
@@ -27,7 +26,7 @@ class DataSourceRegistry:
     """Simple in-memory registry for named data sources."""
 
     def __init__(self):
-        self._sources: Dict[str, DataSourceSpec] = {}
+        self._sources: dict[str, DataSourceSpec] = {}
 
     def register(self, spec: DataSourceSpec):
         self._sources[spec.key] = spec
@@ -38,10 +37,10 @@ class DataSourceRegistry:
             raise KeyError(f"Unknown data source '{key}'. Available: {available}")
         return self._sources[key]
 
-    def list_keys(self) -> List[str]:
+    def list_keys(self) -> list[str]:
         return sorted(self._sources.keys())
 
-    def list_all(self) -> List[DataSourceSpec]:
+    def list_all(self) -> list[DataSourceSpec]:
         return [self._sources[k] for k in self.list_keys()]
 
 

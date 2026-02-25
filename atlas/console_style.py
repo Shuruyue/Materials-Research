@@ -12,7 +12,6 @@ import re
 import sys
 from typing import Any
 
-
 _ANSI_RESET = "\x1b[0m"
 _ANSI_BOLD = "\x1b[1m"
 _ANSI_DIM = "\x1b[2m"
@@ -106,5 +105,5 @@ def install_console_style() -> None:
         new_kwargs["sep"] = ""
         original_print(styled, **new_kwargs)
 
-    setattr(styled_print, "_atlas_console_style_installed", True)
+    styled_print._atlas_console_style_installed = True
     builtins.print = styled_print

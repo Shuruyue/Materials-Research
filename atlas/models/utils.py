@@ -4,8 +4,8 @@ Model loading helpers for script-level inference utilities.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import torch
 
@@ -13,7 +13,6 @@ from atlas.models.cgcnn import CGCNN
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.training.normalizers import MultiTargetNormalizer
-
 
 _PHASE2_PRESETS = [
     {"irreps_hidden": "16x0e + 8x1o", "max_ell": 1, "n_layers": 2, "n_radial_basis": 10, "radial_hidden": 32},
@@ -24,7 +23,7 @@ _PHASE2_PRESETS = [
 
 def _extract_tasks_from_state_dict(state_dict: dict) -> list[str]:
     tasks = set()
-    for key in state_dict.keys():
+    for key in state_dict:
         if key.startswith("heads."):
             parts = key.split(".")
             if len(parts) >= 2:

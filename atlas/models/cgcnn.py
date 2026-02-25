@@ -8,10 +8,10 @@ Architecture:
     Crystal Graph → N × ConvLayers → Pooling → MLP → Property
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List
 
 from atlas.models.layers import MessagePassingLayer
 
@@ -60,7 +60,7 @@ class CGCNN(nn.Module):
 
         # Fully-connected layers
         fc_layers = []
-        for i in range(n_fc - 1):
+        for _i in range(n_fc - 1):
             fc_layers.extend([
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.BatchNorm1d(hidden_dim),
@@ -77,7 +77,7 @@ class CGCNN(nn.Module):
         node_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_feats: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Encode crystal graph into graph-level embedding.
@@ -113,7 +113,7 @@ class CGCNN(nn.Module):
         node_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_feats: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Forward pass: crystal graph → predicted property.

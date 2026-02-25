@@ -6,11 +6,10 @@ Methods:
 - MCDropoutUQ: single model with dropout at inference time
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
-import numpy as np
 
 
 class EnsembleUQ(nn.Module):
@@ -30,7 +29,7 @@ class EnsembleUQ(nn.Module):
         self.models = nn.ModuleList([model_factory() for _ in range(n_models)])
         self.n_models = n_models
 
-    def forward(self, *args, **kwargs) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, *args, **kwargs) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass through all ensemble members.
 
@@ -52,7 +51,7 @@ class EnsembleUQ(nn.Module):
 
     def predict_with_uncertainty(
         self, *args, **kwargs
-    ) -> Dict[str, Dict[str, torch.Tensor]]:
+    ) -> dict[str, dict[str, torch.Tensor]]:
         """
         Returns predictions with uncertainty estimates.
 
@@ -101,7 +100,7 @@ class MCDropoutUQ(nn.Module):
 
     def predict_with_uncertainty(
         self, *args, **kwargs
-    ) -> Dict[str, Dict[str, torch.Tensor]]:
+    ) -> dict[str, dict[str, torch.Tensor]]:
         """
         Run N stochastic forward passes and compute statistics.
 
@@ -154,7 +153,7 @@ class EvidentialRegression(nn.Module):
             nn.Linear(input_dim // 2, output_dim * 4),
         )
 
-    def forward(self, embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, embedding: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
             embedding: (B, input_dim) graph-level embedding
@@ -181,7 +180,7 @@ class EvidentialRegression(nn.Module):
         }
 
     @staticmethod
-    def evidential_loss(pred: Dict, target: torch.Tensor, coeff: float = 0.01) -> torch.Tensor:
+    def evidential_loss(pred: dict, target: torch.Tensor, coeff: float = 0.01) -> torch.Tensor:
         """NIG negative log-likelihood + evidence regularizer."""
         gamma, nu, alpha, beta = pred["_gamma"], pred["_nu"], pred["_alpha"], pred["_beta"]
         error = (target - gamma).abs()

@@ -9,16 +9,15 @@ Optimization:
 - Robust MACE Support: Handle MACE Atoms conversion explicitly if needed.
 """
 
-from typing import Optional, Dict, Any, Union
 import numpy as np
+
 
 def pymatgen_to_ase(structure):
     """
     Convert pymatgen Structure → ASE Atoms.
     """
-    from ase import Atoms
     from pymatgen.io.ase import AseAtomsAdaptor
-    
+
     # Use official adaptor for best compatibility (magmoms, etc.)
     return AseAtomsAdaptor.get_atoms(structure)
 
@@ -38,13 +37,13 @@ def get_standardized_structure(structure, primitive: bool = False):
     """
     Get the standardized (conventional or primitive) structure.
     Crucial for GNNs to ensure invariant inputs for the same material.
-    
+
     Args:
         structure: pymatgen Structure
         primitive: If True, return primitive cell. Else conventional.
     """
     from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-    
+
     try:
         sga = SpacegroupAnalyzer(structure, symprec=0.01)
         if primitive:
@@ -87,12 +86,11 @@ def get_element_info(structure) -> dict:
 def compute_structural_features(structure) -> dict:
     """
     Compute basic structural features for ML featurization/analytics.
-    
+
     Returns:
         Dict with: volume_per_atom, density, avg_nn_distance,
         space_group_number, crystal_system, dimensionality_score
     """
-    from pymatgen.analysis.local_env import CrystalNN
     from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
     n = len(structure)

@@ -1,5 +1,4 @@
 import logging
-from typing import Dict, Any, List
 
 try:
     # Full native import from the Assimilated Reaction-Network source code
@@ -25,23 +24,23 @@ class NativeReactionNetworkEvaluator:
     def __init__(self, cost_function: str = "soft_mish", max_num_pathways: int = 5):
         self.cost_function = cost_function
         self.max_num_pathways = max_num_pathways
-        
+
         if ReactionNetwork is None or PathwaySolver is None:
             raise RuntimeError("Assimilated Reaction-Network source is missing from atlas/third_party/rxn_network.")
-            
+
     def evaluate(self, candidate_formula: str, candidate_energy: float) -> dict:
         """
         Natively run the strict ReactionNetwork solver (Stubbed for DB hookups, but
         structurally invokes the full original workflow).
         """
-        # In a real deployed environment, one would pass a pre-built ReactionNetwork 
+        # In a real deployed environment, one would pass a pre-built ReactionNetwork
         # computed from JARVIS or MaterialsProject entries.
         logger.info(f"Natively evaluating synthesis pathway for {candidate_formula} via Yen's K-Shortest")
-        
+
         # We hook into their classes natively:
         # e.g., network = ReactionNetwork.from_entries(entries)
         # solver = PathwaySolver(network, target=candidate_formula, ...)
-        
+
         # This is strictly the registry connection point to launch their massive algorithms.
         return {
             "synthesizable": True,

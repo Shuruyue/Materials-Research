@@ -2,7 +2,7 @@
 
 
 def test_method_registry_defaults():
-    from atlas.research.method_registry import list_methods, get_method
+    from atlas.research.method_registry import get_method, list_methods
 
     methods = list_methods()
     keys = [m.key for m in methods]

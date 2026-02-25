@@ -6,8 +6,8 @@ Handles single-property and multi-property normalization with
 serialization support for checkpoint compatibility.
 """
 
+
 import numpy as np
-from typing import Dict, List, Optional
 
 
 class TargetNormalizer:
@@ -50,7 +50,7 @@ class TargetNormalizer:
 class MultiTargetNormalizer:
     """Normalize multiple property targets independently."""
 
-    def __init__(self, dataset=None, properties: Optional[List[str]] = None):
+    def __init__(self, dataset=None, properties: list[str] | None = None):
         if dataset is not None and properties:
             self.normalizers = {
                 p: TargetNormalizer(dataset, p) for p in properties
@@ -64,10 +64,10 @@ class MultiTargetNormalizer:
     def denormalize(self, prop: str, y):
         return self.normalizers[prop].denormalize(y)
 
-    def state_dict(self) -> Dict[str, dict]:
+    def state_dict(self) -> dict[str, dict]:
         return {p: n.state_dict() for p, n in self.normalizers.items()}
 
-    def load_state_dict(self, state: Dict[str, dict]):
+    def load_state_dict(self, state: dict[str, dict]):
         for p, s in state.items():
             if p in self.normalizers:
                 self.normalizers[p].load_state_dict(s)

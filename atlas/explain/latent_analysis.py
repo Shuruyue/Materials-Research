@@ -10,14 +10,14 @@ Optimization:
 - Correlation Analysis: Quantifies feature importance in the latent space.
 """
 
-import torch
-import torch.nn as nn
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, Optional, List, Tuple, Union
-from pathlib import Path
+import torch
+import torch.nn as nn
 
 # Configure seaborn for academic style
 sns.set_theme(style="white", context="paper", font_scale=1.2)
@@ -37,8 +37,8 @@ class LatentSpaceAnalyzer:
     def extract_embeddings(
         self,
         loader,
-        properties: Optional[List[str]] = None,
-    ) -> Dict[str, np.ndarray]:
+        properties: list[str] | None = None,
+    ) -> dict[str, np.ndarray]:
         """
         Extract latent embeddings for all materials in a dataloader.
         """
@@ -57,8 +57,8 @@ class LatentSpaceAnalyzer:
                     batch.batch,
                 )
             else:
-                # Fallback for simple models: use forward but stop before head? 
-                # This is tricky without knowing model structure. 
+                # Fallback for simple models: use forward but stop before head?
+                # This is tricky without knowing model structure.
                 # Assuming standard GNN interface.
                 emb = self.model(
                     batch.x,
@@ -66,7 +66,7 @@ class LatentSpaceAnalyzer:
                     batch.edge_attr,
                     batch.batch
                 )
-            
+
             all_embeddings.append(emb.cpu().numpy())
 
             for p in (properties or []):
@@ -113,9 +113,9 @@ class LatentSpaceAnalyzer:
         return reducer.fit_transform(embeddings)
 
     def perform_clustering(
-        self, 
-        embeddings: np.ndarray, 
-        method: str = "kmeans", 
+        self,
+        embeddings: np.ndarray,
+        method: str = "kmeans",
         n_clusters: int = 5
     ) -> np.ndarray:
         """
@@ -129,7 +129,7 @@ class LatentSpaceAnalyzer:
             clusterer = DBSCAN(eps=0.5, min_samples=5)
         else:
             raise ValueError(f"Unknown clustering method: {method}")
-            
+
         return clusterer.fit_predict(embeddings)
 
     def plot_latent_space(
@@ -138,8 +138,8 @@ class LatentSpaceAnalyzer:
         color_by: np.ndarray,
         color_label: str = "Property",
         discrete: bool = False,
-        save_path: Optional[Path] = None,
-        title: Optional[str] = None,
+        save_path: Path | None = None,
+        title: str | None = None,
     ):
         """
         Plot 2D latent space colored by a property.
@@ -175,7 +175,7 @@ class LatentSpaceAnalyzer:
         ax.set_title(title if title else f"Latent Space by {color_label}")
         ax.set_xlabel("Latent Dimension 1")
         ax.set_ylabel("Latent Dimension 2")
-        
+
         # Remove top/right spines
         sns.despine(trim=True)
 
@@ -189,7 +189,7 @@ class LatentSpaceAnalyzer:
     def analyze_clusters(
         self,
         embeddings: np.ndarray,
-        properties: Dict[str, np.ndarray],
+        properties: dict[str, np.ndarray],
         n_clusters: int = 5
     ) -> pd.DataFrame:
         """
@@ -197,10 +197,10 @@ class LatentSpaceAnalyzer:
         Returns a DataFrame summarizing cluster characteristics.
         """
         labels = self.perform_clustering(embeddings, n_clusters=n_clusters)
-        
+
         df = pd.DataFrame(properties)
         df["Cluster"] = labels
-        
+
         # Calculate mean/std for each property per cluster
         summary = df.groupby("Cluster").agg(["mean", "std", "count"])
         return summary

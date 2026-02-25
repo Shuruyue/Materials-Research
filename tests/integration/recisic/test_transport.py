@@ -1,8 +1,9 @@
-import numpy as np
 import ase
 import ase.build
-from atlas.discovery.transport.liflow import LiFlowEvaluator
+import numpy as np
 import pytest
+
+from atlas.discovery.transport.liflow import LiFlowEvaluator
 
 pytestmark = pytest.mark.integration
 

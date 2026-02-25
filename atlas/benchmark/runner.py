@@ -4,11 +4,12 @@ Matbench benchmark runner with reproducible fold-level reports.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import json
-from pathlib import Path
 import time
-from typing import Any, Dict, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,7 @@ def _to_numeric_array(values: Sequence[Any]) -> np.ndarray:
     return pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64)
 
 
-def compute_regression_metrics(targets: np.ndarray, preds: np.ndarray) -> Dict[str, float]:
+def compute_regression_metrics(targets: np.ndarray, preds: np.ndarray) -> dict[str, float]:
     """Compute regression metrics on finite target/prediction pairs."""
     mask = np.isfinite(targets) & np.isfinite(preds)
     if mask.sum() == 0:
@@ -64,9 +65,9 @@ class FoldResult:
     error: str = ""
 
 
-def aggregate_fold_results(fold_results: Sequence[FoldResult]) -> Dict[str, float]:
+def aggregate_fold_results(fold_results: Sequence[FoldResult]) -> dict[str, float]:
     """Aggregate fold-level results into mean/std summaries."""
-    aggregate: Dict[str, float] = {
+    aggregate: dict[str, float] = {
         "n_folds": len(fold_results),
         "n_successful_folds": sum(r.status == "ok" for r in fold_results),
         "total_test_samples": sum(r.n_test for r in fold_results),
@@ -92,8 +93,8 @@ class TaskReport:
     device: str
     timestamp: float
     fold_results: list[FoldResult] = field(default_factory=list)
-    aggregate_metrics: Dict[str, float] = field(default_factory=dict)
-    settings: Dict[str, Any] = field(default_factory=dict)
+    aggregate_metrics: dict[str, float] = field(default_factory=dict)
+    settings: dict[str, Any] = field(default_factory=dict)
     report_path: str | None = None
 
 
@@ -334,7 +335,7 @@ class MatbenchRunner:
         folds: Sequence[int] | None = None,
         save_path: Path | None = None,
         show_progress: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Run selected folds for one Matbench task and persist a JSON report.
         """

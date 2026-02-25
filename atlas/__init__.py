@@ -8,6 +8,6 @@ classification, and active learning in a closed-loop framework.
 
 __version__ = "0.1.0"
 
-from atlas.config import get_config, Config
+from atlas.config import Config, get_config
 
 __all__ = ["__version__", "get_config", "Config"]

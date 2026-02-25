@@ -11,12 +11,13 @@ Optimization:
 - Device Management: improved GPU/CPU selection.
 """
 
-import numpy as np
 import logging
-import torch
 import warnings
-from typing import Optional, Dict, Any, Union
 from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
 
 from atlas.config import get_config
 from atlas.utils.registry import RELAXERS
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 class MACERelaxer:
     """
     Fast structure relaxation using MACE potentials.
-    
+
     Can use either:
     1. A custom-trained MACE model (from Phase 1A)
     2. The pre-trained MACE-MP-0 foundation model (zero-shot, covers all elements)
@@ -36,7 +37,7 @@ class MACERelaxer:
 
     def __init__(
         self,
-        model_path: Optional[Union[str, Path]] = None,
+        model_path: str | Path | None = None,
         device: str = "auto",
         use_foundation: bool = True,
         model_size: str = "large",
@@ -56,13 +57,13 @@ class MACERelaxer:
         self.use_foundation = use_foundation
         self.model_size = model_size
         self.dtype = default_dtype
-        
+
         # Device resolution
         if device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
-            
+
         logger.info(f"MACERelaxer initialized on {self.device}")
 
     @property
@@ -74,7 +75,7 @@ class MACERelaxer:
         # Suppress warnings from MACE/torch on load
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            
+
             if self.model_path and Path(self.model_path).exists():
                 # Use custom-trained model
                 logger.info(f"Loading custom MACE model: {self.model_path}")
@@ -96,7 +97,7 @@ class MACERelaxer:
                     from mace.calculators import mace_mp
                     # "large" is most accurate (MACE-MP-0)
                     self._calculator = mace_mp(
-                        model=self.model_size, 
+                        model=self.model_size,
                         device=self.device,
                         default_dtype=self.dtype,
                     )
@@ -116,8 +117,8 @@ class MACERelaxer:
         fmax: float = 0.05,
         steps: int = 200,
         cell_filter: str = "frechet",  # 'frechet', 'exp', or None
-        trajectory_file: Optional[Union[str, Path]] = None,
-    ) -> Dict[str, Any]:
+        trajectory_file: str | Path | None = None,
+    ) -> dict[str, Any]:
         """
         Relax a crystal structure using MACE potential.
 
@@ -131,10 +132,11 @@ class MACERelaxer:
         Returns:
             dict with: relaxed_structure, energy_per_atom, converged, n_steps
         """
-        from atlas.utils.structure import pymatgen_to_ase, ase_to_pymatgen
+        from ase.constraints import ExpCellFilter, FixSymmetry, UnitCellFilter
         from ase.optimize import BFGS, FIRE, LBFGS, BFGSLineSearch, LBFGSLineSearch
-        from ase.constraints import ExpCellFilter, UnitCellFilter, FixSymmetry
-        
+
+        from atlas.utils.structure import ase_to_pymatgen, pymatgen_to_ase
+
         # Helper for Frechet filter (more stable)
         try:
             from ase.filters import FrechetCellFilter
@@ -148,7 +150,7 @@ class MACERelaxer:
             return self._heuristic_result(structure, "No calculator loaded")
 
         atoms.calc = self.calculator
-        
+
         # Setup relaxation
         try:
             # 1. Symmetry Constraint (inspired by MLIP-Arena)
@@ -180,19 +182,19 @@ class MACERelaxer:
             }
             # Defaulting to BFGSLineSearch as recommended by MLIP-Arena for general robust optimization
             opt_class = optimizers.get("bfgs_ls", BFGSLineSearch)
-            
+
             opt = opt_class(ecf, trajectory=trajectory_file, logfile=None)
-            
+
             # Run
             converged = opt.run(fmax=fmax, steps=steps)
-            
+
             # Extract results
             energy = atoms.get_potential_energy()
             n_atoms = len(atoms)
             forces = atoms.get_forces()
-            
+
             relaxed_struct = ase_to_pymatgen(atoms)
-            
+
             return {
                 "relaxed_structure": relaxed_struct,
                 "energy_per_atom": energy / n_atoms,
@@ -208,7 +210,7 @@ class MACERelaxer:
             logger.warning(f"Relaxation failed for {structure.composition.reduced_formula}: {e}")
             return self._heuristic_result(structure, str(e))
 
-    def _heuristic_result(self, structure, error_msg: str) -> Dict[str, Any]:
+    def _heuristic_result(self, structure, error_msg: str) -> dict[str, Any]:
         """Return a standardized failure result."""
         return {
             "relaxed_structure": structure,
@@ -230,7 +232,7 @@ class MACERelaxer:
         res = self.relax_structure(structure, fmax=0.1, steps=50)
         e_pa = res["energy_per_atom"]
 
-        if e_pa is None: return 0.5 
+        if e_pa is None: return 0.5
 
         # Approx convex hull energy for stable materials is typically -5 to -9 eV/atom
         # but pure MACE energy depends on reference states.
@@ -238,18 +240,18 @@ class MACERelaxer:
         # So we need reference energies to get formation energy.
         # WITHOUT reference energies, raw e_pa is hard to interpret absolutely.
         #
-        # Heuristic: 
+        # Heuristic:
         # Deeply negative usually means stable bonding.
         # We rely on relative ranking for Active Learning.
-        
+
         # Map raw energy to 0-1 score (sigmoid-like)
         # Assume "good" energy is < -3.0 eV/atom (very rough)
-        
+
         if e_pa > 0: return 0.0 # Unbound
-        
+
         # Simple linear map for now, relative to a "deep" minimum
         # This needs calibration with real data
-        score = min(1.0, max(0.0, -e_pa / 8.0)) 
+        score = min(1.0, max(0.0, -e_pa / 8.0))
         return score
 
     def batch_relax(
@@ -272,12 +274,12 @@ class MACERelaxer:
             iterator = structures
 
         for i, struct in enumerate(iterator):
-            # Pass trajectory file if debugging needed? 
+            # Pass trajectory file if debugging needed?
             # trajectory_file=f"traj_{i}.traj"
             res = self.relax_structure(struct, fmax=fmax, steps=steps)
             res["index"] = i
             results.append(res)
-            
+
         return results
 
     def _heuristic_energy(self, structure) -> float:
@@ -288,7 +290,7 @@ class MACERelaxer:
             for site in structure:
                 elem = Element(str(site.specie))
                 eneg = elem.X or 2.0
-                e_approx = -1.0 * eneg 
+                e_approx = -1.0 * eneg
                 energies.append(e_approx)
             return float(np.mean(energies))
         except Exception:

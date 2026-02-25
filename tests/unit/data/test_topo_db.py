@@ -1,15 +1,14 @@
 """Tests for atlas.data.topo_db module."""
 
+
 import pytest
-import tempfile
-from pathlib import Path
 
 
 @pytest.fixture
 def topo_db(tmp_path, monkeypatch):
     """Create a TopoDB with a temporary directory."""
     from atlas.config import get_config
-    cfg = get_config()
+    get_config()
 
     # Redirect DB directory to tmp
     from atlas.data.topo_db import TopoDB

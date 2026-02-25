@@ -5,17 +5,17 @@ Statistical outlier detection and removal for crystal property datasets.
 Uses sigma-based filtering with CSV export for human review.
 """
 
-import numpy as np
-import torch
-import pandas as pd
-from pathlib import Path
-from typing import List, Optional
 import logging
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
 
 logger = logging.getLogger(__name__)
 
 
-def filter_outliers(dataset, properties: List[str], save_dir: Optional[Path] = None,
+def filter_outliers(dataset, properties: list[str], save_dir: Path | None = None,
                     n_sigma: float = 4.0):
     """
     Remove outliers from a dataset based on z-score thresholding.

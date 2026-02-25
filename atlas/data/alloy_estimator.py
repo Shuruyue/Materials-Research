@@ -11,7 +11,6 @@ Provides a compact, test-friendly API:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -21,7 +20,7 @@ class AlloyPhase:
     name: str
     formula: str
     weight_fraction: float
-    properties: Dict[str, float]
+    properties: dict[str, float]
     volume_fraction: float = field(default=0.0)
 
     def get(self, key: str, default: float = 0.0) -> float:
@@ -29,14 +28,14 @@ class AlloyPhase:
 
 
 class AlloyEstimator:
-    def __init__(self, name: str, phases: List[AlloyPhase]):
+    def __init__(self, name: str, phases: list[AlloyPhase]):
         self.name = name
         self.phases = phases
         self._normalize_weight_fractions()
         self.convert_wt_to_vol(self.phases)
 
     @staticmethod
-    def convert_wt_to_vol(phases: List[AlloyPhase]):
+    def convert_wt_to_vol(phases: list[AlloyPhase]):
         weights = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
         rho = np.array([max(p.get("density_g_cm3", 1e-6), 1e-6) for p in phases], dtype=float)
         vol = weights / rho
@@ -56,7 +55,7 @@ class AlloyEstimator:
             p.weight_fraction = float(max(p.weight_fraction, 0.0) / total)
 
     @classmethod
-    def from_preset(cls, preset: str) -> "AlloyEstimator":
+    def from_preset(cls, preset: str) -> AlloyEstimator:
         key = preset.strip().lower()
         presets = {
             "sac305": cls._preset_sac305,
@@ -68,7 +67,7 @@ class AlloyEstimator:
         return presets[key]()
 
     @classmethod
-    def custom(cls, name: str, phases: List[Dict]) -> "AlloyEstimator":
+    def custom(cls, name: str, phases: list[dict]) -> AlloyEstimator:
         parsed = []
         for ph in phases:
             parsed.append(
@@ -82,7 +81,7 @@ class AlloyEstimator:
         return cls(name=name, phases=parsed)
 
     @classmethod
-    def _preset_sac305(cls) -> "AlloyEstimator":
+    def _preset_sac305(cls) -> AlloyEstimator:
         return cls(
             name="SAC305",
             phases=[
@@ -129,7 +128,7 @@ class AlloyEstimator:
         )
 
     @classmethod
-    def _preset_snpb63(cls) -> "AlloyEstimator":
+    def _preset_snpb63(cls) -> AlloyEstimator:
         return cls(
             name="SnPb63",
             phases=[
@@ -163,7 +162,7 @@ class AlloyEstimator:
         )
 
     @classmethod
-    def _preset_pure_sn(cls) -> "AlloyEstimator":
+    def _preset_pure_sn(cls) -> AlloyEstimator:
         return cls(
             name="pure_Sn",
             phases=[
@@ -188,7 +187,7 @@ class AlloyEstimator:
         x = np.maximum(x, 1e-8)
         return float(1.0 / np.sum(vf / x))
 
-    def estimate_properties(self) -> Dict[str, float]:
+    def estimate_properties(self) -> dict[str, float]:
         vf = np.array([p.volume_fraction for p in self.phases], dtype=float)
         wf = np.array([p.weight_fraction for p in self.phases], dtype=float)
 
@@ -235,7 +234,7 @@ class AlloyEstimator:
             "ductile": bool(pugh > 1.75),
         }
 
-    def print_report(self, experimental: Optional[Dict[str, float]] = None):
+    def print_report(self, experimental: dict[str, float] | None = None):
         props = self.estimate_properties()
         print(f"Alloy Report: {self.name}")
         print(f"Density (g/cm3): {props['density_g_cm3']:.3f}")

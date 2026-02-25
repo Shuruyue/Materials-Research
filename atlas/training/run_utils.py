@@ -11,11 +11,11 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
-from pathlib import Path
 import platform
 import socket
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -149,7 +149,7 @@ def write_run_manifest(
     manifest: dict[str, Any] = {}
     if merge_existing and manifest_path.exists():
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
+            with open(manifest_path, encoding="utf-8") as f:
                 prev = json.load(f)
             if isinstance(prev, dict):
                 manifest = prev

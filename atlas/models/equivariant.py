@@ -18,10 +18,9 @@ Reference:
 """
 
 import math
+
 import torch
 import torch.nn as nn
-from typing import Optional, Dict
-import torch.nn.functional as F
 
 # Common architecture presets used by phase scripts.
 SMALL_PRESET = {
@@ -51,7 +50,7 @@ LARGE_PRESET = {
 class AtomRef(nn.Module):
     """
     Atomic Reference Energy.
-    
+
     Learnable per-species offset that is added to the final prediction.
     Helps the model capture systematic species-dependent energy shifts.
     """
@@ -62,7 +61,7 @@ class AtomRef(nn.Module):
         self.ref = nn.Embedding(n_species, output_dim)
         nn.init.zeros_(self.ref.weight)
 
-    def forward(self, node_feats: torch.Tensor, batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, node_feats: torch.Tensor, batch: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             node_feats: (N, node_dim) — species index extracted from first column
@@ -73,14 +72,14 @@ class AtomRef(nn.Module):
         # Extract species index (assuming it's the argmax of the first 86 features)
         # This matches EquivariantGNN.encode logic
         species_idx = node_feats[:, :86].argmax(dim=-1)  # (N,)
-        
+
         # Get per-atom reference values
         atom_refs = self.ref(species_idx) # (N, output_dim)
-        
+
         # Sum per graph
         if batch is None:
             batch = torch.zeros(atom_refs.size(0), dtype=torch.long, device=atom_refs.device)
-            
+
         from torch_geometric.nn import global_add_pool
         return global_add_pool(atom_refs, batch) # (B, output_dim)
 
@@ -196,7 +195,8 @@ class InteractionBlock(nn.Module):
         hidden_dim: int = 64,
     ):
         super().__init__()
-        from e3nn import o3, nn as e3nn_nn
+        from e3nn import nn as e3nn_nn
+        from e3nn import o3
 
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
@@ -356,7 +356,7 @@ class EquivariantGNN(nn.Module):
         n_radial_basis: int = 8,
         radial_hidden: int = 64,
         output_dim: int = 1,
-        embed_dim: Optional[int] = None,
+        embed_dim: int | None = None,
     ):
         super().__init__()
         from e3nn import o3
@@ -432,7 +432,7 @@ class EquivariantGNN(nn.Module):
         node_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_vectors: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Encode crystal to graph-level invariant embedding.
@@ -485,7 +485,7 @@ class EquivariantGNN(nn.Module):
         node_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_vectors: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Forward pass: crystal graph → predicted property.
@@ -501,8 +501,8 @@ class EquivariantGNN(nn.Module):
         """
         graph_emb = self.encode(node_feats, edge_index, edge_vectors, batch)
         interaction_energy = self.output_head(graph_emb) # (B, output_dim)
-        
+
         # Add atomic reference energy
         atomic_energy = self.atom_ref(node_feats, batch) # (B, output_dim)
-        
+
         return interaction_energy + atomic_energy

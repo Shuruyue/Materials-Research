@@ -7,10 +7,10 @@ Extends the base loss functions with:
 - Multi-objective physics guidance
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, List
 
 # ─────────────────────────────────────────────────────────
 #  Voigt-Reuss-Hill Bounds Loss
@@ -26,7 +26,7 @@ class VoigtReussBoundsLoss(nn.Module):
         self.weight = weight
 
     @staticmethod
-    def voigt_average(C: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def voigt_average(C: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Compute Voigt averages from elastic tensor (upper bound).
         """
@@ -46,7 +46,7 @@ class VoigtReussBoundsLoss(nn.Module):
         return {"K_V": K_V, "G_V": G_V}
 
     @staticmethod
-    def reuss_average(C: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def reuss_average(C: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Compute Reuss averages from compliance tensor (lower bound).
         """
@@ -87,7 +87,7 @@ class VoigtReussBoundsLoss(nn.Module):
 
         K = K_pred.view(-1)
         G = G_pred.view(-1)
-        
+
         K_R, K_V = reuss["K_R"], voigt["K_V"]
         G_R, G_V = reuss["G_R"], voigt["G_V"]
 
@@ -125,12 +125,12 @@ class PhysicsConstraintLoss(nn.Module):
         "voigt_reuss": 0.05,
     }
 
-    def __init__(self, alpha: Optional[Dict[str, float]] = None):
+    def __init__(self, alpha: dict[str, float] | None = None):
         super().__init__()
         self.alpha = {**self.DEFAULTS, **(alpha or {})}
         self.voigt_reuss = VoigtReussBoundsLoss(weight=1.0)
 
-    def forward(self, predictions: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, predictions: dict[str, torch.Tensor]) -> torch.Tensor:
         loss = torch.tensor(0.0, device=self._get_device(predictions))
 
         # Positivity: K ≥ 0, G ≥ 0

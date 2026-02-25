@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-from typing import List, Optional
 
 import ase
 import torch
@@ -31,7 +30,7 @@ class MEPINStabilityEvaluator:
 
     def __init__(
         self,
-        checkpoint_path: Optional[str] = None,
+        checkpoint_path: str | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         model_type: str = "cyclo_L",
     ):
@@ -60,7 +59,7 @@ class MEPINStabilityEvaluator:
         reactant: ase.Atoms,
         product: ase.Atoms,
         num_images: int = 20,
-    ) -> List[ase.Atoms]:
+    ) -> list[ase.Atoms]:
         if create_reaction_batch is None:
             raise RuntimeError("MEPIN inference backend is unavailable.")
 
@@ -80,7 +79,7 @@ class MEPINStabilityEvaluator:
             out = out.reshape(num_images, n_atoms, 3)
             output_positions = out.cpu().numpy()
 
-        trajectory: List[ase.Atoms] = []
+        trajectory: list[ase.Atoms] = []
         for i in range(num_images):
             atoms = reactant.copy()
             atoms.set_positions(output_positions[i])

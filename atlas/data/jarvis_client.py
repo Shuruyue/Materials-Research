@@ -11,14 +11,13 @@ Optimization:
 """
 
 import json
-import requests
-import time
 import logging
+import time
 from pathlib import Path
-from typing import Optional
-from tqdm import tqdm
 
 import pandas as pd
+import requests
+from tqdm import tqdm
 
 from atlas.config import get_config
 
@@ -31,7 +30,7 @@ JARVIS_DFT_3D_URL = "https://figshare.com/ndownloader/files/40357663" # Direct l
 class JARVISClient:
     """
     JARVIS-DFT local data client.
-    
+
     Downloads the full JARVIS-DFT dataset on first use (one-time ~500MB).
     Subsequent calls use cached local data. No API key needed.
     """
@@ -64,7 +63,7 @@ class JARVISClient:
 
         print("  Processing JARVIS-DFT data...")
         try:
-            with open(json_file, "r", encoding="utf-8") as f:
+            with open(json_file, encoding="utf-8") as f:
                 dft_3d = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load local JSON cache: {e}. Falling back to jarvis.db.figshare.")
@@ -112,16 +111,16 @@ class JARVISClient:
     def _download_file(self, url: str, dest_path: Path, max_retries: int = 3):
         """Download file with progress bar and retries."""
         print(f"  Downloading data from {url}...")
-        
+
         for attempt in range(max_retries):
             try:
                 # Stream download
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
-                
+
                 total_size = int(response.headers.get('content-length', 0))
                 block_size = 8192 # 8KB
-                
+
                 with open(dest_path, "wb") as f, tqdm(
                     desc=dest_path.name,
                     total=total_size,
@@ -132,9 +131,9 @@ class JARVISClient:
                     for data in response.iter_content(block_size):
                         size = f.write(data)
                         bar.update(size)
-                
+
                 return # Success
-                
+
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Download attempt {attempt+1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
@@ -145,8 +144,8 @@ class JARVISClient:
     def get_stable_materials(
         self,
         ehull_max: float = 0.1,
-        min_band_gap: Optional[float] = None,
-        max_band_gap: Optional[float] = None,
+        min_band_gap: float | None = None,
+        max_band_gap: float | None = None,
     ) -> pd.DataFrame:
         """Filter for thermodynamically stable materials."""
         df = self.load_dft_3d()
@@ -177,7 +176,7 @@ class JARVISClient:
             try:
                 atoms = JAtoms.from_dict(row["atoms"])
                 elements = atoms.elements
-                return any(Element(e).Z >= min_atomic_number for e in elements)
+                return any(min_atomic_number <= Element(e).Z for e in elements)
             except Exception:
                 return False
 

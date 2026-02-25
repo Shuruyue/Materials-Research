@@ -8,7 +8,6 @@ one strategy and keep alternatives as ready fallbacks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 
 @dataclass(frozen=True)
@@ -18,13 +17,13 @@ class MethodSpec:
     key: str
     name: str
     summary: str
-    strengths: List[str] = field(default_factory=list)
-    tradeoffs: List[str] = field(default_factory=list)
+    strengths: list[str] = field(default_factory=list)
+    tradeoffs: list[str] = field(default_factory=list)
 
 
 class MethodRegistry:
     def __init__(self):
-        self._methods: Dict[str, MethodSpec] = {}
+        self._methods: dict[str, MethodSpec] = {}
 
     def register(self, spec: MethodSpec):
         self._methods[spec.key] = spec
@@ -35,10 +34,10 @@ class MethodRegistry:
             raise KeyError(f"Unknown method '{key}'. Available: {available}")
         return self._methods[key]
 
-    def list_keys(self) -> List[str]:
+    def list_keys(self) -> list[str]:
         return sorted(self._methods.keys())
 
-    def list_all(self) -> List[MethodSpec]:
+    def list_all(self) -> list[MethodSpec]:
         return [self._methods[k] for k in self.list_keys()]
 
 
@@ -149,11 +148,11 @@ def get_method(key: str) -> MethodSpec:
     return METHODS.get(key)
 
 
-def list_methods() -> List[MethodSpec]:
+def list_methods() -> list[MethodSpec]:
     return METHODS.list_all()
 
 
-def recommended_method_order(primary: str = "workflow_reproducible_graph") -> List[str]:
+def recommended_method_order(primary: str = "workflow_reproducible_graph") -> list[str]:
     """Return a stable ordered list with selected primary first."""
     keys = METHODS.list_keys()
     if primary in keys:

@@ -28,7 +28,7 @@ def test_workflow_manifest_lifecycle(tmp_path):
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
 
-    with open(files[0], "r", encoding="utf-8") as fp:
+    with open(files[0], encoding="utf-8") as fp:
         data = json.load(fp)
 
     assert data["status"] == "completed"

@@ -1,0 +1,33 @@
+# ATLAS Ruff Configuration
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C901",   # mccabe complexity
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E402",   # module level import not at top of file (common in ML)
+    "E701",   # multi-statement one-liner (common in scientific/ML code)
+    "B905",   # zip-without-explicit-strict
+    "SIM108", # ternary operator (readability preference)
+]
+
+[lint.mccabe]
+max-complexity = 15
+
+[lint.isort]
+known-first-party = ["atlas"]
+
+[lint.per-file-ignores]
+"tests/*" = ["B", "SIM"]
+"scripts/*" = ["B", "SIM"]
+"atlas/third_party/*" = ["E", "W", "F", "I", "UP", "B", "SIM", "C901"]

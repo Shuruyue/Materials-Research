@@ -10,22 +10,20 @@ Optimization:
 - Improved error handling and progress reporting
 """
 
+# Workaround for WeightsUnpickler error with slice
+import contextlib
 import hashlib
-import torch
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Any
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+import torch
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
 
-# Workaround for WeightsUnpickler error with slice
-try:
+with contextlib.suppress(AttributeError):
     torch.serialization.add_safe_globals([slice])
-except AttributeError:
-    pass # Old torch version checking
 
 from atlas.config import get_config
 from atlas.models.graph_builder import CrystalGraphBuilder
@@ -112,7 +110,7 @@ def resolve_phase2_property_group(group: str) -> list[str]:
     return list(PHASE2_PROPERTY_GROUPS[key])
 
 
-def _worker_process_row(row_data: dict, properties: List[str], rev_map: Dict[str, str]) -> Optional[Any]:
+def _worker_process_row(row_data: dict, properties: list[str], rev_map: dict[str, str]) -> Any | None:
     """
     Worker function to process a single DataFrame row into a PyG Data object.
     Must be top-level for pickling.
@@ -122,7 +120,7 @@ def _worker_process_row(row_data: dict, properties: List[str], rev_map: Dict[str
         from jarvis.core.atoms import Atoms as JarvisAtoms
         atoms = JarvisAtoms.from_dict(row_data["atoms"])
         structure = atoms.pymatgen_converter()
-        
+
         # Extract properties
         props = {}
         for prop_name in properties:
@@ -146,8 +144,8 @@ def _worker_process_row(row_data: dict, properties: List[str], rev_map: Dict[str
         # Note: We instantiate a fresh builder here because it's cheap and safe
         builder = CrystalGraphBuilder(cutoff=5.0, max_neighbors=12)
         data = builder.structure_to_pyg(structure, **props)
-        data.jid = row_data.get("jid", f"unknown")
-        
+        data.jid = row_data.get("jid", "unknown")
+
         return data
 
     except Exception:
@@ -163,9 +161,9 @@ class CrystalPropertyDataset:
 
     def __init__(
         self,
-        properties: Optional[List[str]] = None,
-        max_samples: Optional[int] = None,
-        stability_filter: Optional[float] = 0.1,
+        properties: list[str] | None = None,
+        max_samples: int | None = None,
+        stability_filter: float | None = 0.1,
         split: str = "train",
         split_seed: int = 42,
         split_ratio: tuple = (0.8, 0.1, 0.1),
@@ -179,7 +177,7 @@ class CrystalPropertyDataset:
 
         self._data_list = None
         self._df = None
-        
+
         # Parallel workers: leave 1 core free
         # self.n_workers = max(1, multiprocessing.cpu_count() - 1)
         self.n_workers = 1 # Force sequential on Windows to avoid spawn errors
@@ -251,9 +249,9 @@ class CrystalPropertyDataset:
         # Parallel Graph Construction
         data_list = []
         rows = df_split.to_dict("records")
-        
+
         print(f"  Building {self.split} graphs with {self.n_workers} workers...")
-        
+
         if self.n_workers > 1:
             with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
                 # Submit all tasks
@@ -261,7 +259,7 @@ class CrystalPropertyDataset:
                     executor.submit(_worker_process_row, row, self.properties, rev_map)
                     for row in rows
                 ]
-                
+
                 # Progress bar
                 for future in tqdm(as_completed(futures), total=len(futures), desc="  Converting"):
                     try:
@@ -305,7 +303,7 @@ class CrystalPropertyDataset:
             **kwargs
         )
 
-    def property_statistics(self) -> Dict[str, Dict[str, float]]:
+    def property_statistics(self) -> dict[str, dict[str, float]]:
         if self._data_list is None:
             raise RuntimeError("Call .prepare() first")
 

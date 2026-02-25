@@ -1,9 +1,10 @@
-import numpy as np
 import ase
 import ase.build
-from ase.calculators.lj import LennardJones
-from atlas.discovery.stability.mepin import MEPINStabilityEvaluator
+import numpy as np
 import pytest
+from ase.calculators.lj import LennardJones
+
+from atlas.discovery.stability.mepin import MEPINStabilityEvaluator
 
 pytestmark = pytest.mark.integration
 

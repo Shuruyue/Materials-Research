@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-from typing import List, Optional, Tuple
 
 import ase
 import numpy as np
@@ -35,10 +34,10 @@ class LiFlowEvaluator:
 
     def __init__(
         self,
-        checkpoint_path: Optional[str] = None,
-        element_index_path: Optional[str] = None,
+        checkpoint_path: str | None = None,
+        element_index_path: str | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        temp_list: Optional[List[int]] = None,
+        temp_list: list[int] | None = None,
     ):
         if FlowModule is None:
             raise ImportError(
@@ -69,7 +68,7 @@ class LiFlowEvaluator:
             )
             self.prior = get_prior("AdaptiveMaxwellBoltzmannPrior", seed=42)
 
-    def _load_element_index(self, path: Optional[str]) -> np.ndarray:
+    def _load_element_index(self, path: str | None) -> np.ndarray:
         if path and os.path.exists(path):
             return np.load(path)
 
@@ -90,7 +89,7 @@ class LiFlowEvaluator:
         atoms: ase.Atoms,
         steps: int = 500,
         flow_steps: int = 10,
-    ) -> Tuple[List[ase.Atoms], float]:
+    ) -> tuple[list[ase.Atoms], float]:
         if FlowSimulator is None:
             raise RuntimeError("LiFlow simulator backend is unavailable.")
 
@@ -118,7 +117,7 @@ class LiFlowEvaluator:
             fix_com=True,
         )
 
-        trajectory: List[ase.Atoms] = []
+        trajectory: list[ase.Atoms] = []
         for pos in traj_pos:
             new_atoms = atoms.copy()
             new_atoms.set_positions(pos)

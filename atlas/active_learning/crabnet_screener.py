@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import numpy as np
+
 
 class ResidualNetwork(nn.Module):
     """
@@ -51,10 +51,11 @@ class FractionalEncoder(nn.Module):
 
 from atlas.utils.registry import MODELS
 
+
 @MODELS.register("crabnet_screener")
 class CompositionScreener(nn.Module):
     """
-    CrabNet-inspired composition screening model. 
+    CrabNet-inspired composition screening model.
     Accepts elemental indices and fractional contents to predict properties.
     Greatly accelerates active learning by pre-filtering bad materials before MD.
     """
@@ -62,16 +63,16 @@ class CompositionScreener(nn.Module):
         super().__init__()
         self.out_dims = out_dims
         self.d_model = d_model
-        
+
         # Simple elemental embedding for demonstration (up to element 118)
         self.embedder = nn.Embedding(120, d_model)
-        
+
         self.pe = FractionalEncoder(d_model, resolution=5000, log10=False)
         self.ple = FractionalEncoder(d_model, resolution=5000, log10=True)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=heads, dim_feedforward=2048, dropout=0.1)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=N)
-        
+
         self.output_nn = ResidualNetwork(d_model, out_dims, [256, 128])
 
     def forward(self, src, frac):
@@ -80,7 +81,7 @@ class CompositionScreener(nn.Module):
         frac: [batch_size, max_elements] containing molar fractions
         """
         x = self.embedder(src)
-        
+
         mask = frac.unsqueeze(dim=-1)
         mask = torch.matmul(mask, mask.transpose(-2, -1))
         mask[mask != 0] = 1
@@ -88,24 +89,24 @@ class CompositionScreener(nn.Module):
 
         pe_feat = torch.zeros_like(x)
         ple_feat = torch.zeros_like(x)
-        
+
         pe_feat[:, :, :self.d_model//2] = self.pe(frac)
         ple_feat[:, :, self.d_model//2:] = self.ple(frac)
 
         # Combine element type and fraction
         x_src = x + pe_feat + ple_feat
         x_src = x_src.transpose(0, 1) # [seq, batch, embed]
-        
+
         x_enc = self.transformer_encoder(x_src, src_key_padding_mask=src_mask)
         x_enc = x_enc.transpose(0, 1)
 
         # Pool active elements
         x_enc = x_enc * frac.unsqueeze(2).repeat(1, 1, self.d_model)
-        
+
         # Aggregate
         agg_mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
         output = self.output_nn(x_enc)
         output = output.masked_fill(agg_mask, 0)
         output = output.sum(dim=1) / (~agg_mask).sum(dim=1)
-        
+
         return output

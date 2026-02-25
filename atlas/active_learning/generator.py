@@ -12,15 +12,13 @@ Optimization:
 - Strict physical validation
 """
 
-import numpy as np
 import logging
-from typing import Optional, List, Dict
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import os
-import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from pymatgen.core import Structure, Lattice, Element
+import numpy as np
+from pymatgen.core import Element, Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 # Configure logging
@@ -75,7 +73,7 @@ class StructureGenerator:
         self.rng_seed = rng_seed
         self.rng = np.random.RandomState(rng_seed)
         self.generated: list[dict] = []
-        
+
         # Parallel setup
         # Windows multiprocessing with pymatgen objects is brittle; keep it safe by default.
         if os.name == "nt":
@@ -95,7 +93,7 @@ class StructureGenerator:
         """
         if struct.volume / len(struct) < 5.0:
             return False
-        
+
         # Check nearest neighbor distance
         # Efficiently check only if density suggests trouble
         try:
@@ -107,7 +105,7 @@ class StructureGenerator:
                     return False
         except Exception:
             pass # Fallback
-            
+
         return True
 
     def generate_batch(
@@ -123,18 +121,18 @@ class StructureGenerator:
 
         methods = methods or ["substitute", "strain"]
         candidates = []
-        
+
         per_method = n_candidates // len(methods) + 2
-        
+
         with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
             futures = []
-            
+
             # Submit substitution tasks
             if "substitute" in methods:
                 for _ in range(per_method):
                     seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
                     futures.append(executor.submit(_worker_substitute, seed, self.rng.randint(1e9)))
-            
+
             # Submit strain tasks
             if "strain" in methods:
                 for _ in range(per_method):
@@ -146,7 +144,7 @@ class StructureGenerator:
                 for _ in range(per_method):
                     seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
                     futures.append(executor.submit(_worker_substitute, seed, self.rng.randint(1e9)))
-            
+
             # Collect results
             for future in as_completed(futures):
                 try:
@@ -155,7 +153,7 @@ class StructureGenerator:
                         if "mix" in methods and cand["method"] == "substitute":
                             cand = {**cand, "method": "mix"}
                         candidates.append(cand)
-                except Exception as e:
+                except Exception:
                     pass
 
         # Sort by heuristic score and trim
@@ -187,7 +185,7 @@ def _heuristic_topo_score(structure: Structure) -> float:
             if z >= 50: score += 0.2
             if z >= 70: score += 0.2
         except Exception: pass
-    
+
     # SOC requires heavy elements generally
     if max_z < 30: return 0.0
 
@@ -207,25 +205,25 @@ def _heuristic_topo_score(structure: Structure) -> float:
     return min(score, 1.0)
 
 
-def _worker_substitute(parent: Structure, seed: int) -> Optional[dict]:
+def _worker_substitute(parent: Structure, seed: int) -> dict | None:
     rng = np.random.RandomState(seed)
     struct = parent.copy()
     elements = list(set(str(s.specie) for s in struct))
-    
+
     # Try multiple times to find a valid substitution
     for _ in range(5):
         target_elem = rng.choice(elements)
         if target_elem in SUBSTITUTION_MAP:
             subs = SUBSTITUTION_MAP[target_elem]
             new_elem = rng.choice(subs)
-            
+
             # Replace ALL instances of target_elem to preserve symmetry
             new_struct = struct.copy()
             new_struct.replace_species({target_elem: new_elem})
-            
+
             if new_struct.composition == struct.composition:
                 continue
-                
+
             return {
                 "structure": new_struct,
                 "method": "substitute",
@@ -236,21 +234,21 @@ def _worker_substitute(parent: Structure, seed: int) -> Optional[dict]:
     return None
 
 
-def _worker_strain(parent: Structure, max_strain: float, seed: int) -> Optional[dict]:
+def _worker_strain(parent: Structure, max_strain: float, seed: int) -> dict | None:
     rng = np.random.RandomState(seed)
     struct = parent.copy()
-    
+
     # Apply volume-conserving strain or hydrostatic strain
     # Random strain tensor
     eps = rng.uniform(-max_strain, max_strain, (3, 3))
     eps = (eps + eps.T) / 2.0 # Symmetrize
-    
+
     # Strain lattice
     lat = struct.lattice.matrix
     new_lat = lat @ (np.eye(3) + eps)
-    
+
     new_struct = Structure(new_lat, struct.species, struct.frac_coords)
-    
+
     # Check if symmetry is completely destroyed
     try:
         sga = SpacegroupAnalyzer(new_struct, symprec=0.1)

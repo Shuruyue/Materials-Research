@@ -6,12 +6,12 @@ import os
 import platform
 import random
 import sys
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 
 
-def set_global_seed(seed: int, deterministic: bool = True) -> Dict[str, Any]:
+def set_global_seed(seed: int, deterministic: bool = True) -> dict[str, Any]:
     """
     Set process-level random seeds.
 
@@ -21,7 +21,7 @@ def set_global_seed(seed: int, deterministic: bool = True) -> Dict[str, Any]:
     random.seed(seed)
     np.random.seed(seed)
 
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "seed": int(seed),
         "deterministic_requested": bool(deterministic),
         "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
@@ -53,9 +53,9 @@ def set_global_seed(seed: int, deterministic: bool = True) -> Dict[str, Any]:
     return meta
 
 
-def collect_runtime_metadata() -> Dict[str, Any]:
+def collect_runtime_metadata() -> dict[str, Any]:
     """Collect lightweight environment metadata for run manifests."""
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
         "numpy_version": np.__version__,

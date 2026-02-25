@@ -1,5 +1,5 @@
 import logging
-from typing import List, Any
+
 try:
     import rustworkx as rx
 except ImportError:
@@ -19,7 +19,7 @@ class SynthesisPathfinder:
         self.precursor_db = precursor_db
         if rx is None:
             logger.warning("rustworkx is not installed. Synthesis validation will be disabled.")
-    
+
     def evaluate(self, candidate_formula: str, candidate_energy: float) -> dict:
         """
         Builds a directed graph of possible precursor reactions and finds
@@ -27,16 +27,16 @@ class SynthesisPathfinder:
         """
         if rx is None:
             return {"synthesizable": False, "score": 0.0, "pathway": []}
-            
+
         graph = rx.PyDiGraph()
         target_idx = graph.add_node(candidate_formula)
-        
+
         # Simplified simulation of the reaction-network mass-balance solver
         # Real implementation would query `precursor_db` mapping.
         score = 0.0
         synthesizable = False
         pathway = []
-        
+
         if candidate_energy and candidate_energy < -0.5:
             # Exothermic pathway identified
             precursor_idx = graph.add_node("Elements")
@@ -44,7 +44,7 @@ class SynthesisPathfinder:
             score = abs(candidate_energy)
             synthesizable = True
             pathway = ["Elements -> " + candidate_formula]
-            
+
         return {
             "synthesizable": synthesizable,
             "score": score,

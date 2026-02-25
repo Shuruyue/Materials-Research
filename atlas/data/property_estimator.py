@@ -10,12 +10,11 @@ Optimization:
 - Added new empirical models (e.g., fracture toughness proxy)
 """
 
+
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict
 
 from atlas.config import get_config
-
 
 # ═══════════════════════════════════════════════════════════════
 #  Physical Constants
@@ -74,7 +73,7 @@ class PropertyEstimator:
         gap_hse = result.get("hse_gap", pd.Series(np.nan, index=result.index))
         gap_mbj = result.get("mbj_bandgap", pd.Series(np.nan, index=result.index))
         gap_opt = result.get("optb88vdw_bandgap", pd.Series(np.nan, index=result.index))
-        
+
         # Fill NaNs in priority order
         best_gap = gap_hse.fillna(gap_mbj).fillna(gap_opt)
         best_gap[best_gap < 0] = np.nan # Filter negative gaps
@@ -85,8 +84,8 @@ class PropertyEstimator:
         cond_class[best_gap < 3.0] = "semiconductor"
         cond_class[best_gap < 0.5] = "semimetal"
         cond_class[(best_gap < 0.01) | (best_gap.isna())] = "metal" # Assume metal if no gap data (often true in DFT DBs)
-        # Fix: if specifically NaN, keep as NaN or decide? 
-        # Usually 0 gap means metal. NaN gap means unknown calculation. 
+        # Fix: if specifically NaN, keep as NaN or decide?
+        # Usually 0 gap means metal. NaN gap means unknown calculation.
         # strict check:
         cond_class[best_gap.isna()] = "unknown"
         # If gap is 0, it's metal
@@ -137,7 +136,7 @@ class PropertyEstimator:
 
         v_t = np.sqrt(G_pa / rho_kg)
         v_l = np.sqrt((K_pa + 4*G_pa/3.0) / rho_kg)
-        
+
         # Average sound velocity v_m
         # v_m = [1/3 * (2/v_t^3 + 1/v_l^3)]^(-1/3)
         inv_v3 = (2.0 / v_t**3) + (1.0 / v_l**3)
@@ -147,7 +146,7 @@ class PropertyEstimator:
         # Approximation: avg atomic mass ~ 30 amu
         avg_mass_kg = 30.0 * AMU
         n_density = rho_kg / avg_mass_kg
-        
+
         # Debye T
         theta_D = (HBAR_SI / KB_SI) * (6 * np.pi**2 * n_density)**(1/3.0) * v_m
         result["debye_temperature"] = theta_D.round(1)
@@ -156,8 +155,8 @@ class PropertyEstimator:
         # Grimvall: Tm = 607 + 9.3 * theta_D (Metals)
         # Others: Tm = 400 + 7.0 * theta_D
         # Vectorized choice
-        Tm = np.where(result["conductivity_class"] == "metal", 
-                      607 + 9.3 * theta_D, 
+        Tm = np.where(result["conductivity_class"] == "metal",
+                      607 + 9.3 * theta_D,
                       400 + 7.0 * theta_D)
         result["melting_point_est"] = Tm # Rough estimate
 
@@ -201,13 +200,13 @@ class PropertyEstimator:
                 mask &= (df[col] == criterion)
 
         result = df[mask]
-        
+
         if sort_by and sort_by in result.columns:
             result = result.sort_values(sort_by, ascending=ascending)
 
         return result.head(max_results)
 
-    def property_summary(self, df: pd.DataFrame) -> Dict:
+    def property_summary(self, df: pd.DataFrame) -> dict:
         """Get summary statistics."""
         summary = {}
         # ... (similar to before, essentially built-in pandas describe)

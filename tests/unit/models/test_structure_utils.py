@@ -1,13 +1,13 @@
 """Tests for atlas.utils.structure module."""
 
-import pytest
 import numpy as np
+import pytest
 
 
 @pytest.fixture
 def si_structure():
     """Create a simple Si diamond structure for testing."""
-    from pymatgen.core import Structure, Lattice
+    from pymatgen.core import Lattice, Structure
 
     lattice = Lattice.cubic(5.43)
     structure = Structure(
@@ -21,7 +21,7 @@ def si_structure():
 @pytest.fixture
 def bi2se3_structure():
     """Create a Bi2Se3 structure for testing (heavy elements)."""
-    from pymatgen.core import Structure, Lattice
+    from pymatgen.core import Lattice, Structure
 
     # Simplified rhombohedral Bi2Se3
     lattice = Lattice.hexagonal(4.14, 28.64)
@@ -48,7 +48,7 @@ def test_pymatgen_to_ase(si_structure):
 
 def test_ase_to_pymatgen(si_structure):
     """Conversion from ASE back to pymatgen should work."""
-    from atlas.utils.structure import pymatgen_to_ase, ase_to_pymatgen
+    from atlas.utils.structure import ase_to_pymatgen, pymatgen_to_ase
 
     atoms = pymatgen_to_ase(si_structure)
     struct = ase_to_pymatgen(atoms)
@@ -58,7 +58,7 @@ def test_ase_to_pymatgen(si_structure):
 
 def test_roundtrip_conversion(si_structure):
     """Round-trip pymatgen → ASE → pymatgen should preserve structure."""
-    from atlas.utils.structure import pymatgen_to_ase, ase_to_pymatgen
+    from atlas.utils.structure import ase_to_pymatgen, pymatgen_to_ase
 
     struct_out = ase_to_pymatgen(pymatgen_to_ase(si_structure))
 

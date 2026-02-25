@@ -5,14 +5,14 @@ General-purpose trainer for crystal GNN models.
 Handles training, validation, early stopping, robust checkpointing, and logging.
 """
 
+import json
+import logging
+import time
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from pathlib import Path
-from typing import Optional, Dict, Callable
-import time
-import json
-import logging
 
 from atlas.config import get_config
 
@@ -44,9 +44,9 @@ class Trainer:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         loss_fn: nn.Module,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        save_dir: Optional[Path] = None,
+        save_dir: Path | None = None,
         use_amp: bool = True,
     ):
         self.model = model.to(device)
@@ -81,7 +81,7 @@ class Trainer:
 
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 # Flexible model call (some graph models take different args)
-                if hasattr(model_call := getattr(self.model, "forward", None), "__code__"):
+                if hasattr(getattr(self.model, "forward", None), "__code__"):
                      # Standard PyG call
                      pred = self.model(
                         batch.x,
@@ -102,7 +102,7 @@ class Trainer:
                     targets = batch
                     if hasattr(batch, 'y_dict'):
                         targets = batch.y_dict
-                    
+
                     loss_dict = self.loss_fn(pred, targets)
                     # Extract total loss
                     loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
@@ -114,11 +114,11 @@ class Trainer:
 
             # Backward pass with scaler
             self.scaler.scale(loss).backward()
-            
+
             # Gradient clipping (unscale first)
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -128,7 +128,7 @@ class Trainer:
         return total_loss / max(n_batches, 1)
 
     @torch.no_grad()
-    def validate(self, loader: DataLoader) -> Dict[str, float]:
+    def validate(self, loader: DataLoader) -> dict[str, float]:
         """Validate model. Returns dict of metrics."""
         self.model.eval()
         total_loss = 0.0
@@ -144,7 +144,7 @@ class Trainer:
                     batch.edge_attr,
                     batch.batch,
                 )
-                
+
                 if isinstance(pred, dict):
                      targets = batch
                      if hasattr(batch, 'y_dict'):
@@ -171,7 +171,7 @@ class Trainer:
         patience: int = 50,
         verbose: bool = True,
         checkpoint_name: str = "model"
-    ) -> Dict:
+    ) -> dict:
         """
         Full training loop.
         """
@@ -225,7 +225,7 @@ class Trainer:
 
         self._save_checkpoint(f"{checkpoint_name}_final.pt", epoch, val_loss)
         self._save_history(f"{checkpoint_name}_history.json")
-        
+
         return self.history
 
     def _save_checkpoint(self, filename: str, epoch: int, val_loss: float):
@@ -245,7 +245,7 @@ class Trainer:
         if not path.exists():
             # Try looking in parent if simple name given
             path = self.save_dir.parent / filename
-            
+
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         logger.info(f"Loaded checkpoint from {path}")

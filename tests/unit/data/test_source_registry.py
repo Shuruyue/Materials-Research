@@ -15,8 +15,9 @@ def test_data_source_registry_defaults():
 
 
 def test_data_source_registry_missing_key():
-    from atlas.data.source_registry import DATA_SOURCES
     import pytest
+
+    from atlas.data.source_registry import DATA_SOURCES
 
     with pytest.raises(KeyError):
         DATA_SOURCES.get("does_not_exist")

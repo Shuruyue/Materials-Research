@@ -48,7 +48,7 @@ def test_compute_regression_metrics_ignores_nan_pairs():
     pred = torch.tensor([1.0, float("nan"), 5.0]).numpy()
     metrics = compute_regression_metrics(target, pred)
     assert metrics["mae"] == pytest.approx(1.0)
-    assert metrics["rmse"] == pytest.approx((2.0**0.5))
+    assert metrics["rmse"] == pytest.approx(2.0**0.5)
     assert metrics["r2"] == pytest.approx(-1.0)
 
 

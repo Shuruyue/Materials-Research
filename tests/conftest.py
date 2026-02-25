@@ -4,9 +4,10 @@ ATLAS Test Configuration
 Shared fixtures and utilities for test suite.
 """
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 # Ensure atlas package is importable
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

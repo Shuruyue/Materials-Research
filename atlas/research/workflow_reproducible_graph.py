@@ -4,11 +4,12 @@ Reproducible workflow scaffold for graph-first discovery runs.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import json
-from pathlib import Path
 import time
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
 from atlas.config import get_config
 from atlas.utils.reproducibility import collect_runtime_metadata
@@ -24,7 +25,7 @@ class IterationSnapshot:
     relaxed: int = 0
     selected: int = 0
     duration_sec: float = 0.0
-    stage_timings_sec: Dict[str, float] = field(default_factory=dict)
+    stage_timings_sec: dict[str, float] = field(default_factory=dict)
     seed_pool_size: int = 0
     status: str = "ok"
     notes: str = ""
@@ -43,13 +44,13 @@ class RunManifest:
     evaluator_name: str
     seed: int
     deterministic: bool
-    stage_plan: List[str]
+    stage_plan: list[str]
     started_at: float
-    runtime_metadata: Dict[str, Any] = field(default_factory=dict)
+    runtime_metadata: dict[str, Any] = field(default_factory=dict)
     ended_at: float | None = None
     status: str = "running"
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    iterations: List[IterationSnapshot] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    iterations: list[IterationSnapshot] = field(default_factory=list)
 
 
 class WorkflowReproducibleGraph:
@@ -82,8 +83,8 @@ class WorkflowReproducibleGraph:
 
     def start(
         self,
-        stage_plan: List[str] | None = None,
-        extra_metrics: Dict[str, Any] | None = None,
+        stage_plan: list[str] | None = None,
+        extra_metrics: dict[str, Any] | None = None,
     ) -> RunManifest:
         started_at = time.time()
         run_id = self.make_run_id(self.profile.method_key, self.profile.data_source_key, started_at)
@@ -119,7 +120,7 @@ class WorkflowReproducibleGraph:
         self.manifest.metrics[key] = value  # type: ignore[union-attr]
         self._persist()
 
-    def finalize(self, status: str = "completed", extra_metrics: Dict[str, Any] | None = None):
+    def finalize(self, status: str = "completed", extra_metrics: dict[str, Any] | None = None):
         if self.manifest is None:
             self.start()
         self.manifest.status = status  # type: ignore[union-attr]

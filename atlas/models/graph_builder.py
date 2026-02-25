@@ -11,12 +11,15 @@ This module was originally part of atlas.topology.classifier and has been
 refactored into atlas.models for broader reuse across different GNN architectures.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import torch
-from typing import Optional, Dict, Any
 
-from atlas.config import get_config
-
+if TYPE_CHECKING:
+    from torch_geometric.data import Data
 
 # ──────────────────────────────────────────────────────────────
 # Element property lookup tables
@@ -127,7 +130,7 @@ class CrystalGraphBuilder:
 
         return np.concatenate([one_hot, [z, en, radius, is_metal, is_heavy]])
 
-    def structure_to_graph(self, structure) -> Dict[str, Any]:
+    def structure_to_graph(self, structure) -> dict[str, Any]:
         """
         Convert pymatgen Structure to graph dict.
 
@@ -179,11 +182,11 @@ class CrystalGraphBuilder:
         # We need to map (src, dst) -> edge_idx
         # Since we construct edges sequentially, we can track their ranges.
         # But pymatgen neighbors are not sorted by index, so we need a mapping.
-        
+
         edge_index = np.array([src, dst], dtype=np.int64)
         distances = np.array(dists, dtype=np.float32)
         edge_vectors = np.array(vectors, dtype=np.float32)
-        
+
         three_body_indices = np.zeros((0, 3), dtype=np.int64) # Changed from (0,2) to (0,3) to match [d1, i, d2]
         three_body_edge_indices = np.zeros((0, 2), dtype=np.int64)
 
@@ -194,27 +197,27 @@ class CrystalGraphBuilder:
             adj = defaultdict(list)
             for e_idx, (s, d) in enumerate(zip(src, dst)):
                 adj[s].append((d, e_idx))
-            
+
             tb_indices = [] # (atom_j, atom_i, atom_k)
             tb_edge_indices = [] # (edge_ij, edge_ik)
             # M3GNet uses: for atom i, pairs of neighbors (j, k).
             # We want indices of edges (i->j) and (i->k).
-            
+
             for i in range(n_atoms):
                  neighbors_i = adj[i]
                  n = len(neighbors_i)
                  if n < 2: continue
-                 
+
                  # All pairs of neighbors (j, k)
-                 # Limit to max neighbors to avoid explosion? 
+                 # Limit to max neighbors to avoid explosion?
                  # We already limited max_neighbors in getting neighbors.
                  for idx1 in range(n):
                      for idx2 in range(n):
                          if idx1 == idx2: continue
-                         
+
                          d1, e_idx1 = neighbors_i[idx1] # d1 is neighbor j
                          d2, e_idx2 = neighbors_i[idx2] # d2 is neighbor k
-                         
+
                          # Triplet: j(d1) - i - k(d2)
                          # We store edge indices corresponding to i->j and i->k
                          tb_edge_indices.append([e_idx1, e_idx2])
@@ -244,7 +247,7 @@ class CrystalGraphBuilder:
         """Expand distances into Gaussian basis functions."""
         return gaussian_expansion(distances, self.cutoff, n_gaussians)
 
-    def structure_to_pyg(self, structure, **properties) -> "torch_geometric.data.Data":
+    def structure_to_pyg(self, structure, **properties) -> Data:
         """
         Convert to PyTorch Geometric Data object.
 

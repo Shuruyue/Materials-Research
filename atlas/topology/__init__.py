@@ -1,9 +1,10 @@
 """
 atlas.topology — Topological invariant computation and GNN classification.
 
-Note: CrystalGraphBuilder is also available from atlas.models (canonical location).
+Note: CrystalGraphBuilder is imported from atlas.models.graph_builder (canonical location).
 """
 
-from atlas.topology.classifier import CrystalGraphBuilder, TopoGNN, MessagePassingLayer
+from atlas.models.graph_builder import CrystalGraphBuilder
+from atlas.topology.classifier import TopoGNN
 
-__all__ = ["CrystalGraphBuilder", "TopoGNN", "MessagePassingLayer"]
+__all__ = ["CrystalGraphBuilder", "TopoGNN"]

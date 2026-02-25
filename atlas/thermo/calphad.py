@@ -20,14 +20,12 @@ Example:
 
 from __future__ import annotations
 
-import math
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, List, Union
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -39,10 +37,10 @@ TDB_DIR = Path(__file__).parent
 class EquilibriumResult:
     """Result of an equilibrium calculation at a single point."""
     temperature_K: float
-    composition: Dict[str, float]
-    stable_phases: List[str]
-    phase_fractions: Dict[str, float]
-    phase_compositions: Dict[str, Dict[str, float]]
+    composition: dict[str, float]
+    stable_phases: list[str]
+    phase_fractions: dict[str, float]
+    phase_compositions: dict[str, dict[str, float]]
 
 
 @dataclass
@@ -50,7 +48,7 @@ class SolidificationResult:
     """Result of a solidification path calculation."""
     temperatures: np.ndarray
     liquid_fraction: np.ndarray
-    solid_phases: Dict[str, np.ndarray]  # phase_name -> cumulative fraction vs T
+    solid_phases: dict[str, np.ndarray]  # phase_name -> cumulative fraction vs T
     solidus_K: float
     liquidus_K: float
     alloy_name: str = ""
@@ -69,16 +67,16 @@ class CalphadCalculator:
         "SNAG36": {"SN": 0.960, "AG": 0.040},  # Sn-3.5Ag binary eutectic
     }
 
-    def __init__(self, tdb_path: Union[str, Path], components: List[str]):
+    def __init__(self, tdb_path: str | Path, components: list[str]):
         """Initialize with a TDB file."""
         try:
             from pycalphad import Database
-        except ImportError:
-            raise ImportError("pycalphad required: pip install pycalphad")
+        except ImportError as e:
+            raise ImportError("pycalphad required: pip install pycalphad") from e
 
         self.tdb_path = Path(tdb_path)
         self.components = [c.upper() for c in components]
-        
+
         try:
             self.db = Database(str(self.tdb_path))
             self.all_phases = list(self.db.phases.keys())
@@ -88,7 +86,7 @@ class CalphadCalculator:
             raise
 
     @classmethod
-    def sn_ag_cu(cls) -> "CalphadCalculator":
+    def sn_ag_cu(cls) -> CalphadCalculator:
         """Create calculator for the Sn-Ag-Cu system."""
         tdb = TDB_DIR / "Sn-Ag-Cu.tdb"
         if not tdb.exists():
@@ -96,16 +94,17 @@ class CalphadCalculator:
             raise FileNotFoundError(f"TDB not found: {tdb}")
         return cls(tdb, ["SN", "AG", "CU"])
 
-    def get_composition(self, alloy_name: str) -> Dict[str, float]:
+    def get_composition(self, alloy_name: str) -> dict[str, float]:
         """Get mole-fraction composition for a named alloy."""
         key = alloy_name.upper().replace("-", "").replace(" ", "").replace("_", "")
         if key in self.ALLOY_COMPOSITIONS:
             return self.ALLOY_COMPOSITIONS[key]
         raise ValueError(f"Unknown alloy '{alloy_name}'. Available: {list(self.ALLOY_COMPOSITIONS.keys())}")
 
-    def equilibrium_at(self, alloy: Union[str, Dict[str, float]], T: float) -> EquilibriumResult:
+    def equilibrium_at(self, alloy: str | dict[str, float], T: float) -> EquilibriumResult:
         """Compute equilibrium at a single temperature."""
-        from pycalphad import equilibrium, variables as v
+        from pycalphad import equilibrium
+        from pycalphad import variables as v
 
         if isinstance(alloy, str):
             comp = self.get_composition(alloy)
@@ -121,11 +120,11 @@ class CalphadCalculator:
         try:
             # We filter out phases that might cause issues if needed, strictly use all_phases for now
             result = equilibrium(self.db, self.components + ["VA"], self.all_phases, conditions)
-            
+
             # Extract results safely
             Eq = result.NP.squeeze()
             Ph = result.Phase.squeeze()
-            
+
             # Handle single point vs array (though here it's 1 point)
             if Eq.ndim == 0: Eq = [float(Eq)]
             else: Eq = Eq.values.tolist()
@@ -150,7 +149,7 @@ class CalphadCalculator:
 
     def solidification_path(
         self,
-        alloy: Union[str, Dict[str, float]],
+        alloy: str | dict[str, float],
         T_start: float = 600,
         T_end: float = 370,
         n_steps: int = 50,
@@ -158,13 +157,11 @@ class CalphadCalculator:
     ) -> SolidificationResult:
         """
         Compute solidification path using either Equilibrium (Lever Rule) or Scheil-Gulliver model.
-        
+
         Args:
             scheil: If True, simulate Scheil solidification (no diffusion in solid).
         """
-        from pycalphad import equilibrium, variables as v
-        from pycalphad.codegen.callables import build_callables
-        
+
         if isinstance(alloy, str):
             comp = self.get_composition(alloy)
             alloy_name = alloy
@@ -189,12 +186,12 @@ class CalphadCalculator:
                 if phase not in all_phase_data:
                     all_phase_data[phase] = np.zeros(n_steps)
                 all_phase_data[phase][i] = frac
-            
+
             liquid_frac[i] = eq.phase_fractions.get("LIQUID", 0.0)
 
         # Post-process liquidus/solidus
         liq_K, sol_K = self._find_transus(temperatures, liquid_frac)
-        
+
         return SolidificationResult(
             temperatures=temperatures,
             liquid_fraction=liquid_frac,
@@ -216,32 +213,32 @@ class CalphadCalculator:
             from pycalphad.tools.scheil import scheil_solidification
             # PyCalphad's scheil tool is excellent
             # It returns a result object we need to parse
-            
+
             # Convert comp to mole fractions {X(EL): val}
             # Note: scheil_solidification takes a flexible comp dict
             res = scheil_solidification(
-                self.db, self.components, self.all_phases, comp, 
+                self.db, self.components, self.all_phases, comp,
                 start_temperature=T_start, step_temperature=1.0, verbose=False
             )
-            
+
             # Scheil result extraction
             temperatures = np.array(res.temperatures)
             liquid_frac = np.array(res.fraction_liquid)
-            
+
             # Phase fractions in Scheil are tricky; usually we track CUMULATIVE solid
-            # or instantaneous solid formers. 
+            # or instantaneous solid formers.
             # Pycalphad's result structure tracks cumulative phase amounts in 'phase_amounts'
-            
+
             all_phase_data = {}
             # Map phase indices to names
             # This part depends on pycalphad version internals, assuming standard xarray
-            
+
             # Simplified fallback: just track T and f_liq for now as it's the most robust metric
             # for Solidus. Scheil solidus is where f_liq -> 0 or epsilon.
-            
+
             # To get specific solid phases, we need to iterate the result
             # Or just return T vs f_liq which is the main curve
-            
+
             # Let's try to extract phase fractions if possible
             if hasattr(res, 'cum_phase_amounts'):
                 for phase in self.all_phases:
@@ -288,20 +285,20 @@ class CalphadCalculator:
     def plot_solidification(
         self,
         result: SolidificationResult,
-        save_path: Optional[Union[str, Path]] = None,
+        save_path: str | Path | None = None,
     ):
         """Plot solidification curve (Scheil or Equilibrium)."""
         fig, ax = plt.subplots(1, 1, figsize=(8, 6), dpi=150)
 
         T_C = result.temperatures - 273.15
-        
+
         # Plot Liquid Fraction
         ax.plot(T_C, result.liquid_fraction, label="Liquid Fraction", color="black", linewidth=2.5)
 
         # Plot Solid phases (cumulative or instantaneous)
         # For Scheil, these are cumulative fractions
-        colors = plt.cm.tab10(np.linspace(0, 1, len(result.solid_phases)))
-        for i, (phase, fracs) in enumerate(result.solid_phases.items()):
+        plt.cm.tab10(np.linspace(0, 1, len(result.solid_phases)))
+        for _i, (phase, fracs) in enumerate(result.solid_phases.items()):
             # Only plot if significant
             if np.max(fracs) > 0.02:
                 # Clean phase names
@@ -314,24 +311,24 @@ class CalphadCalculator:
         ax.set_xlabel("Temperature (°C)", fontsize=12)
         ax.set_ylabel("Phase Fraction (Mole)", fontsize=12)
         ax.set_title(f"{result.method} Solidification: {result.alloy_name}", fontsize=14, fontweight="bold")
-        
+
         # Ranges
         ax.set_ylim(-0.02, 1.02)
         ax.set_xlim(min(T_C), max(T_C))
-        
+
         # Grid
         ax.grid(True, linestyle=":", alpha=0.6)
-        
+
         # Legend
         ax.legend(fontsize=10)
 
         # Annotations for Liquidus/Solidus
         liq_C = result.liquidus_K - 273.15
         sol_C = result.solidus_K - 273.15
-        
+
         ax.annotate(f"T_liq: {liq_C:.0f}°C", xy=(liq_C, 1.0), xytext=(liq_C+10, 1.05),
                     arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5))
-        
+
         if result.solidus_K > 0 and result.solidus_K < 2000:
              ax.annotate(f"T_sol: {sol_C:.0f}°C", xy=(sol_C, 0.0), xytext=(sol_C-30, 0.05),
                     arrowprops=dict(facecolor='red', shrink=0.05, width=1, headwidth=5))
@@ -341,14 +338,14 @@ class CalphadCalculator:
         if save_path:
             fig.savefig(str(save_path), bbox_inches="tight")
             logger.info(f"Saved plot to {save_path}")
-        
+
         # Don't block execution with show() in automated env
         # plt.show()
         plt.close(fig)
 
     def print_equilibrium_table(
         self,
-        alloy: Union[str, Dict[str, float]],
+        alloy: str | dict[str, float],
         T_range: tuple[float, float] = (400, 550),
         step: float = 5.0,
     ):
@@ -374,7 +371,8 @@ class CalphadCalculator:
 
     def plot_binary(self, elem_x: str, elem_y: str, T_range=(373, 1073)):
         """Plot binary diagram (wrapper for pycalphad binplot)."""
-        from pycalphad import binplot, variables as v
+        from pycalphad import binplot
+        from pycalphad import variables as v
         fig = plt.figure(figsize=(9, 6))
         ax = fig.gca()
         comps = [elem_x.upper(), elem_y.upper(), "VA"]
