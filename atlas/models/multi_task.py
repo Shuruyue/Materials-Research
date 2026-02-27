@@ -6,6 +6,7 @@ Supports both scalar (Eg, Ef, K, G) and tensor (Cij, εij) outputs.
 """
 
 
+import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -205,6 +206,9 @@ class MultiTaskGNN(nn.Module):
         edge_feats: torch.Tensor,
         batch: torch.Tensor | None = None,
         tasks: list[str] | None = None,
+        edge_vectors: torch.Tensor | None = None,
+        edge_index_3body: torch.Tensor | None = None,
+        encoder_kwargs: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Forward pass: predict multiple properties.
@@ -216,8 +220,35 @@ class MultiTaskGNN(nn.Module):
         Returns:
             Dict[task_name → (B, output_dim) predictions]
         """
-        # Shared encoding
-        embedding = self.encoder.encode(node_feats, edge_index, edge_feats, batch)
+        # Shared encoding with optional encoder-specific kwargs
+        extra_kwargs = {}
+        if edge_vectors is not None:
+            extra_kwargs["edge_vectors"] = edge_vectors
+        if edge_index_3body is not None:
+            extra_kwargs["edge_index_3body"] = edge_index_3body
+        if encoder_kwargs:
+            extra_kwargs.update(encoder_kwargs)
+
+        if extra_kwargs:
+            signature = inspect.signature(self.encoder.encode)
+            supports_var_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in signature.parameters.values()
+            )
+            if not supports_var_kwargs:
+                allowed = set(signature.parameters.keys())
+                extra_kwargs = {k: v for k, v in extra_kwargs.items() if k in allowed}
+
+        if extra_kwargs:
+            embedding = self.encoder.encode(
+                node_feats,
+                edge_index,
+                edge_feats,
+                batch,
+                **extra_kwargs,
+            )
+        else:
+            embedding = self.encoder.encode(node_feats, edge_index, edge_feats, batch)
 
         # Task-specific predictions
         predictions = {}

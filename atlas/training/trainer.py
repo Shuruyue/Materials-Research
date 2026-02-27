@@ -8,6 +8,7 @@ Handles training, validation, early stopping, robust checkpointing, and logging.
 import json
 import logging
 import time
+from inspect import signature
 from pathlib import Path
 
 import torch
@@ -45,17 +46,18 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         loss_fn: nn.Module,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
         save_dir: Path | None = None,
         use_amp: bool = True,
     ):
-        self.model = model.to(device)
+        self.device = torch.device(device)
+        self.device_type = self.device.type
+        self.model = model.to(self.device)
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.scheduler = scheduler
-        self.device = device
-        self.use_amp = use_amp and (device == "cuda")
-        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        self.use_amp = use_amp and (self.device_type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         self.save_dir = save_dir or get_config().paths.models_dir / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -69,6 +71,126 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.patience_counter = 0
 
+    def _forward_batch(self, batch):
+        """
+        Forward wrapper that adapts to common ATLAS model signatures.
+
+        This keeps Trainer usable across CGCNN/TopoGNN/Equivariant/MultiTask
+        without requiring per-script forward glue.
+        """
+        if not hasattr(batch, "x") or not hasattr(batch, "edge_index"):
+            return self.model(batch)
+
+        params = signature(self.model.forward).parameters
+        has = lambda name: name in params
+        edge_attr = getattr(batch, "edge_attr", None)
+        edge_vec = getattr(batch, "edge_vec", None)
+        batch_index = getattr(batch, "batch", None)
+
+        kwargs = {}
+        if has("node_feats"):
+            kwargs["node_feats"] = batch.x
+        elif has("x"):
+            kwargs["x"] = batch.x
+
+        if has("edge_index"):
+            kwargs["edge_index"] = batch.edge_index
+
+        if has("edge_feats"):
+            kwargs["edge_feats"] = edge_attr if edge_attr is not None else edge_vec
+        if has("edge_attr"):
+            kwargs["edge_attr"] = edge_attr if edge_attr is not None else edge_vec
+        if has("edge_vectors"):
+            kwargs["edge_vectors"] = edge_vec if edge_vec is not None else edge_attr
+        if has("edge_vec"):
+            kwargs["edge_vec"] = edge_vec if edge_vec is not None else edge_attr
+        if has("batch"):
+            kwargs["batch"] = batch_index
+
+        if has("edge_index_3body") and hasattr(batch, "edge_index_3body"):
+            kwargs["edge_index_3body"] = batch.edge_index_3body
+
+        try:
+            return self.model(**kwargs)
+        except Exception:
+            # Positional fallback for legacy/simple models.
+            if edge_attr is not None:
+                return self.model(batch.x, batch.edge_index, edge_attr, batch_index)
+            if edge_vec is not None:
+                return self.model(batch.x, batch.edge_index, edge_vec, batch_index)
+            return self.model(batch)
+
+    def _resolve_targets(self, pred, batch):
+        """
+        Build training targets compatible with task-wise or single-task losses.
+        """
+        if isinstance(pred, dict):
+            if hasattr(batch, "y_dict") and batch.y_dict is not None:
+                return batch.y_dict
+
+            target_dict = {}
+            for key in pred:
+                if hasattr(batch, key):
+                    target_dict[key] = getattr(batch, key)
+
+            if not target_dict and hasattr(batch, "y") and batch.y is not None and len(pred) == 1:
+                target_key = next(iter(pred.keys()))
+                target_dict[target_key] = batch.y
+
+            return target_dict
+
+        if hasattr(batch, "y") and batch.y is not None:
+            return batch.y
+        return batch
+
+    def _compute_loss(self, pred, batch):
+        targets = self._resolve_targets(pred, batch)
+        pred, targets = self._align_prediction_target(pred, targets, batch)
+        loss_out = self.loss_fn(pred, targets)
+        if isinstance(loss_out, dict):
+            return loss_out["total"] if "total" in loss_out else next(iter(loss_out.values()))
+        return loss_out
+
+    @staticmethod
+    def _align_prediction_target(pred, targets, batch):
+        """
+        Align prediction/target shapes for common graph-level edge cases.
+
+        If the model returns node-level outputs but labels are graph-level scalars,
+        aggregate predictions by `batch` index to avoid silent broadcasting.
+        """
+        if isinstance(pred, dict) or isinstance(targets, dict):
+            return pred, targets
+
+        if not isinstance(pred, torch.Tensor) or not isinstance(targets, torch.Tensor):
+            return pred, targets
+
+        if pred.shape == targets.shape:
+            return pred, targets
+
+        batch_index = getattr(batch, "batch", None)
+        if (
+            batch_index is not None
+            and isinstance(batch_index, torch.Tensor)
+            and pred.dim() in {1, 2}
+            and targets.dim() in {1, 2}
+        ):
+            try:
+                from torch_geometric.nn import global_mean_pool
+
+                pred_graph = global_mean_pool(pred.reshape(pred.size(0), -1), batch_index)
+                pred_graph = pred_graph.squeeze(-1) if pred_graph.size(-1) == 1 else pred_graph
+                target_graph = targets.squeeze(-1) if targets.dim() == 2 and targets.size(-1) == 1 else targets
+                if pred_graph.shape == target_graph.shape:
+                    return pred_graph, target_graph
+            except Exception:
+                pass
+
+        if targets.numel() == 1 and pred.numel() > 1:
+            return pred.mean().reshape_as(targets), targets
+
+        return pred, targets
+
     def train_epoch(self, loader: DataLoader) -> float:
         """Train for one epoch. Returns average loss."""
         self.model.train()
@@ -79,38 +201,9 @@ class Trainer:
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
 
-            with torch.amp.autocast('cuda', enabled=self.use_amp):
-                # Flexible model call (some graph models take different args)
-                if hasattr(getattr(self.model, "forward", None), "__code__"):
-                     # Standard PyG call
-                     pred = self.model(
-                        batch.x,
-                        batch.edge_index,
-                        batch.edge_attr,
-                        batch.batch,
-                     )
-                else:
-                     # Fallback
-                     pred = self.model(batch)
-
-                # Loss computation
-                # Handle Multi-Task (Dict output)
-                if isinstance(pred, dict):
-                    # For multi-task, we usually need keys from the batch, so pass the whole batch
-                    # explicitly as targets if 'y_dict' isn't available.
-                    # Also, carefully verify if we really should use batch.y
-                    targets = batch
-                    if hasattr(batch, 'y_dict'):
-                        targets = batch.y_dict
-
-                    loss_dict = self.loss_fn(pred, targets)
-                    # Extract total loss
-                    loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
-                else:
-                    # Single task
-                    # Prefer batch.y if it exists and is not None
-                    targets = batch.y if (hasattr(batch, 'y') and batch.y is not None) else batch
-                    loss = self.loss_fn(pred, targets)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                pred = self._forward_batch(batch)
+                loss = self._compute_loss(pred, batch)
 
             # Backward pass with scaler
             self.scaler.scale(loss).backward()
@@ -137,23 +230,9 @@ class Trainer:
         for batch in loader:
             batch = batch.to(self.device)
 
-            with torch.amp.autocast('cuda', enabled=self.use_amp):
-                pred = self.model(
-                    batch.x,
-                    batch.edge_index,
-                    batch.edge_attr,
-                    batch.batch,
-                )
-
-                if isinstance(pred, dict):
-                     targets = batch
-                     if hasattr(batch, 'y_dict'):
-                        targets = batch.y_dict
-                     loss_dict = self.loss_fn(pred, targets)
-                     loss = loss_dict["total"] if isinstance(loss_dict, dict) else loss_dict
-                else:
-                    targets = batch.y if (hasattr(batch, 'y') and batch.y is not None) else batch
-                    loss = self.loss_fn(pred, targets)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                pred = self._forward_batch(batch)
+                loss = self._compute_loss(pred, batch)
 
             total_loss += loss.item()
             n_batches += 1
@@ -169,6 +248,7 @@ class Trainer:
         val_loader: DataLoader,
         n_epochs: int = 300,
         patience: int = 50,
+        min_delta: float = 1e-2,
         verbose: bool = True,
         checkpoint_name: str = "model"
     ) -> dict:
@@ -202,7 +282,8 @@ class Trainer:
             self.history["epoch_time"].append(dt)
 
             # checkpointing
-            if val_loss < self.best_val_loss:
+            improved = val_loss < (self.best_val_loss - min_delta)
+            if improved:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
                 self._save_checkpoint(f"{checkpoint_name}_best.pt", epoch, val_loss)

@@ -6,7 +6,7 @@ Usage examples:
   python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level std
   python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level pro --all-properties
   python scripts/phase2_multitask/run_phase2.py --algorithm cgcnn --level lite
-  python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --level max --resume
+  python scripts/phase2_multitask/run_phase2.py --algorithm m3gnet --level std
   python scripts/phase2_multitask/run_phase2.py --algorithm e3nn --competition
 """
 
@@ -74,35 +74,72 @@ PHASE2_PROFILES = {
     "cgcnn": {
         "smoke": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-            "args": ["--preset", "small", "--epochs", "5", "--batch-size", "64", "--max-samples", "800"],
+            "args": ["--encoder", "cgcnn", "--preset", "small", "--epochs", "5", "--batch-size", "64", "--max-samples", "800"],
             "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "lite": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-            "args": ["--preset", "small", "--epochs", "40", "--batch-size", "96", "--max-samples", "3000"],
+            "args": ["--encoder", "cgcnn", "--preset", "small", "--epochs", "40", "--batch-size", "96", "--max-samples", "3000"],
             "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "std": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-            "args": ["--preset", "medium", "--epochs", "200", "--batch-size", "128"],
+            "args": ["--encoder", "cgcnn", "--preset", "medium", "--epochs", "200", "--batch-size", "128"],
             "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "pro": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-            "args": ["--preset", "large", "--epochs", "300", "--batch-size", "128"],
+            "args": ["--encoder", "cgcnn", "--preset", "large", "--epochs", "300", "--batch-size", "128"],
             "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
         },
         "max": {
             "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-            "args": ["--preset", "large", "--epochs", "500", "--batch-size", "160", "--lr", "0.0007"],
+            "args": ["--encoder", "cgcnn", "--preset", "large", "--epochs", "500", "--batch-size", "160", "--lr", "0.0007"],
+            "supports_resume": True,
+            "supports_all_properties": False,
+            "supports_max_samples": True,
+        },
+    },
+    "m3gnet": {
+        "smoke": {
+            "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+            "args": ["--encoder", "m3gnet", "--preset", "small", "--epochs", "5", "--batch-size", "48", "--max-samples", "800"],
+            "supports_resume": True,
+            "supports_all_properties": False,
+            "supports_max_samples": True,
+        },
+        "lite": {
+            "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+            "args": ["--encoder", "m3gnet", "--preset", "small", "--epochs", "40", "--batch-size", "64", "--max-samples", "3000"],
+            "supports_resume": True,
+            "supports_all_properties": False,
+            "supports_max_samples": True,
+        },
+        "std": {
+            "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+            "args": ["--encoder", "m3gnet", "--preset", "medium", "--epochs", "200", "--batch-size", "80"],
+            "supports_resume": True,
+            "supports_all_properties": False,
+            "supports_max_samples": True,
+        },
+        "pro": {
+            "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+            "args": ["--encoder", "m3gnet", "--preset", "large", "--epochs", "300", "--batch-size", "96"],
+            "supports_resume": True,
+            "supports_all_properties": False,
+            "supports_max_samples": True,
+        },
+        "max": {
+            "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+            "args": ["--encoder", "m3gnet", "--preset", "large", "--epochs", "500", "--batch-size", "112", "--lr", "0.0007"],
             "supports_resume": True,
             "supports_all_properties": False,
             "supports_max_samples": True,
@@ -120,7 +157,14 @@ PHASE2_COMPETITION = {
     },
     "cgcnn": {
         "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
-        "args": ["--preset", "medium", "--epochs", "280", "--batch-size", "128", "--lr", "0.0009"],
+        "args": ["--encoder", "cgcnn", "--preset", "medium", "--epochs", "280", "--batch-size", "128", "--lr", "0.0009"],
+        "supports_resume": True,
+        "supports_all_properties": False,
+        "supports_max_samples": True,
+    },
+    "m3gnet": {
+        "script": "scripts/phase2_multitask/train_multitask_cgcnn.py",
+        "args": ["--encoder", "m3gnet", "--preset", "medium", "--epochs", "280", "--batch-size", "96", "--lr", "0.0009"],
         "supports_resume": True,
         "supports_all_properties": False,
         "supports_max_samples": True,
@@ -163,13 +207,27 @@ def build_command(args: argparse.Namespace) -> list[str]:
         if value is not None:
             cmd.extend([key, str(value)])
 
-    if args.algorithm == "cgcnn":
+    if args.algorithm in {"cgcnn", "m3gnet"}:
         if args.preset is not None:
             cmd.extend(["--preset", args.preset])
         if args.max_samples is not None:
             cmd.extend(["--max-samples", str(args.max_samples)])
+
+        if args.algorithm == "cgcnn":
+            if args.pooling is not None:
+                cmd.extend(["--pooling", args.pooling])
+            if args.jk is not None:
+                cmd.extend(["--jk", args.jk])
+            if args.message_aggr is not None:
+                cmd.extend(["--message-aggr", args.message_aggr])
+            if args.no_edge_gates:
+                cmd.append("--no-edge-gates")
+        elif args.pooling is not None or args.jk is not None or args.message_aggr is not None or args.no_edge_gates:
+            print("[WARN] CGCNN-only graph-encoder args ignored for algorithm=m3gnet")
     elif args.max_samples is not None:
-        print("[WARN] --max-samples is only supported by Phase 2 CGCNN baseline")
+        print("[WARN] --max-samples is only supported by Phase 2 CGCNN/M3GNet baselines")
+    elif args.pooling is not None or args.jk is not None or args.message_aggr is not None or args.no_edge_gates:
+        print("[WARN] CGCNN-only graph-encoder args ignored (pooling/jk/message-aggr/no-edge-gates)")
 
     if args.run_id:
         cmd.extend(["--run-id", args.run_id])
@@ -190,7 +248,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified Phase 2 training launcher")
-    parser.add_argument("--algorithm", default="e3nn", choices=["e3nn", "cgcnn"])
+    parser.add_argument("--algorithm", default="e3nn", choices=["e3nn", "cgcnn", "m3gnet"])
     parser.add_argument(
         "--level",
         default="std",
@@ -215,6 +273,10 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--preset", choices=["small", "medium", "large"], default=None)
+    parser.add_argument("--pooling", choices=["mean", "sum", "max", "mean_max", "attn"], default=None)
+    parser.add_argument("--jk", choices=["last", "mean", "concat"], default=None)
+    parser.add_argument("--message-aggr", choices=["sum", "mean"], default=None)
+    parser.add_argument("--no-edge-gates", action="store_true")
     parser.add_argument("--run-id", type=str, default=None)
     parser.add_argument("--init-from", type=str, default=None)
     parser.add_argument("--top-k", type=int, default=3)
@@ -239,4 +301,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

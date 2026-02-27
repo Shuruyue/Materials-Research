@@ -99,6 +99,8 @@ def load_classifier(cfg):
 
 
 def main():
+    from atlas.active_learning.acquisition import DISCOVERY_ACQUISITION_STRATEGIES
+
     parser = argparse.ArgumentParser(description="ATLAS Discovery Engine")
     parser.add_argument("--iterations", type=int, default=5,
                         help="Number of active learning iterations (default: 5)")
@@ -110,11 +112,95 @@ def main():
                         help="Number of seed structures (default: 15)")
     parser.add_argument("--no-mace", action="store_true",
                         help="Skip MACE relaxation (faster, less accurate)")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Optional run id for isolated results directory")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from latest run (or specified --run-id)")
+    parser.add_argument("--results-dir", type=str, default=None,
+                        help="Explicit results directory (overrides --run-id/--resume)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Resolve run directory and manifest, then exit")
+    parser.add_argument(
+        "--acq-strategy",
+        type=str,
+        default="hybrid",
+        choices=sorted(DISCOVERY_ACQUISITION_STRATEGIES),
+        help="Acquisition strategy: hybrid/stability/ei/pi/ucb/lcb/thompson/mean/uncertainty",
+    )
+    parser.add_argument(
+        "--acq-kappa",
+        type=float,
+        default=2.0,
+        help="Exploration factor for UCB/LCB family strategies",
+    )
+    parser.add_argument(
+        "--acq-best-f",
+        type=float,
+        default=-0.5,
+        help="Reference best objective value for EI/PI (formation-energy target)",
+    )
+    parser.add_argument(
+        "--acq-jitter",
+        type=float,
+        default=0.01,
+        help="Jitter used in EI/PI stability acquisition",
+    )
     args = parser.parse_args()
 
     from atlas.config import get_config
+    from atlas.training.run_utils import resolve_run_dir, write_run_manifest
+
     cfg = get_config()
     print(cfg.summary())
+
+    project_root = Path(__file__).resolve().parents[2]
+    managed_run = args.results_dir is not None or args.run_id is not None or args.resume
+
+    try:
+        if args.results_dir:
+            results_dir = Path(args.results_dir)
+            results_dir.mkdir(parents=True, exist_ok=True)
+            created_new = not any(results_dir.glob("iteration_*.json"))
+        elif managed_run:
+            base_results = cfg.paths.data_dir / "discovery_results"
+            results_dir, created_new = resolve_run_dir(
+                base_results,
+                resume=args.resume,
+                run_id=args.run_id,
+            )
+        else:
+            results_dir = cfg.paths.data_dir / "discovery_results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            created_new = False
+    except Exception as exc:
+        print(f"\n  [ERROR] Failed to resolve results directory: {exc}")
+        return 2
+
+    manifest_path = write_run_manifest(
+        results_dir,
+        args=args,
+        extra={
+            "phase": "phase5",
+            "module": "active_learning_discovery",
+            "created_new_run_dir": created_new,
+        },
+        project_root=project_root,
+    )
+    print(f"\n  Results directory: {results_dir}")
+    print(f"  Run manifest: {manifest_path}")
+
+    if args.dry_run:
+        write_run_manifest(
+            results_dir,
+            args=args,
+            extra={
+                "phase": "phase5",
+                "status": "dry_run",
+            },
+            project_root=project_root,
+        )
+        print("\n[OK] Dry run complete. No discovery loop executed.")
+        return 0
 
     t_start = time.time()
 
@@ -157,6 +243,18 @@ def main():
         w_stability=0.25,
         w_heuristic=0.20,
         w_novelty=0.20,
+        acquisition_strategy=args.acq_strategy,
+        acquisition_kappa=args.acq_kappa,
+        acquisition_best_f=args.acq_best_f,
+        acquisition_jitter=args.acq_jitter,
+        results_dir=results_dir,
+    )
+    print(
+        "  Acquisition: "
+        f"strategy={args.acq_strategy}, "
+        f"kappa={args.acq_kappa}, "
+        f"best_f={args.acq_best_f}, "
+        f"jitter={args.acq_jitter}"
     )
 
     # ─── Step 6: RUN DISCOVERY ───
@@ -172,13 +270,26 @@ def main():
     )
 
     # ─── Step 7: Save Report ───
-    controller.save_final_report()
+    report_name = f"final_report_{results_dir.name}.json" if managed_run else "final_report.json"
+    controller.save_final_report(filename=report_name)
+    write_run_manifest(
+        results_dir,
+        args=args,
+        extra={
+            "phase": "phase5",
+            "status": "completed",
+            "iterations_completed": controller.iteration,
+            "report_file": report_name,
+        },
+        project_root=project_root,
+    )
 
     t_total = time.time() - t_start
     print(f"\n  Total runtime: {t_total:.1f}s ({t_total/60:.1f} min)")
     print(f"\n[OK] Discovery complete.")
-    print(f"  Results: {cfg.paths.data_dir / 'discovery_results'}")
+    print(f"  Results: {results_dir}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

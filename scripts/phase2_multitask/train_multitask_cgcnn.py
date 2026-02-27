@@ -31,7 +31,9 @@ from atlas.data.crystal_dataset import (
     resolve_phase2_property_group,
 )
 from atlas.models.cgcnn import CGCNN
+from atlas.models.m3gnet import M3GNet
 from atlas.models.multi_task import MultiTaskGNN, ScalarHead
+from atlas.models.prediction_utils import forward_graph_model
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
@@ -54,6 +56,10 @@ MODEL_PRESETS = {
         "n-conv": 2,
         "n-fc": 1,
         "head-hidden": 32,
+        "pooling": "mean",
+        "jk": "last",
+        "message-aggr": "mean",
+        "edge-gates": True,
     },
     "medium": {
         "description": "Standard CGCNN (Baseline)",
@@ -63,6 +69,10 @@ MODEL_PRESETS = {
         "n-conv": 3,
         "n-fc": 2,
         "head-hidden": 64,
+        "pooling": "mean_max",
+        "jk": "concat",
+        "message-aggr": "mean",
+        "edge-gates": True,
     },
     "large": {
         "description": "Deep CGCNN",
@@ -72,6 +82,10 @@ MODEL_PRESETS = {
         "n-conv": 5,
         "n-fc": 3,
         "head-hidden": 128,
+        "pooling": "mean_max",
+        "jk": "concat",
+        "message-aggr": "mean",
+        "edge-gates": True,
     },
 }
 
@@ -155,7 +169,7 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
         
         # CGCNN forward pass
         # Note: CGCNN expects edge_attr, not edge_vec
-        predictions = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        predictions = forward_graph_model(model, batch)
         
         task_losses = []
         valid_tasks = 0
@@ -212,7 +226,7 @@ def evaluate(model, loader, device, normalizer=None):
     
     for batch in loader:
         batch = batch.to(device)
-        predictions = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        predictions = forward_graph_model(model, batch)
         
         for prop in PROPERTIES:
             if prop not in predictions: continue
@@ -242,10 +256,15 @@ def evaluate(model, loader, device, normalizer=None):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--encoder", choices=["cgcnn", "m3gnet"], default="cgcnn")
     parser.add_argument("--preset", type=str, default="medium", choices=MODEL_PRESETS.keys())
     parser.add_argument("--batch-size", type=int, default=128)  # CGCNN usually handles large batch
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--pooling", choices=["mean", "sum", "max", "mean_max", "attn"], default=None)
+    parser.add_argument("--jk", choices=["last", "mean", "concat"], default=None)
+    parser.add_argument("--message-aggr", choices=["sum", "mean"], default=None)
+    parser.add_argument("--no-edge-gates", action="store_true")
     parser.add_argument(
         "--property-group",
         choices=PHASE2_PROPERTY_GROUP_CHOICES,
@@ -272,6 +291,7 @@ def main() -> int:
     for k, v in preset.items():
         if k != "description":
             print(f"  - {k}: {v}")
+    print(f"  - encoder: {args.encoder}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -279,7 +299,8 @@ def main() -> int:
         print(f"GPU: {torch.cuda.get_device_name()}")
 
     config = get_config()
-    base_dir = config.paths.models_dir / "multitask_cgcnn"
+    model_family = "multitask_cgcnn" if args.encoder == "cgcnn" else "multitask_m3gnet"
+    base_dir = config.paths.models_dir / model_family
     try:
         save_dir, created_new = resolve_run_dir(base_dir, resume=args.resume, run_id=args.run_id)
     except (FileNotFoundError, FileExistsError) as e:
@@ -295,7 +316,7 @@ def main() -> int:
         extra={
             "status": "started",
             "phase": "phase2",
-            "model_family": "multitask_cgcnn",
+            "model_family": model_family,
         },
     )
     print(f"[INFO] Run manifest: {manifest_path}")
@@ -327,14 +348,39 @@ def main() -> int:
                             num_workers=0, pin_memory=True)
     
     # Model
-    print("\n[3/5] Building Multi-Task CGCNN...")
+    print(f"\n[3/5] Building Multi-Task {args.encoder.upper()}...")
     
     # CGCNN Encoder
     class CGCNNEncoder(nn.Module):
-        def __init__(self, node_dim, edge_dim, hidden_dim, n_conv, n_fc, dropout=0.0):
+        def __init__(
+            self,
+            node_dim,
+            edge_dim,
+            hidden_dim,
+            n_conv,
+            n_fc,
+            *,
+            dropout=0.0,
+            pooling="mean_max",
+            jk="concat",
+            message_aggr="mean",
+            use_edge_gates=True,
+        ):
             super().__init__()
-            self.cgcnn = CGCNN(node_dim, edge_dim, hidden_dim, n_conv, n_fc, output_dim=1, dropout=dropout)
-            self.hidden_dim = hidden_dim # CGCNN usually has hidden_dim/2 after pooling, let's check
+            self.cgcnn = CGCNN(
+                node_dim,
+                edge_dim,
+                hidden_dim,
+                n_conv,
+                n_fc,
+                output_dim=1,
+                dropout=dropout,
+                pooling=pooling,
+                jk=jk,
+                message_aggr=message_aggr,
+                use_edge_gates=use_edge_gates,
+            )
+            self.hidden_dim = self.cgcnn.graph_dim
             
         def encode(self, x, edge_index, edge_attr, batch):
             return self.cgcnn.encode(x, edge_index, edge_attr, batch)
@@ -342,19 +388,59 @@ def main() -> int:
         def forward(self, x, edge_index, edge_attr, batch):
             return self.encode(x, edge_index, edge_attr, batch)
 
-    # Need to check CGCNN.encode output dim. 
-    # Usually CGCNN code creates encoding of size hidden_dim.
-    encoder = CGCNNEncoder(
-        preset["node-dim"], preset["edge-dim"], preset["hidden-dim"], 
-        preset["n-conv"], preset["n-fc"]
-    )
+    pooling_mode = None
+    jk_mode = None
+    message_aggr = None
+    use_edge_gates = None
+
+    if args.encoder == "cgcnn":
+        pooling_mode = args.pooling or preset["pooling"]
+        jk_mode = args.jk or preset["jk"]
+        message_aggr = args.message_aggr or preset["message-aggr"]
+        use_edge_gates = preset["edge-gates"] and (not args.no_edge_gates)
+        print(
+            f"  - pooling: {pooling_mode}, jk: {jk_mode}, "
+            f"message_aggr: {message_aggr}, edge_gates: {use_edge_gates}"
+        )
+        encoder = CGCNNEncoder(
+            preset["node-dim"],
+            preset["edge-dim"],
+            preset["hidden-dim"],
+            preset["n-conv"],
+            preset["n-fc"],
+            pooling=pooling_mode,
+            jk=jk_mode,
+            message_aggr=message_aggr,
+            use_edge_gates=use_edge_gates,
+        )
+        embed_dim = encoder.hidden_dim
+    else:
+        if (
+            args.pooling is not None
+            or args.jk is not None
+            or args.message_aggr is not None
+            or args.no_edge_gates
+        ):
+            print("[WARN] CGCNN-specific args ignored for encoder=m3gnet.")
+        encoder = M3GNet(
+            n_species=86,
+            embed_dim=preset["hidden-dim"],
+            n_layers=preset["n-conv"],
+            n_rbf=preset["edge-dim"],
+            max_radius=5.0,
+        )
+        embed_dim = int(getattr(encoder, "embed_dim", preset["hidden-dim"]))
+        print(
+            f"  - m3gnet: embed_dim={embed_dim}, "
+            f"layers={preset['n-conv']}, n_rbf={preset['edge-dim']}"
+        )
     
     # Multi-Task Wrapper
     # Note: CGCNN.encode returns (B, hidden_dim)
     model = MultiTaskGNN(
         encoder=encoder,
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
-        embed_dim=preset["hidden-dim"],
+        embed_dim=embed_dim,
     ).to(device)
     
     # Optim
@@ -451,8 +537,9 @@ def main() -> int:
     avg_test_mae = float(sum(test_maes) / len(test_maes)) if test_maes else float("inf")
 
     results = {
-        "algorithm": "cgcnn_multitask",
+        "algorithm": f"{args.encoder}_multitask",
         "run_id": save_dir.name,
+        "encoder": args.encoder,
         "preset": args.preset,
         "property_group": args.property_group,
         "properties": list(PROPERTIES),
@@ -469,8 +556,13 @@ def main() -> int:
             "batch_size": args.batch_size,
             "epochs": args.epochs,
             "lr": args.lr,
+            "encoder": args.encoder,
             "property_group": args.property_group,
             "max_samples": args.max_samples,
+            "pooling": pooling_mode,
+            "jk": jk_mode,
+            "message_aggr": message_aggr,
+            "use_edge_gates": bool(use_edge_gates) if use_edge_gates is not None else None,
             "top_k": args.top_k,
             "keep_last_k": args.keep_last_k,
         },

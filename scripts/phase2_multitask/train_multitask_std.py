@@ -36,6 +36,7 @@ from atlas.data.crystal_dataset import (
 )
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
+from atlas.models.prediction_utils import forward_graph_model
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
 from atlas.training.filters import filter_outliers
@@ -138,7 +139,7 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
     for step, batch in enumerate(iterator, start=1):
         batch = batch.to(device)
         optimizer.zero_grad()
-        preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
+        preds = forward_graph_model(model, batch)
         
         task_losses = []
         valid_tasks = 0
@@ -201,7 +202,7 @@ def evaluate(model, loader, device, normalizer=None):
     
     for batch in loader:
         batch = batch.to(device)
-        preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
+        preds = forward_graph_model(model, batch)
         
         for prop in PROPERTIES:
             if prop not in preds: continue

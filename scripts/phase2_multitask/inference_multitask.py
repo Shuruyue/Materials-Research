@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.data.crystal_dataset import DEFAULT_PROPERTIES
 from atlas.models.graph_builder import CrystalGraphBuilder
+from atlas.models.prediction_utils import extract_mean_and_std, forward_graph_model
 from atlas.models.utils import load_phase2_model
 from jarvis.core.atoms import Atoms
 
@@ -22,6 +23,7 @@ PHASE2_MODEL_FAMILIES = (
     "multitask_std_e3nn",
     "multitask_pro_e3nn",
     "multitask_cgcnn",
+    "multitask_m3gnet",
 )
 
 
@@ -40,9 +42,6 @@ class AtlasMultitaskPredictor:
         print(f"[INFO] Loading model from {ckpt_path.name}...")
         self.model, self.normalizer = load_phase2_model(str(ckpt_path), self.device)
         self.tasks = list(getattr(self.model, "task_names", DEFAULT_PROPERTIES))
-        encoder = getattr(self.model, "encoder", None)
-        # e3nn uses edge_vec; CGCNN uses edge_attr
-        self._use_edge_vec = bool(hasattr(encoder, "sh_irreps"))
         print(f"[INFO] Model loaded. Tasks: {self.tasks}")
 
     def _process_atoms(self, atoms):
@@ -58,21 +57,39 @@ class AtlasMultitaskPredictor:
             return value
         return self.normalizer.denormalize(prop, value)
 
+    def _denormalize_std(self, prop, value):
+        if self.normalizer is None:
+            return value
+        if not hasattr(self.normalizer, "normalizers"):
+            return value
+        if prop not in self.normalizer.normalizers:
+            return value
+        scale = float(self.normalizer.normalizers[prop].std)
+        return value * scale
+
+    def _decode_prediction(self, prop: str, payload):
+        mean, std = extract_mean_and_std(payload)
+        mean = self._denormalize(prop, mean)
+        if std is not None:
+            std = torch.clamp(self._denormalize_std(prop, std), min=0.0)
+        return mean, std
+
     def predict_one(self, atoms):
         data = self._process_atoms(atoms)
         data.batch = torch.zeros(data.x.shape[0], dtype=torch.long)
         data = data.to(self.device)
-        edge_features = data.edge_vec if self._use_edge_vec else data.edge_attr
 
         with torch.no_grad():
-            preds = self.model(data.x, data.edge_index, edge_features, data.batch)
+            preds = forward_graph_model(self.model, data)
 
         result = {}
         for prop in self.tasks:
             if prop not in preds:
                 continue
-            value = self._denormalize(prop, preds[prop]).item()
-            result[prop] = float(value)
+            mean, std = self._decode_prediction(prop, preds[prop])
+            result[prop] = float(mean.reshape(-1)[0].item())
+            if std is not None:
+                result[f"{prop}_std"] = float(std.reshape(-1)[0].item())
         return result
 
     def predict_batch(self, cif_files):
@@ -144,7 +161,11 @@ def main() -> int:
         print(f"\nPredictions for {args.cif.name}:")
         for prop in predictor.tasks:
             if prop in predictions:
-                print(f"  {prop:20s}: {predictions[prop]:.4f}")
+                std_key = f"{prop}_std"
+                if std_key in predictions:
+                    print(f"  {prop:20s}: {predictions[prop]:.4f} ± {predictions[std_key]:.4f}")
+                else:
+                    print(f"  {prop:20s}: {predictions[prop]:.4f}")
         return 0
 
     if args.dir:

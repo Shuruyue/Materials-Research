@@ -32,6 +32,7 @@ from atlas.data.crystal_dataset import (
 )
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
+from atlas.models.prediction_utils import forward_graph_model
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
@@ -182,7 +183,7 @@ def main() -> int:
             optimizer.zero_grad()
             
             # Forward
-            preds = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
+            preds = forward_graph_model(model, batch)
             
             # Simple loss (just checking gradients)
             loss = 0
