@@ -1,5 +1,6 @@
 # Large binary caches (regeneratable)
 data/raw/jarvis_cache/
+data/raw/datasets/
 data/processed/
 data/discovery_results/
 *.pt
@@ -79,3 +80,6 @@ atlas/models/nequip_wrapper.py
 atlas/models/scaling.py
 atlas/third_party/matgl/models/
 atlas/third_party/mlip_arena/models/
+
+# Cloned reference repos (large)
+references/repo/
