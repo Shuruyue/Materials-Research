@@ -12,7 +12,6 @@ import torch
 
 from atlas.training.losses import EvidentialLoss, MultiTaskLoss, PropertyLoss
 
-
 # ── PropertyLoss ──────────────────────────────────────────────
 
 

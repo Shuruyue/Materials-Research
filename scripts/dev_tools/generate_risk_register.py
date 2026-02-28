@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -47,7 +46,7 @@ def _risk(
         "likelihood": likelihood,
         "impact": impact,
         "status": "open",
-        "owner": "TBD",
+        "owner": "unassigned",
         "evidence": evidence,
         "mitigation": mitigation,
     }
@@ -189,7 +188,7 @@ def main() -> int:
             severity="medium",
             likelihood="high",
             impact="execution delay and accountability gaps",
-            evidence="dual_track_execution_board owner fields still TBD",
+            evidence="execution board owner fields are currently unassigned",
             mitigation="Assign owner/deputy per stage and enforce weekly review cadence.",
         )
     )

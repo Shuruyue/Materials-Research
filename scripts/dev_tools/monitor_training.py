@@ -1,9 +1,10 @@
 """Quick training health check."""
-import json
-import torch
-import sys
 import argparse
+import json
+import sys
 from pathlib import Path
+
+import torch
 
 # Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -11,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description="Monitor Training Progress")
-    parser.add_argument("--model", type=str, default="cgcnn_full_formation_energy", 
+    parser.add_argument("--model", type=str, default="cgcnn_full_formation_energy",
                         help="Model directory name inside models/ (default: cgcnn_full_formation_energy)")
     args = parser.parse_args()
 
@@ -27,7 +28,7 @@ def main():
 
     d = json.loads(h_path.read_text())
     n = len(d["train_loss"])
-    print(f"=== Training Health Check ===")
+    print("=== Training Health Check ===")
     print(f"Epochs completed: {n}")
 
     if n == 0:
@@ -51,32 +52,32 @@ def main():
     ema_maes = [x for x in d.get("ema_val_mae", []) if x < 1e10]
     lrs = d["lr"]
 
-    print(f"\n--- Loss Trend ---")
+    print("\n--- Loss Trend ---")
     print(f"  First 5:  {[round(x,4) for x in losses[:5]]}")
     print(f"  Last 10:  {[round(x,4) for x in losses[-10:]]}")
     if losses[-1] != 0:
         print(f"  Ratio (first/last): {losses[0]/losses[-1]:.1f}x improvement")
     else:
-        print(f"  Ratio (first/last): Inf (loss reached 0)")
+        print("  Ratio (first/last): Inf (loss reached 0)")
 
-    print(f"\n--- Val MAE Trend ---")
+    print("\n--- Val MAE Trend ---")
     print(f"  First 5:  {[round(x,4) for x in val_maes[:5]]}")
     print(f"  Last 10:  {[round(x,4) for x in val_maes[-10:]]}")
     print(f"  Best: {min(val_maes):.4f} at epoch {val_maes.index(min(val_maes))+1}")
 
     if ema_maes:
-        print(f"\n--- EMA Val MAE ---")
+        print("\n--- EMA Val MAE ---")
         print(f"  Last 10:  {[round(x,4) for x in d['ema_val_mae'][-10:]]}")
         print(f"  Best: {min(ema_maes):.4f}")
 
-    print(f"\n--- Learning Rate ---")
+    print("\n--- Learning Rate ---")
     print(f"  Current: {lrs[-1]:.2e}")
     print(f"  Initial: {lrs[0]:.2e}")
     n_reductions = sum(1 for i in range(1,len(lrs)) if lrs[i] < lrs[i-1])
     print(f"  LR reductions: {n_reductions}")
 
     # Health indicators
-    print(f"\n=== Health Assessment ===")
+    print("\n=== Health Assessment ===")
     # 1. Is loss decreasing?
     if n >= 10:
         early_avg = sum(losses[:5]) / 5
@@ -103,7 +104,7 @@ def main():
     if nan_count > 0:
         print(f"  [FAIL] {nan_count} NaN epochs detected")
     else:
-        print(f"  [OK] No NaN epochs")
+        print("  [OK] No NaN epochs")
 
     # 4. EMA benefit
     if ema_maes and len(val_maes) > 0:
@@ -120,17 +121,17 @@ def main():
         recent_best = min(val_maes[-20:])
         overall_best = min(val_maes)
         if recent_best <= overall_best * 1.001:
-            print(f"  [ACTIVE] Still actively improving in last 20 epochs")
+            print("  [ACTIVE] Still actively improving in last 20 epochs")
         else:
             recent_idx = val_maes.index(min(val_maes))
             stale_epochs = n - recent_idx - 1
             print(f"  [WAIT] Plateau: best was {stale_epochs} epochs ago")
 
-    print(f"\n  Target: shear_modulus MAE < 7.5 GPa")
+    print("\n  Target: shear_modulus MAE < 7.5 GPa")
     print(f"  Current best: {min(val_maes):.4f} GPa")
     gap = min(val_maes) - 7.5
     if gap <= 0:
-        print(f"  [PASS] Already below target!")
+        print("  [PASS] Already below target!")
     else:
         print(f"  Gap to target: {gap:.2f} GPa")
 

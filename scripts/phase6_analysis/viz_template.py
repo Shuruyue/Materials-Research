@@ -7,9 +7,9 @@ Prerequisites: pip install pymatviz (Installed)
 
 import sys
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
-from pymatgen.core import Structure, Lattice
+import pandas as pd
 
 # Import directly now that it's installed
 try:
@@ -22,7 +22,7 @@ except ImportError as e:
 
 def main():
     print("--- Phase 6: Generating Visualizations ---")
-    
+
     # 1. Periodic Table Heatmap
     # Real data simulation: Element average energies
     print("1. Generating Periodic Table Heatmap...")
@@ -34,7 +34,7 @@ def main():
         "Sr": -6.5, "Y": -7.2, "Zr": -8.5, "Nb": -9.2
     }
     s = pd.Series(data, name="Formation Energy (eV/atom)")
-    
+
     # Ensure output directory exists
     output_dir = Path("scripts/phase6_analysis/outputs")
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -53,7 +53,7 @@ def main():
     # Simulate a dataset of spacegroups
     np.random.seed(42)
     spg_nums = np.random.randint(1, 231, size=200)
-    
+
     fig_sunburst = spacegroup_sunburst(spg_nums)
     output_sunburst = output_dir / "spacegroup_sunburst.html"
     try:
@@ -61,7 +61,7 @@ def main():
         print(f"  [SAVED] {output_sunburst}")
     except Exception as e:
          print(f"  [ERROR] Could not save sunburst: {e}")
-    
+
     print("\n[SUCCESS] pymatviz visualizations generated successfully.")
 
 if __name__ == "__main__":

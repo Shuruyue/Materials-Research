@@ -27,9 +27,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_f
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.jarvis_client import JARVISClient
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -163,7 +163,7 @@ def _prune_top_runs(base_dir: Path, keep_top_runs: int) -> None:
         if not info_path.exists():
             continue
         try:
-            with open(info_path, "r", encoding="utf-8") as f:
+            with open(info_path, encoding="utf-8") as f:
                 info = json.load(f)
             score = float(info.get("test", {}).get("f1", float("-inf")))
         except Exception:

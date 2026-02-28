@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from atlas.console_style import install_console_style
 from atlas.training.theory_tuning import (
     DEFAULT_PHASE_ALGORITHMS,
     DEFAULT_STAGE_ORDER,
@@ -28,8 +29,6 @@ from atlas.training.theory_tuning import (
     extract_score_from_manifest,
     get_profile,
 )
-from atlas.console_style import install_console_style
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_ROOT = PROJECT_ROOT / "models"
@@ -128,7 +127,7 @@ def _load_json(path: Path | None) -> dict[str, Any] | None:
     if path is None or not path.exists():
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else None
     except Exception:

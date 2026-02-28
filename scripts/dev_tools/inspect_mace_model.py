@@ -1,13 +1,13 @@
 
-import torch
 from mace.calculators import mace_mp
+
 
 def inspect_model():
     print("Loading MACE model...")
     # Load small model for speed, assuming structure is consistent across sizes
     # Or load 'medium' since that's what we default to
     pretrained_mace = mace_mp(model="medium", device="cpu", default_dtype="float32").models[0]
-    
+
     print("\n--- Model Attributes ---")
     print(f"r_max: {pretrained_mace.r_max}")
     print("\n--- Interactions[0] ---")

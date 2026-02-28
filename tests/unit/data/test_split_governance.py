@@ -1,17 +1,15 @@
 """Unit tests for atlas.data.split_governance."""
 
-import pytest
 
 from atlas.data.split_governance import (
     SplitManifest,
     build_assignment_records,
-    compute_split_overlap_counts,
     compositional_split,
+    compute_split_overlap_counts,
     generate_manifest,
     iid_split,
     prototype_split,
 )
-
 
 # ---------------------------------------------------------------------------
 # IID split

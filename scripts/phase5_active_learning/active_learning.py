@@ -13,19 +13,16 @@ Usage:
 """
 
 import argparse
-import torch
-import numpy as np
-import json
-from pathlib import Path
-from typing import List, Dict, Optional
-
 import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
 from atlas.training.metrics import scalar_metrics
-
 
 # ─────────────────────────────────────────────────────────
 #  Acquisition Functions
@@ -289,7 +286,7 @@ class ActiveLearningLoop:
 
 def pareto_frontier(
     objectives: np.ndarray,
-    maximize: Optional[List[bool]] = None,
+    maximize: list[bool] | None = None,
 ) -> np.ndarray:
     """
     Find Pareto-optimal solutions.
@@ -330,7 +327,7 @@ def pareto_frontier(
 def multi_objective_screening(
     model,
     loader,
-    objectives: Dict[str, str],  # {"property": "high"/"low"}
+    objectives: dict[str, str],  # {"property": "high"/"low"}
     device: str = "cuda",
     top_k: int = 50,
 ):

@@ -13,30 +13,28 @@ Usage:
 """
 
 import argparse
-import torch
-import torch.nn as nn
-import numpy as np
 import json
 import sys
-import time
 from pathlib import Path
+
+import torch
+import torch.nn as nn
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.crystal_dataset import (
-    CrystalPropertyDataset,
     PHASE2_PROPERTY_GROUP_CHOICES,
+    CrystalPropertyDataset,
     resolve_phase2_property_group,
 )
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.models.prediction_utils import forward_graph_model
 from atlas.training.checkpoint import CheckpointManager
-from atlas.training.metrics import scalar_metrics
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -90,7 +88,7 @@ def main() -> int:
     print(f"\n[INFO] Device: {device}")
     if device == "cuda":
         print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
-    
+
     base_dir = config.paths.models_dir / "multitask_lite_e3nn"
     try:
         save_dir, created_new = resolve_run_dir(base_dir, resume=args.resume, run_id=args.run_id)
@@ -123,7 +121,7 @@ def main() -> int:
         )
         ds.prepare()
         datasets[split] = ds
-        
+
     print(f"    Train: {len(datasets['train'])}, Val: {len(datasets['val'])}")
 
     # ── 2. Model (Lite: Tiny) ──
@@ -138,22 +136,22 @@ def main() -> int:
         radial_hidden=LITE_PRESET["radial_hidden"],
         output_dim=1 # Dummy, handled by multitask wrapper
     )
-    
+
     model = MultiTaskGNN(
         encoder=encoder,
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
         embed_dim=encoder.scalar_dim
     ).to(device)
-    
+
     print(f"    Params: {sum(p.numel() for p in model.parameters()):,}")
 
     # ── 3. Train Loop (Lite: 2 Epochs) ──
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.MSELoss() 
+    criterion = nn.MSELoss()
 
     print(f"\n[3/4] Testing Training Loop ({args.epochs} Epochs)...")
     model.train()
-    
+
     from torch_geometric.loader import DataLoader
     loader = DataLoader(datasets["train"], batch_size=args.batch_size, shuffle=True,
                         num_workers=0, pin_memory=True)
@@ -181,10 +179,10 @@ def main() -> int:
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            
+
             # Forward
             preds = forward_graph_model(model, batch)
-            
+
             # Simple loss (just checking gradients)
             loss = 0
             for prop in PROPERTIES:
@@ -194,7 +192,7 @@ def main() -> int:
                     mask = ~torch.isnan(target)
                     if mask.sum() > 0:
                         loss += criterion(preds[prop][mask], target[mask])
-            
+
             if loss != 0:
                 loss.backward()
                 optimizer.step()

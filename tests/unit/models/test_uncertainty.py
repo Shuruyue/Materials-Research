@@ -7,12 +7,10 @@ Tests:
 - MCDropoutUQ: stochastic predictions via predict_with_uncertainty
 """
 
-import pytest
 import torch
 import torch.nn as nn
 
 from atlas.models.uncertainty import EnsembleUQ, EvidentialRegression, MCDropoutUQ
-
 
 # ── Helper models ─────────────────────────────────────────────
 

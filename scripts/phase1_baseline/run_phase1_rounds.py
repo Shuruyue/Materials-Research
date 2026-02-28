@@ -21,7 +21,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -102,7 +101,7 @@ def _snapshot_stage(model_dir: Path | None, dst_dir: Path) -> dict:
 
     results_path = model_dir / "results.json"
     if results_path.exists():
-        with open(results_path, "r", encoding="utf-8") as f:
+        with open(results_path, encoding="utf-8") as f:
             info["results"] = json.load(f)
     else:
         info["results"] = None

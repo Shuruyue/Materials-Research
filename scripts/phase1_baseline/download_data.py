@@ -57,7 +57,7 @@ def main():
     if args.topo:
         print("\n=== Topological Candidates ===\n")
         topo = client.get_topological_materials()
-        print(f"\n  Sample topological materials:")
+        print("\n  Sample topological materials:")
         cols = ["jid", "optb88vdw_bandgap"]
         if "spillage" in topo.columns:
             cols.append("spillage")
@@ -66,7 +66,7 @@ def main():
     if args.heavy:
         print("\n=== Heavy Element Materials ===\n")
         heavy = client.get_heavy_element_materials()
-        print(f"\n  Sample heavy-element materials:")
+        print("\n  Sample heavy-element materials:")
         print(heavy[["jid", "optb88vdw_bandgap"]].head(20).to_string(index=False))
 
     if not args.stats and not args.topo and not args.heavy:

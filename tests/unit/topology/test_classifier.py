@@ -15,7 +15,6 @@ import torch
 
 from atlas.topology import CrystalGraphBuilder, TopoGNN
 
-
 # ── TopoGNN ───────────────────────────────────────────────────
 
 

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import torch
 
+from atlas.models import utils as model_utils
 from atlas.models.cgcnn import CGCNN
 from atlas.models.m3gnet import M3GNet
 from atlas.models.multi_task import MultiTaskGNN
-from atlas.models import utils as model_utils
 from atlas.training.normalizers import TargetNormalizer
 
 

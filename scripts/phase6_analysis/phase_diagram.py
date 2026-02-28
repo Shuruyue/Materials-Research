@@ -66,13 +66,13 @@ def main():
             n_steps=args.steps,
         )
 
-        print(f"\n  ┌─────────────────────────────────────┐")
+        print("\n  ┌─────────────────────────────────────┐")
         print(f"  │ Solidification Results: {args.alloy:12s} │")
-        print(f"  ├─────────────────────────────────────┤")
+        print("  ├─────────────────────────────────────┤")
         print(f"  │ Liquidus: {result.liquidus_K:.1f} K ({result.liquidus_K - 273.15:.1f}°C)     │")
         print(f"  │ Solidus:  {result.solidus_K:.1f} K ({result.solidus_K - 273.15:.1f}°C)     │")
         print(f"  │ ΔT:       {result.liquidus_K - result.solidus_K:.1f} K                   │")
-        print(f"  └─────────────────────────────────────┘")
+        print("  └─────────────────────────────────────┘")
 
         # Print phase fraction table
         print(f"\n  {'T(K)':>6} {'T(°C)':>6}", end="")

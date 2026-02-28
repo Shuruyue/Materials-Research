@@ -14,7 +14,8 @@ try:
 except ImportError:
     from structure_enumerator import StructureEnumerator
 
-from pymatgen.core import Structure, Lattice, DummySpecies
+from pymatgen.core import DummySpecies, Lattice, Structure
+
 
 def get_perovskite_structure():
     lattice = Lattice.cubic(3.945)
@@ -38,7 +39,7 @@ def main():
     print("\n--- Test 1: Simple Substitution (Ti -> Ti, Zr) ---")
     subs = {"Ti": ["Ti", "Zr"]}
     structures = enumerator.generate(subs)
-    
+
     print(f"Generated {len(structures)} unique structures.")
     for i, s in enumerate(structures):
         print(f"  {i+1}: {s.composition.reduced_formula}")
@@ -46,8 +47,8 @@ def main():
     print("\n--- Test 2: Oxygen Vacancy (O -> O, Vacancy) ---")
     # For vacancy, use DummySpecies "X" or explicit removal?
     # Pymatgen SubstitutionTransformation works with DummySpecies.
-    subs_vac = {"O": ["O", DummySpecies("X")]} 
-    
+    subs_vac = {"O": ["O", DummySpecies("X")]}
+
     structures_vac = enumerator.generate(subs_vac)
     print(f"Generated {len(structures_vac)} unique structures (with vacancies/dummies).")
     for i, s in enumerate(structures_vac):

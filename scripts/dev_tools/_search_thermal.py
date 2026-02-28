@@ -2,11 +2,12 @@
 """Quick search: automotive thermal module metals."""
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 
 from atlas.data.jarvis_client import JARVISClient
 from atlas.data.property_estimator import PropertyEstimator
-import pandas as pd
 
 client = JARVISClient()
 est = PropertyEstimator()

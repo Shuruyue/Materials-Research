@@ -7,23 +7,21 @@ Optimizations:
 - Uses multiprocessing for fast graph construction.
 - Robust error handling and caching.
 """
+import multiprocessing
 import os
 import sys
-import torch
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
+
+import torch
 from jarvis.core.atoms import Atoms
 from jarvis.db.figshare import data as jdata
+from tqdm import tqdm
 
 # Add project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.config import get_config
+from atlas.models.graph_builder import CrystalGraphBuilder
 
 # Full 9-Property Matrix
 PROPERTY_MAP = {
@@ -43,7 +41,7 @@ def _worker(entry):
     try:
         atoms = Atoms.from_dict(entry["atoms"])
         structure = atoms.pymatgen_converter()
-        
+
         # Extract all 9 properties
         props = {}
         for jarvis_col, my_name in PROPERTY_MAP.items():
@@ -51,14 +49,14 @@ def _worker(entry):
             if val == "na" or val is None:
                 val = float("nan")
             props[my_name] = float(val)
-            
+
         # Build Graph (Expensive part)
         # 3-body=True is critical for Phase 2 E3NN models
         builder = CrystalGraphBuilder(cutoff=5.0, max_neighbors=12, compute_3body=True)
         graph = builder.structure_to_pyg(structure, **props)
         graph.jid = entry["jid"]
         return graph
-    except Exception as e:
+    except Exception:
         return None
 
 def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
@@ -66,7 +64,7 @@ def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
     save_dir = config.paths.processed_dir
     save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / "phase2_m3gnet_graphs.pt"
-    
+
     if save_path.exists() and limit is None:
         print(f"[OK] Found existing data at {save_path}")
         print("   Delete this file if you want to force regeneration.")
@@ -74,27 +72,27 @@ def process_data(dataset_name="dft_3d", limit=None, n_workers=None):
 
     print(f"Loading raw data from JARVIS ({dataset_name})...")
     data = jdata(dataset_name)
-    
+
     if limit:
         print(f"[WARN] Limiting to {limit} samples for testing")
         data = data[:limit]
-        
+
     n_workers = n_workers or max(1, multiprocessing.cpu_count() - 2)
     print(f"[INFO] Processing {len(data)} structures with {n_workers} workers...")
     print(f"   extracting ALL properties: {list(PROPERTY_MAP.values())}")
-    
+
     processed_graphs = []
-    
+
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_worker, entry): entry["jid"] for entry in data}
-        
+
         for future in tqdm(as_completed(futures), total=len(data), unit="cryst"):
             res = future.result()
             if res is not None:
                 processed_graphs.append(res)
-            
+
     print(f"[OK] Successfully processed {len(processed_graphs)}/{len(data)} graphs.")
-    
+
     print(f"Saving to {save_path}...")
     torch.save(processed_graphs, save_path)
     print("Done! Phase 2 data ready.")
@@ -105,7 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="Limit number of structures for testing")
     parser.add_argument("--workers", type=int, default=None, help="Number of CPU workers")
     args = parser.parse_args()
-    
+
     # Windows-safe multiprocessing
     multiprocessing.freeze_support()
     process_data(limit=args.limit, n_workers=args.workers)

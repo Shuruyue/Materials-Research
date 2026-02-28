@@ -14,14 +14,13 @@ Usage:
 """
 
 import argparse
-import torch
-import torch.nn as nn
 import json
+import sys
 import time
 from pathlib import Path
 
-import sys
-from pathlib import Path
+import torch
+import torch.nn as nn
 
 # Enhance module discovery (if not installed via pip -e .)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -30,13 +29,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 try:
     from atlas.config import get_config
+    from atlas.console_style import install_console_style
     from atlas.data.crystal_dataset import CrystalPropertyDataset
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
     from atlas.training.checkpoint import CheckpointManager
     from atlas.training.metrics import scalar_metrics
     from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-    from atlas.console_style import install_console_style
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -155,7 +154,7 @@ def main() -> int:
 
     # Stats
     stats = datasets["train"].property_statistics()
-    print(f"\n  Property statistics (train):")
+    print("\n  Property statistics (train):")
     for prop, s in stats.items():
         print(f"    {prop}: count={s['count']}, "
               f"mean={s['mean']:.3f}, std={s['std']:.3f}, "

@@ -16,7 +16,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 REPO_HEADING_RE = re.compile(r"^###\s+([A-Z]-\d{2})\s+\|\s+(.+?)(?:\s+\|\s+.+)?$")
 PAPER_HEADING_RE = re.compile(r"^###\s+((?:\d+|S)-\d{2})\s+\|\s+(.+)$")
 CATEGORY_RE = re.compile(r"^##\s+(.+)$")

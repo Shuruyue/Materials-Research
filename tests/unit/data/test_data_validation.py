@@ -1,13 +1,10 @@
 """Unit tests for atlas.data.data_validation."""
 
-import math
 
-import pytest
 
 from atlas.data.data_validation import (
-    _load_records_from_input,
-    TrustScore,
     ValidationReport,
+    _load_records_from_input,
     check_duplicates,
     check_leakage,
     check_outliers,
@@ -17,7 +14,6 @@ from atlas.data.data_validation import (
     compute_trust_score,
     validate_dataset,
 )
-
 
 # ---------------------------------------------------------------------------
 # Schema validation

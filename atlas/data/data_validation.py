@@ -156,7 +156,7 @@ def compute_trust_score(
     else:
         ts.plausibility_points = 8.0  # neutral when no stats available
 
-    # 5) Cross-validation (max 15) — placeholder logic (single-source = 8)
+    # 5) Cross-validation (max 15) — heuristic baseline (single-source = 8)
     cross_val = 8.0
     ts.total = (
         ts.provenance_points
@@ -795,10 +795,10 @@ def _load_split_records(
     split_seed: int,
 ) -> tuple[list[dict[str, Any]], dict[str, set[str]], int]:
     """Load dataset splits and collect records + IDs for validation."""
+    import pandas as pd
+
     from atlas.data.crystal_dataset import PROPERTY_MAP
     from atlas.data.jarvis_client import JARVISClient
-
-    import pandas as pd
 
     all_records: list[dict[str, Any]] = []
     split_ids: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}

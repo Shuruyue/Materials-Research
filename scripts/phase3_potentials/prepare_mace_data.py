@@ -28,8 +28,8 @@ from atlas.data.jarvis_client import JARVISClient
 
 def jarvis_to_ase_atoms(atoms_dict: dict, energy: float = None):
     """Convert a JARVIS atoms dict to an ASE Atoms object with energy info."""
-    from jarvis.core.atoms import Atoms as JAtoms
     from ase import Atoms as AseAtoms
+    from jarvis.core.atoms import Atoms as JAtoms
 
     jatoms = JAtoms.from_dict(atoms_dict)
 
@@ -46,7 +46,7 @@ def jarvis_to_ase_atoms(atoms_dict: dict, energy: float = None):
         ase_atoms.info["REF_energy"] = energy * n  # total energy (JARVIS gives per-atom)
         ase_atoms.info["config_type"] = "Default"
 
-        # Zero forces placeholder — JARVIS doesn't provide forces directly,
+        # Zero-force fallback — JARVIS doesn't provide forces directly,
         # but MACE can train on energy-only data
         from ase.calculators.singlepoint import SinglePointCalculator
         forces = np.zeros((n, 3))
@@ -94,7 +94,7 @@ def main():
     client = JARVISClient()
 
     # Load all materials
-    print(f"\n=== Preparing MACE Training Data ===")
+    print("\n=== Preparing MACE Training Data ===")
     print(f"  Target elements: {args.elements}")
     print(f"  Max structures:  {args.max}")
 
@@ -131,7 +131,7 @@ def main():
 
             atoms = jarvis_to_ase_atoms(row["atoms"], energy=energy)
             all_atoms.append(atoms)
-        except Exception as e:
+        except Exception:
             skipped += 1
 
     # Split: 80% train, 10% val, 10% test
@@ -155,15 +155,13 @@ def main():
     ase_write(str(val_file), val_atoms, format="extxyz")
     ase_write(str(test_file), test_atoms, format="extxyz")
 
-    elem_str = "_".join(sorted(args.elements))
-
-    print(f"\n=== Results ===")
+    print("\n=== Results ===")
     print(f"  Elements:     {args.elements}")
     print(f"  Total valid:  {n} (skipped {skipped})")
     print(f"  Train:        {len(train_atoms)} → {train_file}")
     print(f"  Validation:   {len(val_atoms)} → {val_file}")
     print(f"  Test:         {len(test_atoms)} → {test_file}")
-    print(f"\n[OK] MACE training data ready.")
+    print("\n[OK] MACE training data ready.")
 
 
 if __name__ == "__main__":

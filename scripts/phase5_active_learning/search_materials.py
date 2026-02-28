@@ -103,11 +103,9 @@ def main():
 
     args = parser.parse_args()
 
-    from atlas.config import get_config
     from atlas.data.jarvis_client import JARVISClient
     from atlas.data.property_estimator import PropertyEstimator
 
-    cfg = get_config()
     client = JARVISClient()
     estimator = PropertyEstimator()
 
@@ -222,7 +220,7 @@ def main():
         results.to_csv(args.save, index=False)
         print(f"\n  Saved {len(results)} results to {args.save}")
 
-    print(f"\n[OK] Search complete.")
+    print("\n[OK] Search complete.")
 
 
 if __name__ == "__main__":

@@ -31,14 +31,14 @@ def main():
 
     # Print statistics
     stats = db.stats()
-    print(f"\nDatabase Statistics:")
+    print("\nDatabase Statistics:")
     print(f"  Total materials: {stats['total']}")
-    print(f"\n  By topological class:")
+    print("\n  By topological class:")
     for cls, count in stats["by_class"].items():
         print(f"    {cls:8s}: {count}")
 
     # Show some queries
-    print(f"\n=== Sample Queries ===")
+    print("\n=== Sample Queries ===")
 
     ti = db.query(topo_class="TI")
     print(f"\n  Topological Insulators ({len(ti)}):")

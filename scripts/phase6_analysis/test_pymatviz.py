@@ -4,7 +4,6 @@ Test Pymatviz Integration
 
 import sys
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -23,15 +22,15 @@ except ImportError as e:
     print(f"Failed to import pymatviz: {e}")
     sys.exit(1)
 
-from pymatgen.core import Structure, Lattice
-from pymatviz import ptable_heatmap, count_elements
 import pandas as pd
+from pymatviz import ptable_heatmap
+
 
 def test_ptable_heatmap():
     print("\n--- Testing Periodic Table Heatmap ---")
     data = {"Fe": 10, "O": 20, "Ti": 5, "Sr": 5}
     series = pd.Series(data)
-    
+
     try:
         fig = ptable_heatmap(series)
         output_file = Path("ptable_heatmap.png")

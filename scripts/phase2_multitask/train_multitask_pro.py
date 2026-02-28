@@ -17,35 +17,33 @@ Usage:
 """
 
 import argparse
-import copy
+import json
 import os
+import sys
+import time
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-import numpy as np
-import json
-import time
-import pandas as pd
-from pathlib import Path
-import sys
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.crystal_dataset import (
-    CrystalPropertyDataset,
     PHASE2_PROPERTY_GROUP_CHOICES,
+    CrystalPropertyDataset,
     resolve_phase2_property_group,
 )
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.models.prediction_utils import forward_graph_model
-from atlas.training.metrics import scalar_metrics
-from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
-from atlas.training.filters import filter_outliers
 from atlas.training.checkpoint import CheckpointManager
+from atlas.training.filters import filter_outliers
+from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import MultiTargetNormalizer
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -89,7 +87,7 @@ class UncertaintyWeightedLoss(nn.Module):
             precision = torch.exp(-self.log_vars[i])
             total += precision * loss + self.log_vars[i]
         return total
-    
+
     def get_weights(self):
         return {p: round(float(torch.exp(-self.log_vars[i])), 4) for i, p in enumerate(PROPERTIES)}
 
@@ -237,26 +235,26 @@ def evaluate(model, loader, device, normalizer=None):
     model.eval()
     all_preds = {p: [] for p in PROPERTIES}
     all_targets = {p: [] for p in PROPERTIES}
-    
+
     for batch in loader:
         batch = batch.to(device)
         preds = forward_graph_model(model, batch)
-        
+
         for prop in PROPERTIES:
             if prop not in preds: continue
             target = getattr(batch, prop).view(-1, 1)
             mask = ~torch.isnan(target)
             if mask.sum() == 0: continue
-            
+
             target = target[mask].view(-1, 1)
             pred = preds[prop][mask].view(-1, 1)
-            
+
             if normalizer:
                 pred = normalizer.denormalize(prop, pred)
-                
+
             all_preds[prop].append(pred.cpu())
             all_targets[prop].append(target.cpu())
-            
+
     metrics = {}
     for prop in PROPERTIES:
         if all_preds[prop]:
@@ -312,12 +310,12 @@ def main() -> int:
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     print("=" * 66)
     print("E3NN PRO (Production Mode)")
     print(f"Property group: {selected_group} | Tasks: {len(PROPERTIES)}")
     print("=" * 66)
-    
+
     base_dir = config.paths.models_dir / "multitask_pro_e3nn"
     try:
         save_dir, created_new = resolve_run_dir(
@@ -363,11 +361,11 @@ def main() -> int:
         train_data = datasets["train"]
         val_data = datasets["val"]
         test_data = datasets["test"]
-    
+
     # 3. Normalizer
     print("\n[3/5] Normalizing Targets...")
     normalizer = MultiTargetNormalizer(train_data, PROPERTIES)
-    
+
     # Loaders
     from torch_geometric.loader import DataLoader
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
@@ -376,11 +374,11 @@ def main() -> int:
                             num_workers=0, pin_memory=True)
     test_loader = DataLoader(test_data, batch_size=args.batch_size,
                              num_workers=0, pin_memory=True)
-    
+
     print(f"\n[INFO] Device: {device}")
     if device == "cuda":
         print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
-    
+
     # 4. Model
     print("\n[4/5] Building E3NN (Large)...")
     encoder = EquivariantGNN(
@@ -416,7 +414,7 @@ def main() -> int:
         T_max=args.epochs,
         eta_min=args.lr * 0.01,
     )
-    
+
     start_epoch = 1
     best_val_mae = float('inf')
     history = {"train_loss": [], "val_mae": [], "weights": []}
@@ -428,11 +426,11 @@ def main() -> int:
         ckpt = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        loss_fn.load_state_dict(ckpt["loss_fn_state_dict"]) 
+        loss_fn.load_state_dict(ckpt["loss_fn_state_dict"])
         # Note: Scheduler state might be tricky if params changed, but we try
         try: scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         except Exception: print("    [WARN] Scheduler state mismatch, restarting scheduler")
-        
+
         start_epoch = ckpt["epoch"] + 1
         best_val_mae = ckpt["best_val_mae"]
         history = ckpt["history"]
@@ -441,7 +439,7 @@ def main() -> int:
 
     # 5. Train
     print(f"\n[5/5] Training for {args.epochs} epochs...")
-    
+
     manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
 
     last_epoch = start_epoch - 1
@@ -451,16 +449,15 @@ def main() -> int:
         last_epoch = epoch
         t0 = time.time()
         loss = train_epoch(model, loss_fn, train_loader, optimizer, device, normalizer)
-        
+
         val_metrics = evaluate(model, val_loader, device, normalizer)
         last_val_metrics = val_metrics
         val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
         avg_val_mae = sum(val_maes) / len(val_maes) if val_maes else float('inf')
-        
+
         # Scheduler step (CosineAnnealingLR steps per epoch, not on metric)
         scheduler.step()
-        current_lr = scheduler.get_last_lr()[0]
-        
+
         # Logging
         dt = time.time() - t0
         weights = loss_fn.get_weights()
@@ -473,17 +470,17 @@ def main() -> int:
             elif "gap" in p: short = "Gap"
             elif "bulk" in p: short = "Bulk"
             elif "shear" in p: short = "Shr"
-            
+
             val = val_metrics.get(f'{p}_MAE', 0)
             prop_log += f"{short}:{val:.3f} "
-            
+
         print(f"{log} | {prop_log}")
-        
+
         # Save History
         history["train_loss"].append(loss)
         history["val_mae"].append(avg_val_mae)
         history["weights"].append(weights)
-        
+
         # Checkpoint State
         state = {
             "epoch": epoch,
@@ -503,7 +500,7 @@ def main() -> int:
             best_epoch = epoch
             print(f"    * New Best! ({best_val_mae:.4f})")
             manager.save_best(state, best_val_mae, epoch)
-            
+
         # Save Checkpoint (Rotating last-k)
         manager.save_checkpoint(state, epoch)
 

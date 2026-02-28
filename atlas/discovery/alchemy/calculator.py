@@ -1,5 +1,6 @@
 
 import contextlib
+import logging
 from collections.abc import Sequence
 
 import ase
@@ -14,6 +15,8 @@ with contextlib.suppress(ImportError):
 
 # Import from our local ported module
 from .model import AlchemyManager, load_alchemical_model
+
+logger = logging.getLogger(__name__)
 
 
 class AlchemicalMACECalculator(Calculator):
@@ -31,7 +34,7 @@ class AlchemicalMACECalculator(Calculator):
         alchemical_weights: Sequence[float],
         device: str = "cpu",
         model_size: str = "medium",
-        model_path: str | None = None, # Allow loading custom checkpoint
+        model_path: str | None = None,  # Reserved custom checkpoint path.
     ):
         """
         Initialize the Alchemical MACE calculator.
@@ -42,7 +45,7 @@ class AlchemicalMACECalculator(Calculator):
             alchemical_weights: Initial weights for the alchemical species [0, 1].
             device: 'cpu' or 'cuda'.
             model_size: 'small', 'medium', or 'large' (default MACE-MP models).
-            model_path: Optional path to a specific model checkpoint.
+            model_path: Reserved for future custom checkpoint loading.
         """
         Calculator.__init__(self)
         self.results = {}
@@ -50,13 +53,15 @@ class AlchemicalMACECalculator(Calculator):
 
         # Load Model
         if model_path:
-             # TODO: Implement loading from specific path if needed
-             # For now, we default to the factory function for MACE-MP
-            raise NotImplementedError("Custom model path not yet supported in this port.")
-        else:
-            self.model = load_alchemical_model(
-                model_size=model_size, device=device
+            logger.warning(
+                "Custom model path is not supported yet (received: %s); "
+                "falling back to model_size='%s'.",
+                model_path,
+                model_size,
             )
+        self.model = load_alchemical_model(
+            model_size=model_size, device=device
+        )
 
         # Freeze model parameters (we only optimize alchemical weights or geometry)
         for param in self.model.parameters():

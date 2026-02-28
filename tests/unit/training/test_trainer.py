@@ -11,18 +11,14 @@ Tests the Trainer class core functionality:
 """
 
 import json
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from atlas.training.trainer import Trainer
-
 
 # ── Fixtures ──────────────────────────────────────────────────
 
@@ -187,7 +183,7 @@ class TestCheckpointing:
         trainer.history["train_loss"] = [1.0, 0.5, 0.3]
         trainer.history["val_loss"] = [1.1, 0.6, 0.4]
         trainer._save_history("test_history.json")
-        
+
         path = trainer.save_dir / "test_history.json"
         assert path.exists()
         with open(path) as f:

@@ -25,8 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.config import get_config
-from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 from atlas.console_style import install_console_style
+from atlas.training.run_utils import resolve_run_dir, write_run_manifest
 
 install_console_style()
 
@@ -123,7 +123,7 @@ def main() -> int:
 
     if not train_file.exists():
         print(f"\n  [ERROR] Training data not found at {train_file}")
-        print(f"  Run first: python scripts/phase3_potentials/prepare_mace_data.py")
+        print("  Run first: python scripts/phase3_potentials/prepare_mace_data.py")
         return 2
 
     # Count structures
@@ -158,7 +158,7 @@ def main() -> int:
     )
     print(f"  [INFO] Run manifest: {manifest_path}")
 
-    print(f"\n=== MACE Training Configuration ===")
+    print("\n=== MACE Training Configuration ===")
     print(f"  Cutoff (r_max):   {r_max} Angstrom")
     print(f"  Max L:            {mace_cfg.max_ell}")
     print(f"  Interactions:     {mace_cfg.num_interactions}")
@@ -202,7 +202,7 @@ def main() -> int:
     elif args.resume:
         print("  [WARN] MACE CLI does not expose --restart_latest in this environment.")
 
-    print(f"\n=== Starting MACE Training ===\n")
+    print("\n=== Starting MACE Training ===\n")
     print(f"  Command: {' '.join(mace_cmd[:6])} ...")
 
     try:

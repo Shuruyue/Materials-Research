@@ -3,8 +3,8 @@ Phase 2: Multi-task inference CLI for CIF files.
 """
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pandas as pd
 import torch
@@ -12,11 +12,12 @@ import torch
 # Add project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from jarvis.core.atoms import Atoms
+
 from atlas.data.crystal_dataset import DEFAULT_PROPERTIES
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.prediction_utils import extract_mean_and_std, forward_graph_model
 from atlas.models.utils import load_phase2_model
-from jarvis.core.atoms import Atoms
 
 PHASE2_MODEL_FAMILIES = (
     "multitask_lite_e3nn",
@@ -143,7 +144,6 @@ def main() -> int:
         default=Path("results.xlsx"),
         help="Output file path (.xlsx or .csv)",
     )
-    parser.add_argument("--test-random", action="store_true", help="Reserved placeholder")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent.parent
@@ -189,10 +189,6 @@ def main() -> int:
 
         if not df.empty:
             print("\n" + df.head().to_markdown(index=False, tablefmt="grid"))
-        return 0
-
-    if args.test_random:
-        print("Random validation sampling is not implemented in this CLI yet.")
         return 0
 
     parser.print_help()

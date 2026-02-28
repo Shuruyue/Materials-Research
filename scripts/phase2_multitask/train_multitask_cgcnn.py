@@ -13,32 +13,32 @@ Usage:
 """
 
 import argparse
-import copy
-import torch
-import torch.nn as nn
-import numpy as np
 import json
+import sys
 import time
 from pathlib import Path
 
-import sys
+import numpy as np
+import torch
+import torch.nn as nn
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.crystal_dataset import (
-    CrystalPropertyDataset,
     PHASE2_PROPERTY_GROUP_CHOICES,
+    CrystalPropertyDataset,
     resolve_phase2_property_group,
 )
 from atlas.models.cgcnn import CGCNN
 from atlas.models.m3gnet import M3GNet
-from atlas.models.multi_task import MultiTaskGNN, ScalarHead
+from atlas.models.multi_task import MultiTaskGNN
 from atlas.models.prediction_utils import forward_graph_model
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
-from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
+from atlas.training.normalizers import MultiTargetNormalizer
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -126,7 +126,7 @@ def filter_outliers(dataset, properties, n_sigma=8.0):
                     values.append(val)
                     valid_indices.append(i)
             except Exception: continue
-        
+
         if not values: continue
         arr = np.array(values)
         mean, std = arr.mean(), arr.std()
@@ -134,7 +134,7 @@ def filter_outliers(dataset, properties, n_sigma=8.0):
         if remove:
             print(f"    Outlier filter ({n_sigma}σ) for {prop}: removed {len(remove)} samples")
             indices_to_keep -= remove
-            
+
     return torch.utils.data.Subset(dataset, sorted(indices_to_keep))
 
 
@@ -152,7 +152,7 @@ class UncertaintyWeightedLoss(nn.Module):
         return total
 
     def get_weights(self):
-        return {p: {"sigma": round(float(torch.exp(0.5*self.log_vars[i])), 4)} 
+        return {p: {"sigma": round(float(torch.exp(0.5*self.log_vars[i])), 4)}
                 for i, p in enumerate(PROPERTIES)}
 
 
@@ -162,59 +162,59 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
     model.train()
     total_loss = 0
     n = 0
-    
+
     for batch in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
-        
+
         # CGCNN forward pass
         # Note: CGCNN expects edge_attr, not edge_vec
         predictions = forward_graph_model(model, batch)
-        
+
         task_losses = []
         valid_tasks = 0
-        
+
         for prop in PROPERTIES:
             if prop not in predictions: continue
-            
+
             target = getattr(batch, prop).view(-1, 1)
             pred = predictions[prop]
-            
+
             # Skip NaN
             valid_mask = ~torch.isnan(target).squeeze(-1)
             if valid_mask.sum() == 0: continue
-            
+
             target = target[valid_mask]
             pred = pred[valid_mask]
-            
+
             # Normalize
             if normalizer:
                 target_norm = normalizer.normalize(prop, target)
             else:
                 target_norm = target
-                
+
             loss = nn.functional.huber_loss(pred, target_norm, delta=1.0)
             if not (torch.isnan(loss) or torch.isinf(loss)):
                 task_losses.append(loss)
                 valid_tasks += 1
-                
+
         if valid_tasks == 0: continue
-        
+
         # Pad losses for unused tasks (to match loss_fn shape)
         while len(task_losses) < len(PROPERTIES):
             task_losses.append(torch.tensor(0.0, device=device))
-            
+
         loss = loss_fn(task_losses)
-        
+
         if torch.isnan(loss) or torch.isinf(loss): continue
-        
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()
-        
+
         total_loss += loss.item()
         n += 1
-        
+
     return total_loss / max(n, 1)
 
 
@@ -223,28 +223,28 @@ def evaluate(model, loader, device, normalizer=None):
     model.eval()
     all_preds = {p: [] for p in PROPERTIES}
     all_targets = {p: [] for p in PROPERTIES}
-    
+
     for batch in loader:
         batch = batch.to(device)
         predictions = forward_graph_model(model, batch)
-        
+
         for prop in PROPERTIES:
             if prop not in predictions: continue
             target = getattr(batch, prop).view(-1, 1)
             pred = predictions[prop]
-            
+
             valid_mask = ~torch.isnan(target).squeeze(-1)
             if valid_mask.sum() == 0: continue
-            
+
             target = target[valid_mask]
             pred = pred[valid_mask]
-            
+
             if normalizer:
                 pred = normalizer.denormalize(prop, pred)
-                
+
             all_preds[prop].append(pred.cpu())
             all_targets[prop].append(target.cpu())
-            
+
     metrics = {}
     for prop in PROPERTIES:
         if all_preds[prop]:
@@ -330,13 +330,13 @@ def main() -> int:
         if split != "train":
             ds = filter_outliers(ds, PROPERTIES)
         datasets[split] = ds
-        
+
     train_data = filter_outliers(datasets["train"], PROPERTIES)
-    
+
     # Normalizer
     print("\n[2/5] Computing normalization...")
     normalizer = MultiTargetNormalizer(train_data, PROPERTIES)
-    
+
     # Loaders
     # Loaders
     from torch_geometric.loader import DataLoader
@@ -346,10 +346,10 @@ def main() -> int:
                            num_workers=0, pin_memory=True)
     test_loader = DataLoader(datasets["test"], batch_size=args.batch_size,
                             num_workers=0, pin_memory=True)
-    
+
     # Model
     print(f"\n[3/5] Building Multi-Task {args.encoder.upper()}...")
-    
+
     # CGCNN Encoder
     class CGCNNEncoder(nn.Module):
         def __init__(
@@ -381,7 +381,7 @@ def main() -> int:
                 use_edge_gates=use_edge_gates,
             )
             self.hidden_dim = self.cgcnn.graph_dim
-            
+
         def encode(self, x, edge_index, edge_attr, batch):
             return self.cgcnn.encode(x, edge_index, edge_attr, batch)
 
@@ -434,7 +434,7 @@ def main() -> int:
             f"  - m3gnet: embed_dim={embed_dim}, "
             f"layers={preset['n-conv']}, n_rbf={preset['edge-dim']}"
         )
-    
+
     # Multi-Task Wrapper
     # Note: CGCNN.encode returns (B, hidden_dim)
     model = MultiTaskGNN(
@@ -442,7 +442,7 @@ def main() -> int:
         tasks={p: {"type": "scalar"} for p in PROPERTIES},
         embed_dim=embed_dim,
     ).to(device)
-    
+
     # Optim
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = UncertaintyWeightedLoss(len(PROPERTIES)).to(device)

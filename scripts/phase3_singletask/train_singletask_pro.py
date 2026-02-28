@@ -21,25 +21,26 @@ Legacy/scope note:
 
 import argparse
 import copy
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
-import json
-import time
-import numpy as np
-from pathlib import Path
-from torch.optim.swa_utils import AveragedModel, SWALR
+from torch.optim.swa_utils import SWALR, AveragedModel
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.crystal_dataset import CrystalPropertyDataset
-from atlas.models.equivariant import EquivariantGNN, LARGE_PRESET
+from atlas.models.equivariant import LARGE_PRESET, EquivariantGNN
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.metrics import scalar_metrics
 from atlas.training.normalizers import TargetNormalizer
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -157,7 +158,7 @@ def train_epoch(model, loader, optimizer, property_name, device,
     model.train()
     total_loss = 0
     n = 0
-    
+
     optimizer.zero_grad()
 
     for i, batch in enumerate(loader):
@@ -175,10 +176,10 @@ def train_epoch(model, loader, optimizer, property_name, device,
 
         # Forward
         pred = model(batch.x, batch.edge_index, batch.edge_vec, batch.batch)
-        
+
         # Loss (Huber is robust)
         loss = nn.functional.huber_loss(pred, target_norm, delta=0.5)
-        
+
         # Scale loss for accumulation
         loss = loss / acc_steps
 
@@ -191,11 +192,11 @@ def train_epoch(model, loader, optimizer, property_name, device,
         if (i + 1) % acc_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
-            
+
             # Update EMA only after optimizer step
             if ema is not None:
                 ema.update(model)
-                
+
             optimizer.zero_grad()
 
         total_loss += loss.item() * acc_steps * target.size(0)
@@ -272,7 +273,7 @@ def train_single_property(args, property_name: str) -> bool:
         )
 
     # ── Target Normalization ──
-    print(f"\n  [3/5] Computing target normalization...")
+    print("\n  [3/5] Computing target normalization...")
     normalizer = TargetNormalizer(datasets["train"], property_name)
 
     # Loaders
@@ -281,7 +282,7 @@ def train_single_property(args, property_name: str) -> bool:
     test_loader = datasets["test"].to_pyg_loader(batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     # ── Model ──
-    print(f"\n  [4/5] Building EquivariantGNN (Pro Tier)...")
+    print("\n  [4/5] Building EquivariantGNN (Pro Tier)...")
     model = EquivariantGNN(
         irreps_hidden=LARGE_PRESET["irreps"],
         max_ell=LARGE_PRESET["max_ell"],
@@ -303,7 +304,7 @@ def train_single_property(args, property_name: str) -> bool:
         encoder_dict.update(filtered_dict)
         model.load_state_dict(encoder_dict)
         print("  [OK] Encoder weights loaded successfully")
-        
+
         if args.freeze_encoder:
             print("  [INFO] Freezing encoder weights")
             for param in model.species_embed.parameters(): param.requires_grad = False
@@ -312,10 +313,10 @@ def train_single_property(args, property_name: str) -> bool:
 
     # EMA
     ema = EMA(model, decay=args.ema_decay) if args.ema_decay > 0 else None
-    
+
     # Optimizer
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
-    
+
     # Scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -328,7 +329,7 @@ def train_single_property(args, property_name: str) -> bool:
     # SWA
     swa_model = AveragedModel(model) if args.use_swa else None
     swa_scheduler = SWALR(optimizer, swa_lr=args.lr * 0.1) if args.use_swa else None
-    swa_start = int(args.epochs * 0.75) 
+    swa_start = int(args.epochs * 0.75)
 
     # ── Training ──
     print(f"\n  [5/5] Training for up to {args.epochs} epochs...")
@@ -396,7 +397,7 @@ def train_single_property(args, property_name: str) -> bool:
     for epoch in range(start_epoch, args.epochs + 1):
         last_epoch = epoch
         t_ep = time.time()
-        
+
         # SWA Phase Logic
         if args.use_swa and epoch >= swa_start:
             is_swa_phase = True
@@ -408,7 +409,7 @@ def train_single_property(args, property_name: str) -> bool:
             model, train_loader, optimizer, property_name, device,
             normalizer=normalizer, ema=ema, grad_clip=args.grad_clip, acc_steps=args.acc_steps
         )
-        
+
         if args.use_swa and is_swa_phase:
             swa_model.update_parameters(model)
             scheduler.step()
@@ -592,7 +593,7 @@ def train_single_property(args, property_name: str) -> bool:
         },
     )
 
-    print(f"\n[DONE] Training Complete.")
+    print("\n[DONE] Training Complete.")
     return True
 
 

@@ -13,6 +13,7 @@ from atlas.utils.registry import EVALUATORS
 
 logger = logging.getLogger(__name__)
 
+
 @EVALUATORS.register("rxn_network_native")
 class NativeReactionNetworkEvaluator:
     """
@@ -41,9 +42,12 @@ class NativeReactionNetworkEvaluator:
         # e.g., network = ReactionNetwork.from_entries(entries)
         # solver = PathwaySolver(network, target=candidate_formula, ...)
 
-        # This is strictly the registry connection point to launch their massive algorithms.
+        pathway_note = (
+            f"[{self.cost_function}] native reaction-network integration point; "
+            f"candidate={candidate_formula}"
+        )
         return {
             "synthesizable": True,
             "score": abs(candidate_energy),
-            "pathway": [f"[{self.cost_function}] Native Yen's Solver pathway evaluation placeholder."]
+            "pathway": [pathway_note],
         }

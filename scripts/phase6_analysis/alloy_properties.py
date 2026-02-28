@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.data.alloy_estimator import AlloyEstimator
 
-
 # Published experimental data for validation
 EXPERIMENTAL = {
     "SAC305": {
@@ -123,7 +122,7 @@ def compare_all(*, save_json: str | None = None):
 
     # Header
     print(f"\n{'═' * 90}")
-    print(f"  Alloy Properties Comparison")
+    print("  Alloy Properties Comparison")
     print(f"{'═' * 90}")
     print(f"\n  {'Property':25s}", end="")
     for name in estimators:

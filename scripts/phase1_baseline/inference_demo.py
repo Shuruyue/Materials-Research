@@ -22,20 +22,22 @@ Usage:
 
 import argparse
 import sys
-import torch
-import pandas as pd
 from pathlib import Path
-from tqdm import tqdm
+
+import pandas as pd
+import torch
 from jarvis.core.atoms import Atoms
+from tqdm import tqdm
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from torch_geometric.data import Batch
+
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.utils import load_phase1_model
-from torch_geometric.data import Batch
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core Inference Logic
@@ -50,20 +52,20 @@ class AtlasPredictor:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
-            
+
         self.model_dir = model_dir
         self.model = None
         self.builder = None
         self.normalizer = None
 
         self._load_model()
-        
+
     def _load_model(self):
         """Load checkpoint, normalizer, and rebuild model architecture."""
         checkpoint_path = self.model_dir / "best.pt"
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-            
+
         print(f"[INFO] Loading model from {self.model_dir.name} ({self.device})...")
         model, normalizer = load_phase1_model(checkpoint_path, device=self.device)
         self.model = model
@@ -74,7 +76,7 @@ class AtlasPredictor:
 
         # 2. Setup Graph Builder (Must match training settings)
         self.builder = CrystalGraphBuilder(cutoff=5.0, max_neighbors=12)
-        print(f"[INFO] Model loaded successfully.")
+        print("[INFO] Model loaded successfully.")
 
     def predict(self, atoms: Atoms) -> float:
         """
@@ -82,19 +84,19 @@ class AtlasPredictor:
         """
         # Convert to pymatgen (Standard Pipeline)
         structure = atoms.pymatgen_converter()
-        
+
         # Build Graph
         # We assign target_value=0.0 as a dummy holder
         data = self.builder.structure_to_pyg(structure, target=0.0)
-        
+
         # Batching (batch size=1)
         batch = Batch.from_data_list([data]).to(self.device)
-        
+
         with torch.no_grad():
             pred_norm = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
             # Denormalize
             pred_val = pred_norm.item() * self.normalizer["std"] + self.normalizer["mean"]
-            
+
         return pred_val
 
     def predict_batch(self, cif_paths: list) -> pd.DataFrame:
@@ -104,7 +106,7 @@ class AtlasPredictor:
         """
         results = []
         print(f"[INFO] Processing {len(cif_paths)} files...")
-        
+
         for path in tqdm(cif_paths):
             try:
                 atoms = Atoms.from_cif(str(path))
@@ -120,7 +122,7 @@ class AtlasPredictor:
                     "prediction": None,
                     "status": f"error: {str(e)}"
                 })
-        
+
         return pd.DataFrame(results)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,16 +135,16 @@ def main():
     parser.add_argument("--dir", type=Path, help="Directory containing CIF files for batch processing")
     parser.add_argument("--output", type=Path, default="predictions.csv", help="Output file for batch results")
     parser.add_argument("--test-random", action="store_true", help="Verify on random test sample")
-    
+
     args = parser.parse_args()
-    
+
 
     # Auto-detect model path (Find LATEST run)
     base_dir = PROJECT_ROOT / "models" / "cgcnn_pro_formation_energy"
-    
+
     # Check for run_XXXX subdirectories
     runs = sorted([d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("run_")])
-    
+
     if runs:
         model_dir = runs[-1]
         print(f"[INFO] Using latest run: {model_dir.name}")
@@ -166,7 +168,7 @@ def main():
         if not args.cif.exists():
             print(f"Error: File {args.cif} not found.")
             return
-        
+
         print(f"\n[INFO] Predicting for: {args.cif.name}")
         atoms = Atoms.from_cif(str(args.cif))
         val = predictor.predict(atoms)
@@ -177,14 +179,14 @@ def main():
         if not args.dir.exists():
             print(f"Error: Directory {args.dir} not found.")
             return
-            
+
         cifs = list(args.dir.glob("*.cif"))
         if not cifs:
             print(f"No .cif files found in {args.dir}")
             return
-            
+
         df = predictor.predict_batch(cifs)
-        
+
         # Smart Export (Excel or CSV)
         output_path = args.output
         if output_path.suffix == ".xlsx":
@@ -198,7 +200,7 @@ def main():
         else:
             df.to_csv(output_path, index=False)
             print(f"\n[OK] Saved {len(df)} predictions to CSV: {output_path}")
-            
+
         # Preview Results Table
         print("\n" + "="*50)
         print("PREVIEW RESULT (Top 5)")
@@ -212,24 +214,24 @@ def main():
         print("\n[INFO] Loading test dataset for verification...")
         ds = CrystalPropertyDataset(properties=["formation_energy"], split="test")
         ds.prepare()
-        
+
         import random
         idx = random.randint(0, len(ds)-1)
         sample = ds[idx]
-        
+
         # We need to reconstruct structure to go through the full pipeline
         # OR just confirm we can predict on PyG data directly.
         # Let's trust the loaded PyG graph which is ground truth here.
-        
+
         # However, to simulate 'inference', we should use the predictor's method
-        # but that takes 'Atoms'. 
+        # but that takes 'Atoms'.
         # For simplicity in this verificaiton mode, we stick to checking model output on graph.
-        
+
         batch = Batch.from_data_list([sample]).to(predictor.device)
         with torch.no_grad():
             pred_norm = predictor.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
             pred_val = pred_norm.item() * predictor.normalizer["std"] + predictor.normalizer["mean"]
-            
+
         actual = sample.formation_energy.item()
         print(f"\n[INFO] Random Test Sample (Index {idx})")
         print(f"   JID:       {getattr(sample, 'jid', 'unknown')}")

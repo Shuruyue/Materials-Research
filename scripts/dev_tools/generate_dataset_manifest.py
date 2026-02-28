@@ -10,9 +10,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
-import sys
 
 import pandas as pd
 
@@ -54,7 +54,7 @@ def _cache_file_for_split(
     props_key = "_".join(sorted(properties))
     filter_key = f"stab{stability_filter}" if stability_filter is not None else "nofilter"
     max_key = f"max{max_samples}" if max_samples else "full"
-    cache_hash = hashlib.md5(f"{props_key}_{filter_key}_{max_key}".encode("utf-8")).hexdigest()[:8]
+    cache_hash = hashlib.md5(f"{props_key}_{filter_key}_{max_key}".encode()).hexdigest()[:8]
     return cfg.paths.processed_dir / "multi_property" / f"{split}_{split_seed}_{cache_hash}.pt"
 
 

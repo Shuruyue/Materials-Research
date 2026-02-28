@@ -14,20 +14,18 @@ Usage:
 """
 
 import argparse
-import torch
-import numpy as np
 import json
+import sys
 from pathlib import Path
 
-import sys
+import numpy as np
+import torch
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from atlas.config import get_config
-from atlas.data.crystal_dataset import CrystalPropertyDataset, DEFAULT_PROPERTIES
+from atlas.data.crystal_dataset import DEFAULT_PROPERTIES, CrystalPropertyDataset
 from atlas.explain.gnn_explainer import GNNExplainerWrapper
 from atlas.explain.latent_analysis import LatentSpaceAnalyzer
-from atlas.training.metrics import scalar_metrics
-
 
 ELEMENT_NAMES = [
     "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
@@ -165,7 +163,7 @@ def gradient_alignment_analysis(model, loader, properties, save_dir, device="cud
             cos = torch.nn.functional.cosine_similarity(gi.unsqueeze(0), gj.unsqueeze(0)).item()
             cosine_matrix[i, j] = cos
 
-    print(f"\n    Gradient Cosine Similarity (positive = positive transfer):")
+    print("\n    Gradient Cosine Similarity (positive = positive transfer):")
     print(f"    {'':>20s}", end="")
     for name in names:
         print(f" {name[:8]:>10s}", end="")
@@ -202,7 +200,6 @@ def main():
                         help="Max samples for analysis (speed)")
     args = parser.parse_args()
 
-    config = get_config()
     model_dir = Path(args.model_dir)
     save_dir = model_dir / "analysis"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +227,7 @@ def main():
     )
     test_ds.prepare()
     test_loader = test_ds.to_pyg_loader(batch_size=64, shuffle=False)
+    print(f"  Prepared test batches: {len(test_loader)}")
 
     # The model must be reconstructed based on what was trained.
     # For now, provide guidance:

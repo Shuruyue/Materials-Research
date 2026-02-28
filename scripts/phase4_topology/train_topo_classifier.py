@@ -17,7 +17,6 @@ Usage:
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -25,16 +24,16 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.jarvis_client import JARVISClient
+from atlas.topology.classifier import CrystalGraphBuilder, TopoGNN
 from atlas.training.checkpoint import CheckpointManager
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.topology.classifier import CrystalGraphBuilder, TopoGNN
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -63,7 +62,7 @@ class TopoDataset(Dataset):
             graph["label"] = torch.FloatTensor([label])
             self._cache[idx] = graph
             return graph
-        except Exception as e:
+        except Exception:
             # Return a dummy graph on failure
             return {
                 "node_features": torch.zeros(1, 69),
@@ -129,7 +128,7 @@ def prepare_data(client: JARVISClient, max_samples: int = 5000):
     print(f"  Balanced dataset: {len(balanced)} ({n_each} each)")
 
     # Convert to pymatgen structures
-    print(f"  Converting to structures...")
+    print("  Converting to structures...")
     structures = []
     labels = []
     skipped = 0
@@ -349,8 +348,6 @@ def main() -> int:
     print(f"{'='*60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
-        t0 = time.time()
-
         train_loss, train_acc = train_epoch(
             model, train_loader, optimizer, criterion, device
         )
@@ -402,7 +399,7 @@ def main() -> int:
     )
 
     print(f"\n{'='*60}")
-    print(f"  RESULTS")
+    print("  RESULTS")
     print(f"{'='*60}")
     print(f"  Best epoch:     {best_epoch}")
     print(f"  Best val acc:   {best_val_acc:.1%}")
@@ -420,9 +417,9 @@ def main() -> int:
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
-    print(f"\n  Confusion Matrix:")
-    print(f"                   Predicted")
-    print(f"                  Triv  Topo")
+    print("\n  Confusion Matrix:")
+    print("                   Predicted")
+    print("                  Triv  Topo")
     print(f"  Actual Triv  | {tn:4d}  {fp:4d}")
     print(f"         Topo  | {fn:4d}  {tp:4d}")
     print(f"\n  Precision: {precision:.3f}")

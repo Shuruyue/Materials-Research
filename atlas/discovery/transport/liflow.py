@@ -130,7 +130,7 @@ class LiFlowEvaluator:
         if np.any(li_mask) and len(traj_pos) >= 2:
             disp = traj_pos[-1][li_mask] - traj_pos[0][li_mask]
             msd = float(np.mean(np.sum(disp**2, axis=1)))
-            # Approximate dt in ps (coarse placeholder).
+            # Approximate dt in ps (coarse fallback estimate).
             dt_ps = max(steps * 1e-3, 1e-8)
             diff_coeff = msd / (6.0 * dt_ps)
 

@@ -72,10 +72,9 @@ class CompositionOptimizer:
         # We need to call get_potential_energy to trigger calculate()
         # But we don't want to move atoms, so just call it.
         atoms = self.calc.atoms
-        if atoms is None or atoms.calc is None:
-             # Ensure linkage
-             if atoms is not None:
-                 atoms.calc = self.calc
+        if atoms is not None and atoms.calc is None:
+            # Ensure linkage.
+            atoms.calc = self.calc
 
         energy = atoms.get_potential_energy()
         grad = self.calc.results["alchemical_grad"] # numpy array

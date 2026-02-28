@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -61,7 +60,7 @@ def _collect_one(results_path: Path, tier: str, run_id: str) -> ResultRow | None
     if not results_path.exists():
         return None
 
-    with open(results_path, "r", encoding="utf-8") as f:
+    with open(results_path, encoding="utf-8") as f:
         payload = json.load(f)
 
     property_name = str(payload.get("property", "unknown"))

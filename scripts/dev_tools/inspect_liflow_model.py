@@ -1,14 +1,13 @@
 
-import sys
 import os
-import torch
-import numpy as np
+import sys
 
 # Add LiFlow to path
 ROOT_DIR = os.path.abspath(r"references/recisic/liflow")
 sys.path.append(ROOT_DIR)
 
 from liflow.model.modules import FlowModule
+
 
 def inspect_ckpt():
     ckpt_path = os.path.join(ROOT_DIR, "ckpt", "P_LGPS.ckpt")
@@ -21,7 +20,7 @@ def inspect_ckpt():
         model = FlowModule.load_from_checkpoint(ckpt_path, map_location="cpu")
         print("Model loaded.")
         print("Config Model Num Elements:", model.cfg.model.num_elements)
-        
+
         # Check atom_embedding
         if hasattr(model.model, "atom_embedding"):
             embedding = model.model.atom_embedding
@@ -30,7 +29,7 @@ def inspect_ckpt():
         else:
              print("model.model has no atom_embedding")
 
-        
+
     except Exception as e:
         print(f"Error: {e}")
 

@@ -14,35 +14,32 @@ Usage:
 """
 
 import argparse
-import copy
+import json
 import os
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-import numpy as np
-import json
-import time
-import pandas as pd
-from pathlib import Path
-import sys
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from atlas.config import get_config
+from atlas.console_style import install_console_style
 from atlas.data.crystal_dataset import (
-    CrystalPropertyDataset,
     PHASE2_PROPERTY_GROUP_CHOICES,
+    CrystalPropertyDataset,
     resolve_phase2_property_group,
 )
 from atlas.models.equivariant import EquivariantGNN
 from atlas.models.multi_task import MultiTaskGNN
 from atlas.models.prediction_utils import forward_graph_model
-from atlas.training.metrics import scalar_metrics
-from atlas.training.normalizers import TargetNormalizer, MultiTargetNormalizer
-from atlas.training.filters import filter_outliers
 from atlas.training.checkpoint import CheckpointManager
+from atlas.training.filters import filter_outliers
+from atlas.training.metrics import scalar_metrics
+from atlas.training.normalizers import MultiTargetNormalizer
 from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-from atlas.console_style import install_console_style
 
 install_console_style()
 
@@ -140,7 +137,7 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
         batch = batch.to(device)
         optimizer.zero_grad()
         preds = forward_graph_model(model, batch)
-        
+
         task_losses = []
         valid_tasks = 0
         for prop in PROPERTIES:
@@ -148,28 +145,28 @@ def train_epoch(model, loss_fn, loader, optimizer, device, normalizer=None, grad
             target = getattr(batch, prop).view(-1, 1)
             mask = ~torch.isnan(target)
             if mask.sum() == 0: continue
-            
+
             target = target[mask].view(-1, 1) # Fix view
             pred = preds[prop][mask].view(-1, 1)
-            
+
             if normalizer:
                 target_norm = normalizer.normalize(prop, target)
             else:
                 target_norm = target
-                
+
             loss = nn.functional.huber_loss(pred, target_norm, delta=1.0)
             if not torch.isnan(loss):
                 task_losses.append(loss)
                 valid_tasks += 1
-                
+
         if valid_tasks == 0: continue
-        
+
         while len(task_losses) < len(PROPERTIES):
             task_losses.append(torch.tensor(0.0, device=device))
-            
+
         loss = loss_fn(task_losses)
         if torch.isnan(loss): continue
-        
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
@@ -199,26 +196,26 @@ def evaluate(model, loader, device, normalizer=None):
     model.eval()
     all_preds = {p: [] for p in PROPERTIES}
     all_targets = {p: [] for p in PROPERTIES}
-    
+
     for batch in loader:
         batch = batch.to(device)
         preds = forward_graph_model(model, batch)
-        
+
         for prop in PROPERTIES:
             if prop not in preds: continue
             target = getattr(batch, prop).view(-1, 1)
             mask = ~torch.isnan(target)
             if mask.sum() == 0: continue
-            
+
             target = target[mask].view(-1, 1)
             pred = preds[prop][mask].view(-1, 1)
-            
+
             if normalizer:
                 pred = normalizer.denormalize(prop, pred)
-                
+
             all_preds[prop].append(pred.cpu())
             all_targets[prop].append(target.cpu())
-            
+
     metrics = {}
     for prop in PROPERTIES:
         if all_preds[prop]:
@@ -257,13 +254,13 @@ def main() -> int:
 
     config = get_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     print("=" * 66)
     print("E3NN STD (Dev Mode)")
     print("Balanced Performance / Resume Capability")
     print(f"Property group: {args.property_group} ({len(PROPERTIES)} tasks)")
     print("=" * 66)
-    
+
     base_dir = config.paths.models_dir / "multitask_std_e3nn"
     try:
         save_dir, created_new = resolve_run_dir(
@@ -301,11 +298,11 @@ def main() -> int:
     train_data = filter_outliers(datasets["train"], PROPERTIES, save_dir, n_sigma=4.0)
     val_data = filter_outliers(datasets["val"], PROPERTIES, save_dir, n_sigma=4.0)
     test_data = filter_outliers(datasets["test"], PROPERTIES, save_dir, n_sigma=4.0)
-    
+
     # 3. Normalizer
     print("\n[3/5] Normalizing Targets...")
     normalizer = MultiTargetNormalizer(train_data, PROPERTIES)
-    
+
     # Loaders
     from torch_geometric.loader import DataLoader
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
@@ -314,11 +311,11 @@ def main() -> int:
                             num_workers=0, pin_memory=True)
     test_loader = DataLoader(test_data, batch_size=args.batch_size,
                              num_workers=0, pin_memory=True)
-    
+
     print(f"\n[INFO] Device: {device}")
     if device == "cuda":
         print(f"[INFO] GPU: {torch.cuda.get_device_name()}")
-    
+
     # 4. Model
     print("\n[4/5] Building E3NN (Medium)...")
     encoder = EquivariantGNN(
@@ -354,7 +351,7 @@ def main() -> int:
         T_max=args.epochs,
         eta_min=args.lr * 0.01,
     )
-    
+
     start_epoch = 1
     best_val_mae = float('inf')
     history = {"train_loss": [], "val_mae": []}
@@ -378,7 +375,7 @@ def main() -> int:
 
     # 5. Train
     print(f"\n[5/5] Training for {args.epochs} epochs...")
-    
+
     manager = CheckpointManager(save_dir, top_k=args.top_k, keep_last_k=args.keep_last_k)
 
     last_epoch = start_epoch - 1
@@ -387,17 +384,16 @@ def main() -> int:
     for epoch in range(start_epoch, args.epochs + 1):
         last_epoch = epoch
         loss = train_epoch(model, loss_fn, train_loader, optimizer, device, normalizer)
-        
+
         # Validation
         val_metrics = evaluate(model, val_loader, device, normalizer)
         last_val_metrics = val_metrics
         val_maes = [val_metrics[f"{p}_MAE"] for p in PROPERTIES if f"{p}_MAE" in val_metrics]
         avg_val_mae = sum(val_maes) / len(val_maes) if val_maes else float('inf')
-        
+
         # Scheduler step (CosineAnnealingLR steps per epoch, not on metric)
         scheduler.step()
-        current_lr = scheduler.get_last_lr()[0]
-        
+
         # Print
         # Custom Format for cleaner log
         log_str = f"Epoch {epoch:3d} | Loss: {loss:.4f} | "
@@ -405,22 +401,22 @@ def main() -> int:
             key = f"{prop}_MAE"
             if key in val_metrics:
                 # Abbreviate property names
-                short_name = prop.split('_')[0][:4] 
+                short_name = prop.split('_')[0][:4]
                 if "energy" in prop: short_name = "En"
                 elif "gap" in prop: short_name = "Gap"
                 elif "bulk" in prop: short_name = "Bulk"
                 elif "shear" in prop: short_name = "Shr"
-                
+
                 log_str += f"{short_name}: {val_metrics[key]:.3f} | "
-        
+
         # Add LR
         log_str += f"LR: {optimizer.param_groups[0]['lr']:.2e}"
         print(log_str)
-        
+
         # Save History
         history["train_loss"].append(loss)
         history["val_mae"].append(avg_val_mae)
-        
+
         state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -438,7 +434,7 @@ def main() -> int:
             best_epoch = epoch
             print(f"    * New Best! ({best_val_mae:.4f})")
             manager.save_best(state, best_val_mae, epoch)
-            
+
         manager.save_checkpoint(state, epoch)
 
     best_path = save_dir / "best.pt"

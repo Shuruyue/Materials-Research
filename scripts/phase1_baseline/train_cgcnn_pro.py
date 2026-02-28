@@ -14,14 +14,13 @@ Usage:
 """
 
 import argparse
-import torch
-import torch.nn as nn
-import torch.nn.functional as F  # Added for functional calls if needed
 import json
+import sys
 import time
 from pathlib import Path
 
-import sys
+import torch
+import torch.nn as nn
 
 # Enhance module discovery
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -30,14 +29,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 try:
     from atlas.config import get_config
+    from atlas.console_style import install_console_style
     from atlas.data.crystal_dataset import CrystalPropertyDataset
     from atlas.models.cgcnn import CGCNN
     from atlas.models.graph_builder import CrystalGraphBuilder
+    from atlas.training.checkpoint import CheckpointManager
     from atlas.training.metrics import scalar_metrics
     from atlas.training.normalizers import TargetNormalizer
-    from atlas.training.checkpoint import CheckpointManager
     from atlas.training.run_utils import resolve_run_dir, write_run_manifest
-    from atlas.console_style import install_console_style
 except ImportError as e:
     print(f"Error: Could not import atlas package. ({e})")
     print("Please install the package in editable mode: pip install -e .")
@@ -46,7 +45,6 @@ except ImportError as e:
 install_console_style()
 
 import numpy as np
-
 
 # ── Literature benchmarks (JARVIS-DFT full dataset) ──
 BENCHMARKS = {
@@ -85,32 +83,31 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
     """
     values = []
     ids = []
-    
+
     # Extract values and JIDs
     for data in dataset:
         if hasattr(data, property_name):
             values.append(getattr(data, property_name).item())
             ids.append(getattr(data, "jid", "unknown"))
-            
+
     if not values:
         return dataset
 
-    import numpy as np
     import pandas as pd
-    
+
     arr = np.array(values)
     mean, std = arr.mean(), arr.std()
-    
+
     if std < 1e-8:
         return dataset
 
     mask = np.abs(arr - mean) <= n_sigma * std
     n_removed = (~mask).sum()
-    
+
     if n_removed > 0:
         print(f"    Outlier filter: removed {n_removed} samples "
               f"(|val - {mean:.2f}| > {n_sigma}*std = {n_sigma*std:.2f})")
-        
+
         # Save outliers for inspection (Critical for discovery)
         outlier_indices = np.where(~mask)[0]
         outlier_data = []
@@ -120,7 +117,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
                 "value": values[idx],
                 "distance_sigma": (values[idx] - mean) / std
             })
-        
+
         outlier_df = pd.DataFrame(outlier_data)
         outlier_file = save_dir / "outliers.csv"
         outlier_df.to_csv(outlier_file, index=False)
@@ -129,7 +126,7 @@ def filter_outliers(dataset, property_name, save_dir, n_sigma=4.0):
         from torch.utils.data import Subset
         indices = np.where(mask)[0].tolist()
         dataset = Subset(dataset, indices)
-        
+
     return dataset
 
 
@@ -351,7 +348,7 @@ def train_single_property(args, property_name: str):
     # ── Training ──
     print(f"\n  [3/3] Training for up to {args.epochs} epochs...")
     print(f"    Patience: {args.patience}")
-    print(f"    Strategy: OneCycleLR + GradClip(0.5)")
+    print("    Strategy: OneCycleLR + GradClip(0.5)")
     print("    Loss: Huber (delta=0.2) - robust to outliers")
     print("-" * 70)
 
@@ -375,7 +372,7 @@ def train_single_property(args, property_name: str):
         if normalizer_state:
             normalizer.mean = normalizer_state["mean"]
             normalizer.std = normalizer_state["std"]
-        
+
         start_epoch = checkpoint["epoch"] + 1
         history = checkpoint.get("history", history)
         best_val_mae = checkpoint.get("best_val_mae", float("inf"))

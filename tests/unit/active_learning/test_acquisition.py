@@ -1,7 +1,7 @@
 """Tests for acquisition strategy normalization and scoring."""
 
-import torch
 import pytest
+import torch
 
 from atlas.active_learning.acquisition import (
     DISCOVERY_ACQUISITION_STRATEGIES,
