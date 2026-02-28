@@ -236,8 +236,8 @@ class MetricsManager(torch.nn.ModuleDict):
         )  # normalize coefficients if not all None
 
         # convenient to cache metrics computed last for callbacks
-        self.metrics_values_step = {k: None for k in self.metrics.keys()}
-        self.metrics_values_epoch = {k: None for k in self.metrics.keys()}
+        self.metrics_values_step = dict.fromkeys(self.metrics.keys())
+        self.metrics_values_epoch = dict.fromkeys(self.metrics.keys())
 
     def forward(
         self,
@@ -249,7 +249,7 @@ class MetricsManager(torch.nn.ModuleDict):
         """
         Computes and accumulates metrics (intended for use at batch steps).
         """
-        self.metrics_values_step = {k: None for k in self.metrics.keys()}
+        self.metrics_values_step = dict.fromkeys(self.metrics.keys())
         if self.do_weighted_sum:
             weighted_sum = 0.0
         metric_dict = {}
@@ -325,7 +325,7 @@ class MetricsManager(torch.nn.ModuleDict):
         """
         Aggregates accumulated metrics (intended for use at the end of an epoch).
         """
-        self.metrics_values_epoch = {k: None for k in self.metrics.keys()}
+        self.metrics_values_epoch = dict.fromkeys(self.metrics.keys())
         if self.do_weighted_sum:
             weighted_sum = 0.0
         metric_dict = {}

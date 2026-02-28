@@ -67,7 +67,7 @@ class GNNExplainerWrapper:
             }
 
         except ImportError:
-            raise ImportError("torch_geometric.explain is required. Install PyG >= 2.3.0")
+            raise ImportError("torch_geometric.explain is required. Install PyG >= 2.3.0") from None
 
     def aggregate_bond_importance(
         self,

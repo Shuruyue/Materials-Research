@@ -72,7 +72,7 @@ def list_to_constant_dict(keys, value):
         raise ValueError(
             f"First argument must be a list, tuple, or ListConfig, got {type(keys)}"
         )
-    return {key: value for key in keys}
+    return dict.fromkeys(keys, value)
 
 
 def big_dataset_stats(name: str, cutoff_radius: float) -> Dict[str, Any]:

@@ -72,7 +72,7 @@ class TopoGNN(nn.Module):
         e = self.edge_embed(edge_feats)
 
         # Message passing
-        for mp, norm in zip(self.mp_layers, self.norms):
+        for mp, norm in zip(self.mp_layers, self.norms, strict=True):
             h_new = mp(h, edge_index, e)
             h = norm(h + h_new)  # residual + layernorm
 

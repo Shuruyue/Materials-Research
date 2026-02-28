@@ -57,7 +57,7 @@ class PymatgenTrajectoryReporter:
                 {
                     "energy": e,
                     "forces": f
-                } for e, f in zip(self.energies, self.forces)
+                } for e, f in zip(self.energies, self.forces, strict=False)
             ]
         )
         return traj

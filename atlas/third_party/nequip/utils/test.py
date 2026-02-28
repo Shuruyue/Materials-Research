@@ -202,7 +202,7 @@ def assert_AtomicData_equivariant(
     )
 
     # == Test rotation, parity, and translation using e3nn ==
-    irreps_in = {k: None for k in AtomicDataDict.ALLOWED_KEYS}
+    irreps_in = dict.fromkeys(AtomicDataDict.ALLOWED_KEYS)
     irreps_in.update(func.irreps_in)
     irreps_in = {k: v for k, v in irreps_in.items() if k in data_in[0]}
     irreps_out = func.irreps_out.copy()

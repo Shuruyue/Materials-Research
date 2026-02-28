@@ -42,7 +42,7 @@ class ReferenceDatabase:
         system_set = set(chemical_system)
         relevant = []
         for e in self.entries:
-            entry_elems = set(str(el) for el in e.composition.elements)
+            entry_elems = {str(el) for el in e.composition.elements}
             # Check if entry is subset of system
             if entry_elems.issubset(system_set):
                 relevant.append(e)

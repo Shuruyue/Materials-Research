@@ -328,7 +328,7 @@ class PerTypeScaleShift(GraphModuleMixin, torch.nn.Module):
             if sc_var is not None:
                 # preprocess to list if single number
                 if isinstance(sc_var, float) or isinstance(sc_var, int):
-                    sc_var = {name: sc_var for name in old.type_names}
+                    sc_var = dict.fromkeys(old.type_names, sc_var)
                 assert isinstance(sc_var, dict)
                 assert all(k in old.type_names for k in sc_var.keys()), (
                     f"Provided `{vname}` dict keys ({sc_var.keys()}) do not match the expected type names of the model ({old.type_names})."

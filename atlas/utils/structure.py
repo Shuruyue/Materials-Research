@@ -64,7 +64,7 @@ def get_element_info(structure) -> dict:
     """
     from pymatgen.core import Element
 
-    elements = list(set(str(site.specie) for site in structure))
+    elements = list({str(site.specie) for site in structure})
     atomic_numbers = [Element(e).Z for e in elements]
 
     # Heavy elements relevant for strong spin-orbit coupling (SOC)
@@ -79,7 +79,7 @@ def get_element_info(structure) -> dict:
         "avg_atomic_number": float(np.mean(atomic_numbers)),
         "atomic_numbers": atomic_numbers,
         "heavy_elements": [
-            e for e, z in zip(elements, atomic_numbers) if z >= heavy_threshold
+            e for e, z in zip(elements, atomic_numbers, strict=True) if z >= heavy_threshold
         ],
     }
 

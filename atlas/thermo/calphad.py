@@ -106,10 +106,7 @@ class CalphadCalculator:
         from pycalphad import equilibrium
         from pycalphad import variables as v
 
-        if isinstance(alloy, str):
-            comp = self.get_composition(alloy)
-        else:
-            comp = alloy
+        comp = self.get_composition(alloy) if isinstance(alloy, str) else alloy
 
         # Build conditions: T, P, N=1, X_i
         conditions = {v.T: T, v.P: 101325, v.N: 1}
@@ -126,16 +123,14 @@ class CalphadCalculator:
             Ph = result.Phase.squeeze()
 
             # Handle single point vs array (though here it's 1 point)
-            if Eq.ndim == 0: Eq = [float(Eq)]
-            else: Eq = Eq.values.tolist()
-            if Ph.ndim == 0: Ph = [str(Ph)]
-            else: Ph = Ph.values.tolist()
+            Eq = [float(Eq)] if Eq.ndim == 0 else Eq.values.tolist()
+            Ph = [str(Ph)] if Ph.ndim == 0 else Ph.values.tolist()
 
             stable_phases = []
             phase_fractions = {}
             phase_compositions = {} # TODO: Extract X for each phase if needed
 
-            for pname, frac in zip(Ph, Eq):
+            for pname, frac in zip(Ph, Eq, strict=False):
                 if pname and frac > 1e-4:
                     pname = str(pname)
                     stable_phases.append(pname)
@@ -242,7 +237,8 @@ class CalphadCalculator:
             # Let's try to extract phase fractions if possible
             if hasattr(res, 'cum_phase_amounts'):
                 for phase in self.all_phases:
-                    if phase == "LIQUID": continue
+                    if phase == "LIQUID":
+                        continue
                     if phase in res.cum_phase_amounts:
                         # Extract data
                         all_phase_data[phase] = np.array(res.cum_phase_amounts[phase])
@@ -327,11 +323,11 @@ class CalphadCalculator:
         sol_C = result.solidus_K - 273.15
 
         ax.annotate(f"T_liq: {liq_C:.0f}°C", xy=(liq_C, 1.0), xytext=(liq_C+10, 1.05),
-                    arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5))
+                    arrowprops={"facecolor": "black", "shrink": 0.05, "width": 1, "headwidth": 5})
 
         if result.solidus_K > 0 and result.solidus_K < 2000:
              ax.annotate(f"T_sol: {sol_C:.0f}°C", xy=(sol_C, 0.0), xytext=(sol_C-30, 0.05),
-                    arrowprops=dict(facecolor='red', shrink=0.05, width=1, headwidth=5))
+                    arrowprops={"facecolor": "red", "shrink": 0.05, "width": 1, "headwidth": 5})
 
         plt.tight_layout()
 
