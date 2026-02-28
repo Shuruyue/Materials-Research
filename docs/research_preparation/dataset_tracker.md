@@ -1,6 +1,6 @@
 # Open Dataset Survey for Crystal GNN and Uncertainty Quantification Research
 
-> **Project**: ATLAS — Adaptive Training and Learning for Atomic Structures  
+> **Project**: ATLAS — Accelerated Topological Learning And Screening  
 > **Author**: Zhong  
 > **Date**: 2026-02-27  
 > **Total Entries**: 25  
@@ -673,3 +673,4 @@ Every dataset used in ATLAS training must record:
 #### Protocol Shift 是 UQ 的下限
 
 > 同一材料在 MP、OQMD、AFLOW 之間的 formation energy 差異（因不同 DFT 設定）定義了**標籤噪聲下限** — 這是你的模型應報告的最低不確定性。
+

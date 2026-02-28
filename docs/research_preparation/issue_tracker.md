@@ -1,6 +1,6 @@
 # Open-Source Repository Issue Survey for Crystal GNN and Uncertainty Quantification Research
 
-> **Project**: ATLAS — Adaptive Training and Learning for Atomic Structures  
+> **Project**: ATLAS — Accelerated Topological Learning And Screening  
 > **Author**: Zhong  
 > **Date**: 2026-02-27  
 > **Total Entries**: 754  
@@ -1666,3 +1666,4 @@ repo:e3nn/e3nn is:issue sort:comments-desc
 | P2 | 所有 P2 輔助倉庫（24 個） | ~254 | 已完成 |
 | — | 無 issue 的倉庫（教學/索引類） | 0 | 不適用 |
 | | **總計** | **754** | **全部完成** |
+

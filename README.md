@@ -11,8 +11,9 @@ AI-driven workflow for materials ML research, focused on inorganic, metal, and s
 - Unit/integration tests are split and runnable with deterministic defaults.
 
 See:
-- `docs/PROJECT_STATUS.md`
-- `docs/TODO.md`
+- `docs/ROADMAP_ACADEMIC.md`
+- `docs/ROADMAP_PROJECT.md`
+- `docs/ARCHITECTURE_NAMING.md`
 
 ## Quick Start
 
@@ -81,6 +82,10 @@ python scripts/phase8_integration/run_phase8.py --level std
 
 # Full-project orchestrator
 python scripts/training/run_full_project.py --phase all --level std
+
+# Note: phase7 is intentionally reserved.
+# Legacy specialist path (not in full-project orchestration):
+# scripts/phase3_singletask/train_singletask_pro.py
 ```
 
 ## Project Layout
@@ -100,6 +105,7 @@ references/               # external research repos (gitignored by default)
 - `docs/YEAR1_AUDIT_PLAN.md`: public redacted audit checklist.
 - `docs/DATA_GOVERNANCE.md`: provenance, trust scoring, and split governance.
 - `docs/REPRODUCIBILITY.md`: run manifest and replay instructions.
+- `docs/ARCHITECTURE_NAMING.md`: phase/package naming contract and legacy-path policy.
 
 ## Governance Checks
 ```bash

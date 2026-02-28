@@ -1,6 +1,6 @@
 # Open-Source Repository Survey for Crystal GNN and Uncertainty Quantification Research
 
-> **Project**: ATLAS — Adaptive Training and Learning for Atomic Structures  
+> **Project**: ATLAS — Accelerated Topological Learning And Screening  
 > **Author**: Zhong  
 > **Date**: 2026-02-27  
 > **Total Entries**: 90  
@@ -1394,4 +1394,5 @@ All entries are Grade A or B. No filler entries included.
 | 8 | C-08 | tirtha-v/DPOSE-GNN | 直接的 UQ + GNN 競爭者 |
 | 9 | C-09 | AutoGNNUQ | 自動化 UQ 架構搜尋 |
 | 10 | A-06 | modl-uclouvain/modnet | Matbench 主要競爭者 |
+
 

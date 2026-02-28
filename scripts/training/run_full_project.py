@@ -4,6 +4,8 @@ Unified full-project orchestrator across Phase 1/2/3/4/5/6/8.
 
 This script provides a single entrypoint to launch the whole ATLAS workflow
 with consistent run ids, summaries, and failure handling.
+
+Phase 7 is intentionally reserved and is not part of the public orchestrated path.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ RUNNERS = {
 }
 
 PHASE_ORDER = ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase8"]
+RESERVED_PHASE_NOTE = "phase7 is intentionally reserved and not exposed as a runnable public phase."
 
 
 def _subprocess_env(args: argparse.Namespace) -> dict[str, str]:
@@ -255,7 +258,10 @@ def _write_summary(out_dir: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the full ATLAS project pipeline")
+    parser = argparse.ArgumentParser(
+        description="Run the full ATLAS project pipeline",
+        epilog=RESERVED_PHASE_NOTE,
+    )
     parser.add_argument("--phase", choices=["all", *PHASE_ORDER], default="all")
     parser.add_argument("--level", choices=["smoke", "lite", "std", "pro", "max"], default="std")
     parser.add_argument("--property", default="formation_energy")

@@ -1,6 +1,6 @@
 # Literature Survey for Crystal GNN and Uncertainty Quantification Research
 
-> **Project**: ATLAS — Adaptive Training and Learning for Atomic Structures  
+> **Project**: ATLAS — Accelerated Topological Learning And Screening  
 > **Author**: Zhong  
 > **Date**: 2026-02-27  
 > **Total Entries**: 200  
@@ -1807,3 +1807,4 @@ Based on ATLAS development roadmap:
 | 已掃讀 | 0 |
 | 精讀中 | 0 |
 | 精讀完 | 0 |
+

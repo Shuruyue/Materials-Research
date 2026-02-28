@@ -12,6 +12,11 @@ Full-scale training with NequIP-inspired equivariant architecture:
 - EMA (Exponential Moving Average) & SWA (Stochastic Weight Averaging)
 - 8σ outlier filtering for clean training data
 - Gradient Accumulation for large batch simulation
+
+Legacy/scope note:
+- This specialist script is retained for focused studies.
+- The public orchestrated Phase 3 path is `scripts/phase3_potentials/run_phase3.py`.
+- This script is not called by `scripts/training/run_full_project.py`.
 """
 
 import argparse
