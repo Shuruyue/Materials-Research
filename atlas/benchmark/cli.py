@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 
 from atlas.benchmark.runner import MatbenchRunner
+from atlas.training.preflight import run_preflight
 
 
 def _load_model(
@@ -63,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--folds", type=int, nargs="*", default=None, help="Specific folds to run")
     parser.add_argument("--output", type=str, default="", help="Output JSON path")
     parser.add_argument("--output-dir", type=str, default="", help="Report directory if --output omitted")
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--preflight-property-group", type=str, default="priority7")
+    parser.add_argument("--preflight-max-samples", type=int, default=0)
+    parser.add_argument("--preflight-split-seed", type=int, default=42)
+    parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -73,6 +80,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.list_tasks:
         for task, prop in MatbenchRunner.TASKS.items():
             print(f"{task}: default_property={prop}")
+        return 0
+
+    if args.skip_preflight and not args.dry_run:
+        print("[ERROR] --skip-preflight is only allowed together with --dry-run.")
+        return 2
+    if not args.skip_preflight:
+        project_root = Path(__file__).resolve().parents[2]
+        preflight = run_preflight(
+            project_root=project_root,
+            property_group=args.preflight_property_group,
+            max_samples=args.preflight_max_samples,
+            split_seed=args.preflight_split_seed,
+            dry_run=args.dry_run,
+        )
+        if preflight.return_code != 0:
+            print(f"[ERROR] Preflight failed with return code {preflight.return_code}")
+            return preflight.return_code
+    if args.preflight_only:
+        print("[Benchmark] Preflight-only mode completed.")
+        return 0
+    if args.dry_run:
+        print("[Benchmark] Dry run complete.")
         return 0
 
     if not args.task:
@@ -116,6 +145,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("RMSE (mean):", report["aggregate_metrics"].get("rmse_mean"))
     print("R2 (mean):", report["aggregate_metrics"].get("r2_mean"))
     print("Coverage (mean):", report["aggregate_metrics"].get("coverage_mean"))
+    print("PI95 Coverage (mean):", report["aggregate_metrics"].get("pi95_coverage_mean"))
+    print("Gaussian NLL (mean):", report["aggregate_metrics"].get("gaussian_nll_mean"))
     print("Report:", report.get("report_path"))
     return 0
 

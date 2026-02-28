@@ -13,6 +13,7 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from atlas.console_style import install_console_style
+from atlas.training.preflight import run_preflight
 
 install_console_style()
 
@@ -114,10 +116,15 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--max-samples": args.max_samples,
         "--hidden-dim": args.hidden_dim,
         "--n-conv": args.n_conv,
+        "--pooling": args.pooling,
+        "--jk": args.jk,
+        "--message-aggr": args.message_aggr,
     }
     for key, value in overrides.items():
         if value is not None:
             cmd.extend([key, str(value)])
+    if args.no_edge_gates:
+        cmd.append("--no-edge-gates")
 
     if args.run_id:
         cmd.extend(["--run-id", args.run_id])
@@ -152,11 +159,42 @@ def main() -> int:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=None)
     parser.add_argument("--n-conv", type=int, default=None)
+    parser.add_argument("--pooling", choices=["mean", "sum", "max", "mean_max", "attn"], default=None)
+    parser.add_argument("--jk", choices=["last", "mean", "concat"], default=None)
+    parser.add_argument("--message-aggr", choices=["sum", "mean"], default=None)
+    parser.add_argument("--no-edge-gates", action="store_true")
     parser.add_argument("--run-id", type=str, default=None)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--keep-last-k", type=int, default=3)
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--preflight-property-group", type=str, default="priority7")
+    parser.add_argument("--preflight-max-samples", type=int, default=0)
+    parser.add_argument("--preflight-split-seed", type=int, default=42)
+    parser.add_argument("--split-manifest", type=str, default=None)
+    parser.add_argument("--manifest-visibility", choices=["internal", "public"], default="internal")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if args.skip_preflight and not args.dry_run:
+        print("[ERROR] --skip-preflight is only allowed together with --dry-run.")
+        return 2
+
+    if not args.skip_preflight:
+        result = run_preflight(
+            project_root=PROJECT_ROOT,
+            property_group=args.preflight_property_group,
+            max_samples=args.preflight_max_samples,
+            split_seed=args.preflight_split_seed,
+            dry_run=args.dry_run,
+        )
+        if result.return_code != 0:
+            print(f"[ERROR] Preflight failed with return code {result.return_code}")
+            return result.return_code
+
+    if args.preflight_only:
+        print("[Phase1] Preflight-only mode completed.")
+        return 0
 
     cmd = build_command(args)
     print("[Phase1] Command:")
@@ -167,8 +205,19 @@ def main() -> int:
     if args.dry_run:
         print("[Phase1] Dry run only, not executing.")
         return 0
-
-    return subprocess.run(cmd, cwd=str(PROJECT_ROOT)).returncode
+    split_manifest = Path(args.split_manifest) if args.split_manifest else (
+        PROJECT_ROOT / "artifacts" / "splits" / "split_manifest_iid.json"
+    )
+    env = dict(os.environ)
+    if split_manifest.exists():
+        env["ATLAS_SPLIT_MANIFEST"] = str(split_manifest)
+    else:
+        print(f"[WARN] Split manifest not found, fallback to random split: {split_manifest}")
+        env.pop("ATLAS_SPLIT_MANIFEST", None)
+    env["ATLAS_MANIFEST_VISIBILITY"] = args.manifest_visibility
+    env.setdefault("ATLAS_DATASET_SOURCE_KEY", "jarvis_dft")
+    env.setdefault("ATLAS_DATASET_SNAPSHOT_ID", "jarvis_dft_primary")
+    return subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env).returncode
 
 
 if __name__ == "__main__":

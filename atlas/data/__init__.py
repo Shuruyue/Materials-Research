@@ -22,6 +22,17 @@ _EXPORTS = {
     "DATA_SOURCES": ("atlas.data.source_registry", "DATA_SOURCES"),
     "DataSourceRegistry": ("atlas.data.source_registry", "DataSourceRegistry"),
     "DataSourceSpec": ("atlas.data.source_registry", "DataSourceSpec"),
+    "validate_dataset": ("atlas.data.data_validation", "validate_dataset"),
+    "compute_trust_score": ("atlas.data.data_validation", "compute_trust_score"),
+    "ValidationReport": ("atlas.data.data_validation", "ValidationReport"),
+    "TrustScore": ("atlas.data.data_validation", "TrustScore"),
+    "TrustScoreBreakdown": ("atlas.data.data_validation", "TrustScoreBreakdown"),
+    "ProvenanceRecord": ("atlas.data.data_validation", "ProvenanceRecord"),
+    "iid_split": ("atlas.data.split_governance", "iid_split"),
+    "compositional_split": ("atlas.data.split_governance", "compositional_split"),
+    "prototype_split": ("atlas.data.split_governance", "prototype_split"),
+    "SplitManifest": ("atlas.data.split_governance", "SplitManifest"),
+    "SplitManifestV2": ("atlas.data.split_governance", "SplitManifestV2"),
 }
 
 __all__ = list(_EXPORTS.keys())

@@ -13,8 +13,11 @@ Optimization:
 # Workaround for WeightsUnpickler error with slice
 import contextlib
 import hashlib
+import json
 import logging
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -167,6 +170,9 @@ class CrystalPropertyDataset:
         split: str = "train",
         split_seed: int = 42,
         split_ratio: tuple = (0.8, 0.1, 0.1),
+        split_manifest_path: str | Path | None = None,
+        assignment_col: str = "split",
+        enforce_manifest_split: bool = True,
     ):
         self.properties = properties or DEFAULT_PROPERTIES
         self.max_samples = max_samples
@@ -174,6 +180,17 @@ class CrystalPropertyDataset:
         self.split = split
         self.split_seed = split_seed
         self.split_ratio = split_ratio
+        env_manifest = os.environ.get("ATLAS_SPLIT_MANIFEST", "").strip()
+        manifest_candidate = split_manifest_path
+        if manifest_candidate is None and env_manifest:
+            manifest_candidate = env_manifest
+        if manifest_candidate is None:
+            default_manifest = get_config().paths.artifacts_dir / "splits" / "split_manifest_iid.json"
+            if default_manifest.exists():
+                manifest_candidate = default_manifest
+        self.split_manifest_path = Path(manifest_candidate) if manifest_candidate else None
+        self.assignment_col = assignment_col
+        self.enforce_manifest_split = enforce_manifest_split
 
         self._data_list = None
         self._df = None
@@ -196,7 +213,12 @@ class CrystalPropertyDataset:
         props_key = "_".join(sorted(self.properties))
         filter_key = f"stab{self.stability_filter}" if self.stability_filter else "nofilter"
         max_key = f"max{self.max_samples}" if self.max_samples else "full"
-        cache_hash = hashlib.md5(f"{props_key}_{filter_key}_{max_key}".encode()).hexdigest()[:8]
+        manifest_key = (
+            str(self.split_manifest_path.resolve()) if self.split_manifest_path else "random_split"
+        )
+        cache_hash = hashlib.md5(
+            f"{props_key}_{filter_key}_{max_key}_{manifest_key}_{self.assignment_col}_{self.enforce_manifest_split}".encode()
+        ).hexdigest()[:8]
         cache_file = cache_dir / f"{self.split}_{self.split_seed}_{cache_hash}.pt"
 
         if not force_reload and cache_file.exists():
@@ -232,17 +254,7 @@ class CrystalPropertyDataset:
         print(f"  Filtered dataset: {len(df)} materials with valid properties")
 
         # Split
-        n = len(df)
-        np.random.seed(self.split_seed)
-        indices = np.random.permutation(n)
-        n_train = int(n * self.split_ratio[0])
-        n_val = int(n * self.split_ratio[1])
-
-        if self.split == "train": split_idx = indices[:n_train]
-        elif self.split == "val": split_idx = indices[n_train:n_train + n_val]
-        else: split_idx = indices[n_train + n_val:]
-
-        df_split = df.iloc[split_idx].reset_index(drop=True)
+        df_split = self._apply_split(df)
         self._df = df_split
         print(f"  {self.split} split: {len(df_split)} materials")
 
@@ -283,6 +295,102 @@ class CrystalPropertyDataset:
 
         self._data_list = data_list
         return self
+
+    def _apply_split(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply split assignment from manifest when available, otherwise use IID split."""
+        if self.split_manifest_path is not None:
+            assignment = self._load_manifest_assignment()
+            if "jid" not in df.columns:
+                if self.enforce_manifest_split:
+                    raise ValueError("Manifest split requested but dataset has no 'jid' column.")
+            else:
+                jid_series = df["jid"].astype(str)
+                mapped = jid_series.map(assignment)
+                missing_count = int(mapped.isna().sum())
+                if self.enforce_manifest_split and missing_count > 0:
+                    print(
+                        f"  [WARN] Manifest split active: dropping {missing_count} samples "
+                        "without assignment mapping."
+                    )
+                matched = df[mapped == self.split].copy()
+                if self.enforce_manifest_split and matched.empty:
+                    raise ValueError(
+                        f"Manifest split enforcement failed: split='{self.split}' has no matched samples."
+                    )
+                if not matched.empty:
+                    return matched.reset_index(drop=True)
+
+        n = len(df)
+        np.random.seed(self.split_seed)
+        indices = np.random.permutation(n)
+        n_train = int(n * self.split_ratio[0])
+        n_val = int(n * self.split_ratio[1])
+
+        if self.split == "train":
+            split_idx = indices[:n_train]
+        elif self.split == "val":
+            split_idx = indices[n_train:n_train + n_val]
+        else:
+            split_idx = indices[n_train + n_val:]
+
+        return df.iloc[split_idx].reset_index(drop=True)
+
+    def _load_manifest_assignment(self) -> dict[str, str]:
+        """Load sample_id -> split assignment from manifest-linked assignment file."""
+        manifest_path = self.split_manifest_path
+        if manifest_path is None:
+            return {}
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Split manifest not found: {manifest_path}")
+
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Invalid split manifest format: {manifest_path}")
+
+        strategy = str(manifest.get("split_strategy", "iid"))
+        metadata = manifest.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        candidates: list[Path] = []
+        csv_name = metadata.get("assignment_csv")
+        json_name = metadata.get("assignment_json")
+        if isinstance(csv_name, str) and csv_name:
+            candidates.append(manifest_path.parent / csv_name)
+        if isinstance(json_name, str) and json_name:
+            candidates.append(manifest_path.parent / json_name)
+        candidates.append(manifest_path.parent / f"split_assignment_{strategy}.csv")
+        candidates.append(manifest_path.parent / f"split_assignment_{strategy}.json")
+
+        for assignment_path in candidates:
+            if not assignment_path.exists():
+                continue
+            if assignment_path.suffix.lower() == ".csv":
+                table = pd.read_csv(assignment_path)
+                if "sample_id" not in table.columns or self.assignment_col not in table.columns:
+                    continue
+                return {
+                    str(sample_id): str(split_name)
+                    for sample_id, split_name in zip(table["sample_id"], table[self.assignment_col])
+                }
+            if assignment_path.suffix.lower() == ".json":
+                with open(assignment_path, encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, list):
+                    rows = [r for r in payload if isinstance(r, dict)]
+                    if not rows:
+                        continue
+                    return {
+                        str(row.get("sample_id")): str(row.get(self.assignment_col))
+                        for row in rows
+                        if row.get("sample_id") is not None and row.get(self.assignment_col) is not None
+                    }
+
+        raise FileNotFoundError(
+            f"Could not find assignment file for manifest: {manifest_path}. "
+            f"Tried: {', '.join(str(p) for p in candidates)}"
+        )
 
     def __len__(self) -> int:
         if self._data_list is None:
