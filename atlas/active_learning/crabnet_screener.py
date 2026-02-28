@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from atlas.utils.registry import MODELS
+
 
 class ResidualNetwork(nn.Module):
     """
@@ -20,6 +22,7 @@ class ResidualNetwork(nn.Module):
         for fc, res_fc, act in zip(self.fcs, self.res_fcs, self.acts):
             fea = act(fc(fea)) + res_fc(fea)
         return self.fc_out(fea)
+
 
 class FractionalEncoder(nn.Module):
     """
@@ -47,9 +50,6 @@ class FractionalEncoder(nn.Module):
         x = torch.clamp(x, min=1/self.resolution)
         frac_idx = torch.round(x * self.resolution).to(dtype=torch.long) - 1
         return self.pe[frac_idx]
-
-
-from atlas.utils.registry import MODELS
 
 
 @MODELS.register("crabnet_screener")

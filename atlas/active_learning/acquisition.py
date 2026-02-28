@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import torch
 
-
 ACQUISITION_ALIASES = {
     "ei": "ei",
     "expected_improvement": "ei",

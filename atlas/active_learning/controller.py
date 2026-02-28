@@ -176,7 +176,10 @@ class DiscoveryController:
             self.acquisition_jitter,
         )
 
-        self.results_dir = Path(results_dir) if results_dir is not None else (self.cfg.paths.data_dir / "discovery_results")
+        if results_dir is not None:
+            self.results_dir = Path(results_dir)
+        else:
+            self.results_dir = self.cfg.paths.data_dir / "discovery_results"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.workflow = None
         if self.method_key in {"workflow_reproducible_graph", "gp_active_learning"}:
@@ -294,7 +297,10 @@ class DiscoveryController:
             stage_timings["generate"] = time.time() - t_gen
 
             # Filter duplicates immediately
-            new_raw = [r for r in raw_candidates if r["structure"].composition.reduced_formula not in self.known_formulas]
+            new_raw = [
+                r for r in raw_candidates
+                if r["structure"].composition.reduced_formula not in self.known_formulas
+            ]
             print(f"        Generated {len(raw_candidates)}, New Unique: {len(new_raw)}")
 
             if not new_raw:
@@ -554,7 +560,7 @@ class DiscoveryController:
             gp_ucb = self.gp_acquirer.suggest_ucb(candidates)
             if gp_ucb is not None:
                 blend = self.gp_acquirer.config.blend_ratio
-                for c, gp_score in zip(candidates, gp_ucb):
+                for c, gp_score in zip(candidates, gp_ucb, strict=False):
                     c.acquisition_value = (1.0 - blend) * c.acquisition_value + blend * float(gp_score)
 
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
