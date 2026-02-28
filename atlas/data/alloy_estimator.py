@@ -35,6 +35,14 @@ class AlloyEstimator:
         self.convert_wt_to_vol(self.phases)
 
     @staticmethod
+    def _normalize_preset_key(preset: str) -> str:
+        return preset.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+
+    @classmethod
+    def available_presets(cls) -> tuple[str, ...]:
+        return ("SAC305", "SAC405", "SnPb63", "pure_Sn", "pure_Cu")
+
+    @staticmethod
     def convert_wt_to_vol(phases: list[AlloyPhase]):
         weights = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
         rho = np.array([max(p.get("density_g_cm3", 1e-6), 1e-6) for p in phases], dtype=float)
@@ -56,14 +64,17 @@ class AlloyEstimator:
 
     @classmethod
     def from_preset(cls, preset: str) -> AlloyEstimator:
-        key = preset.strip().lower()
+        key = cls._normalize_preset_key(preset)
         presets = {
             "sac305": cls._preset_sac305,
+            "sac405": cls._preset_sac405,
             "snpb63": cls._preset_snpb63,
-            "pure_sn": cls._preset_pure_sn,
+            "puresn": cls._preset_pure_sn,
+            "purecu": cls._preset_pure_cu,
         }
         if key not in presets:
-            raise ValueError(f"Unknown preset: {preset}")
+            names = ", ".join(cls.available_presets())
+            raise ValueError(f"Unknown preset: {preset}. Available presets: {names}")
         return presets[key]()
 
     @classmethod
@@ -102,6 +113,53 @@ class AlloyEstimator:
                     name="Ag",
                     formula="Ag",
                     weight_fraction=0.030,
+                    properties={
+                        "density_g_cm3": 10.49,
+                        "bulk_modulus_GPa": 100.0,
+                        "shear_modulus_GPa": 30.0,
+                        "thermal_conductivity_W_mK": 429.0,
+                        "thermal_expansion_1e6_K": 18.9,
+                        "melting_point_K": 1234.0,
+                    },
+                ),
+                AlloyPhase(
+                    name="Cu",
+                    formula="Cu",
+                    weight_fraction=0.005,
+                    properties={
+                        "density_g_cm3": 8.96,
+                        "bulk_modulus_GPa": 137.0,
+                        "shear_modulus_GPa": 48.3,
+                        "thermal_conductivity_W_mK": 401.0,
+                        "thermal_expansion_1e6_K": 16.5,
+                        "melting_point_K": 1358.0,
+                    },
+                ),
+            ],
+        )
+
+    @classmethod
+    def _preset_sac405(cls) -> AlloyEstimator:
+        return cls(
+            name="SAC405",
+            phases=[
+                AlloyPhase(
+                    name="Sn",
+                    formula="Sn",
+                    weight_fraction=0.955,
+                    properties={
+                        "density_g_cm3": 7.29,
+                        "bulk_modulus_GPa": 56.3,
+                        "shear_modulus_GPa": 18.4,
+                        "thermal_conductivity_W_mK": 66.0,
+                        "thermal_expansion_1e6_K": 22.0,
+                        "melting_point_K": 505.0,
+                    },
+                ),
+                AlloyPhase(
+                    name="Ag",
+                    formula="Ag",
+                    weight_fraction=0.040,
                     properties={
                         "density_g_cm3": 10.49,
                         "bulk_modulus_GPa": 100.0,
@@ -177,6 +235,27 @@ class AlloyEstimator:
                         "thermal_conductivity_W_mK": 66.0,
                         "thermal_expansion_1e6_K": 22.0,
                         "melting_point_K": 505.0,
+                    },
+                ),
+            ],
+        )
+
+    @classmethod
+    def _preset_pure_cu(cls) -> AlloyEstimator:
+        return cls(
+            name="pure_Cu",
+            phases=[
+                AlloyPhase(
+                    name="Cu",
+                    formula="Cu",
+                    weight_fraction=1.0,
+                    properties={
+                        "density_g_cm3": 8.96,
+                        "bulk_modulus_GPa": 137.0,
+                        "shear_modulus_GPa": 48.3,
+                        "thermal_conductivity_W_mK": 401.0,
+                        "thermal_expansion_1e6_K": 16.5,
+                        "melting_point_K": 1358.0,
                     },
                 ),
             ],

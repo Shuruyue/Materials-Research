@@ -96,6 +96,39 @@ def test_preset_pure_sn():
     assert abs(props["density_g_cm3"] - 7.29) < 0.1
 
 
+def test_preset_sac405():
+    """SAC405 preset should load and stay close to SAC family density."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+    est = AlloyEstimator.from_preset("SAC405")
+    props = est.estimate_properties()
+    assert 7.0 < props["density_g_cm3"] < 8.2
+
+
+def test_preset_pure_cu():
+    """Pure Cu should match single-phase reference values."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+    est = AlloyEstimator.from_preset("pure_Cu")
+    props = est.estimate_properties()
+    assert abs(props["density_g_cm3"] - 8.96) < 0.1
+    assert abs(props["melting_point_K"] - 1358.0) < 1.0
+
+
+def test_preset_alias_normalization():
+    """Preset aliases with separators/case should resolve correctly."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+    a = AlloyEstimator.from_preset("pure-cu")
+    b = AlloyEstimator.from_preset("PURE CU")
+    c = AlloyEstimator.from_preset("pure_cu")
+    assert a.name == b.name == c.name == "pure_Cu"
+
+
+def test_available_presets_contains_new_entries():
+    """available_presets should expose all supported named presets."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+    names = set(AlloyEstimator.available_presets())
+    assert {"SAC305", "SAC405", "SnPb63", "pure_Sn", "pure_Cu"}.issubset(names)
+
+
 def test_unknown_preset_raises():
     """Unknown preset should raise ValueError."""
     from atlas.data.alloy_estimator import AlloyEstimator
