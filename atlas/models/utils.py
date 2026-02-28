@@ -4,9 +4,9 @@ Model loading helpers for script-level inference utilities.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
-import re
 
 import torch
 

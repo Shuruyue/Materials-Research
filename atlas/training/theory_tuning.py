@@ -673,7 +673,12 @@ def _coerce(param: str, value: float, template: Any) -> Any:
         return int(round(value))
     if isinstance(template, float):
         return float(value)
-    if param in {"epochs", "batch-size", "max-samples", "acc-steps", "hidden-dim", "n-conv", "hidden", "n-estimators", "max-depth", "min-samples-leaf"}:
+    _INT_PARAMS = {
+        "epochs", "batch-size", "max-samples", "acc-steps",
+        "hidden-dim", "n-conv", "hidden", "n-estimators",
+        "max-depth", "min-samples-leaf",
+    }
+    if param in _INT_PARAMS:
         return int(round(value))
     return value
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 import torch
+import numpy as np
 from torch import nn
 from torch_geometric.data import Data
 
@@ -13,6 +14,7 @@ from atlas.benchmark import (
     MatbenchRunner,
     aggregate_fold_results,
     compute_regression_metrics,
+    compute_uncertainty_metrics,
 )
 from atlas.benchmark.cli import main as benchmark_cli_main
 
@@ -24,6 +26,16 @@ class _DummyModel(nn.Module):
         for idx in range(n_graphs):
             out[idx, 0] = x[batch == idx, 0].mean()
         return out
+
+
+class _DummyUncertainModel(nn.Module):
+    def forward(self, x, edge_index, edge_attr, batch):  # noqa: ARG002
+        n_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 1
+        out = torch.zeros((n_graphs, 1), dtype=x.dtype, device=x.device)
+        for idx in range(n_graphs):
+            out[idx, 0] = x[batch == idx, 0].mean()
+        std = torch.full_like(out, 0.1)
+        return {"formation_energy": {"mean": out, "std": std}}
 
 
 class _FakeTask:
@@ -50,6 +62,16 @@ def test_compute_regression_metrics_ignores_nan_pairs():
     assert metrics["mae"] == pytest.approx(1.0)
     assert metrics["rmse"] == pytest.approx(2.0**0.5)
     assert metrics["r2"] == pytest.approx(-1.0)
+
+
+def test_compute_uncertainty_metrics():
+    target = torch.tensor([1.0, 2.0, 3.0]).numpy()
+    pred = torch.tensor([1.1, 1.9, 3.2]).numpy()
+    std = torch.tensor([0.2, 0.2, 0.2]).numpy()
+    metrics = compute_uncertainty_metrics(target, pred, std)
+    assert metrics["avg_std"] == pytest.approx(0.2)
+    assert 0.0 <= metrics["pi95_coverage"] <= 1.0
+    assert np.isfinite(metrics["gaussian_nll"])
 
 
 def test_aggregate_fold_results():
@@ -89,6 +111,29 @@ def test_runner_run_task_writes_report(tmp_path):
     assert report["aggregate_metrics"]["coverage_mean"] == pytest.approx(2.0 / 3.0)
     assert report["aggregate_metrics"]["global_mae"] == pytest.approx(0.0)
     assert report["fold_results"][0]["status"] == "ok"
+
+
+def test_runner_uncertainty_outputs_are_reported(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyUncertainModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    runner.structure_to_data = lambda structure: None if structure == "bad" else _fake_data(structure)
+
+    report = runner.run_task(
+        task_name="fake_task_unc",
+        folds=[0],
+        show_progress=False,
+    )
+    agg = report["aggregate_metrics"]
+    assert agg["pi95_coverage_mean"] == pytest.approx(1.0)
+    assert np.isfinite(agg["gaussian_nll_mean"])
+    assert agg["global_pi95_coverage"] == pytest.approx(1.0)
 
 
 def test_benchmark_cli_list_tasks(capsys):

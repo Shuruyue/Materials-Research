@@ -312,7 +312,13 @@ def train_single_property(args, property_name: str) -> bool:
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     
     # Scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=args.sched_patience, factor=args.sched_factor, min_lr=args.min_lr, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        patience=args.sched_patience,
+        factor=args.sched_factor,
+        min_lr=args.min_lr,
+    )
 
     # SWA
     swa_model = AveragedModel(model) if args.use_swa else None

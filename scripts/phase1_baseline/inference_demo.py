@@ -23,8 +23,6 @@ Usage:
 import argparse
 import sys
 import torch
-import json
-import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
@@ -35,8 +33,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from atlas.models.cgcnn import CGCNN
 from atlas.models.graph_builder import CrystalGraphBuilder
+from atlas.models.utils import load_phase1_model
 from torch_geometric.data import Batch
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,8 +55,7 @@ class AtlasPredictor:
         self.model = None
         self.builder = None
         self.normalizer = None
-        self.hyperparams = {}
-        
+
         self._load_model()
         
     def _load_model(self):
@@ -68,37 +65,15 @@ class AtlasPredictor:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
             
         print(f"[INFO] Loading model from {self.model_dir.name} ({self.device})...")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        
-        # 1. Load Normalizer (Vital for correct units)
-        norm_state = checkpoint.get("normalizer", {})
-        self.normalizer = {
-            "mean": norm_state.get("mean", 0.0),
-            "std": norm_state.get("std", 1.0)
-        }
-        
+        model, normalizer = load_phase1_model(checkpoint_path, device=self.device)
+        self.model = model
+        if normalizer is not None:
+            self.normalizer = {"mean": normalizer.mean, "std": normalizer.std}
+        else:
+            self.normalizer = {"mean": 0.0, "std": 1.0}
+
         # 2. Setup Graph Builder (Must match training settings)
         self.builder = CrystalGraphBuilder(cutoff=5.0, max_neighbors=12)
-        
-        # 3. Rebuild Model
-        # Try to load hyperparams from results.json, else default to Pro
-        results_path = self.model_dir / "results.json"
-        if results_path.exists():
-            with open(results_path) as f:
-                res = json.load(f)
-                self.hyperparams = res.get("hyperparameters", {})
-        
-        self.model = CGCNN(
-            node_dim=self.builder.node_dim,
-            edge_dim=20,  # Must match training script (20)
-            hidden_dim=self.hyperparams.get("hidden_dim", 512),
-            n_conv=self.hyperparams.get("n_conv", 5),
-            output_dim=1,
-            dropout=0.0
-        ).to(self.device)
-        
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.model.eval()
         print(f"[INFO] Model loaded successfully.")
 
     def predict(self, atoms: Atoms) -> float:

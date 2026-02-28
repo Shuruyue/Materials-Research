@@ -49,6 +49,8 @@ benchmark = [
 
 [project.scripts]
 benchmark = "atlas.benchmark.cli:main"
+validate-data = "atlas.data.data_validation:main"
+make-splits = "atlas.data.split_governance:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

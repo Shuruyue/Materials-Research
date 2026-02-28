@@ -25,7 +25,8 @@ def rmse(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 def r2_score(pred: torch.Tensor, target: torch.Tensor) -> float:
     """Coefficient of determination (R²)."""
-    if len(target) < 2: return 0.0
+    if len(target) < 2:
+        return 0.0
     ss_res = ((target - pred) ** 2).sum()
     ss_tot = ((target - target.mean()) ** 2).sum() + 1e-8
     return (1 - ss_res / ss_tot).item()

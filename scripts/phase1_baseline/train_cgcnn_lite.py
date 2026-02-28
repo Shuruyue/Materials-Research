@@ -114,6 +114,10 @@ def main() -> int:
     # Lite Default: Small model
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--n-conv", type=int, default=2)
+    parser.add_argument("--pooling", choices=["mean", "sum", "max", "mean_max", "attn"], default="mean_max")
+    parser.add_argument("--jk", choices=["last", "mean", "concat"], default="concat")
+    parser.add_argument("--message-aggr", choices=["sum", "mean"], default="mean")
+    parser.add_argument("--no-edge-gates", action="store_true")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from latest checkpoint in selected run")
     parser.add_argument("--run-id", type=str, default=None,
@@ -183,6 +187,10 @@ def main() -> int:
         hidden_dim=args.hidden_dim,
         n_conv=args.n_conv,
         output_dim=1,
+        pooling=args.pooling,
+        jk=args.jk,
+        message_aggr=args.message_aggr,
+        use_edge_gates=not args.no_edge_gates,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -367,6 +375,10 @@ def main() -> int:
         "hyperparameters": {
             "hidden_dim": args.hidden_dim,
             "n_conv": args.n_conv,
+            "pooling": args.pooling,
+            "jk": args.jk,
+            "message_aggr": args.message_aggr,
+            "use_edge_gates": bool(not args.no_edge_gates),
             "lr": args.lr,
             "batch_size": args.batch_size,
             "patience": args.patience,

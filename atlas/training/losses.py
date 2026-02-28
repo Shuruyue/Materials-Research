@@ -118,10 +118,10 @@ class MultiTaskLoss(nn.Module):
         self.task_names = task_names
         self.strategy = strategy
         self.constraints = constraints or {}
-        self.task_types = task_types or {t: "regression" for t in task_names}
+        self.task_types = task_types or dict.fromkeys(task_names, "regression")
 
         if strategy == "fixed":
-            self.weights = task_weights or {t: 1.0 for t in task_names}
+            self.weights = task_weights or dict.fromkeys(task_names, 1.0)
         elif strategy == "uncertainty":
             # Learned log-variance per task
             self.log_vars = nn.ParameterDict({

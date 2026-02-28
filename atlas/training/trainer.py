@@ -46,10 +46,12 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         loss_fn: nn.Module,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
-        device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+        device: str | torch.device | None = None,
         save_dir: Path | None = None,
         use_amp: bool = True,
     ):
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.device_type = self.device.type
         self.model = model.to(self.device)
@@ -82,7 +84,10 @@ class Trainer:
             return self.model(batch)
 
         params = signature(self.model.forward).parameters
-        has = lambda name: name in params
+
+        def has(name: str) -> bool:
+            return name in params
+
         edge_attr = getattr(batch, "edge_attr", None)
         edge_vec = getattr(batch, "edge_vec", None)
         batch_index = getattr(batch, "batch", None)

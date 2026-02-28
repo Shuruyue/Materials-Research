@@ -319,6 +319,10 @@ def train_single_property(args, property_name: str):
         n_conv=args.n_conv,
         output_dim=1,
         dropout=args.dropout,
+        pooling=args.pooling,
+        jk=args.jk,
+        message_aggr=args.message_aggr,
+        use_edge_gates=not args.no_edge_gates,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -520,6 +524,10 @@ def train_single_property(args, property_name: str):
             "batch_size": args.batch_size,
             "weight_decay": args.weight_decay,
             "dropout": args.dropout,
+            "pooling": args.pooling,
+            "jk": args.jk,
+            "message_aggr": args.message_aggr,
+            "use_edge_gates": bool(not args.no_edge_gates),
             "loss": "huber_delta0.2",
             "optimizer": "AdamW",
             "scheduler": "OneCycleLR",
@@ -574,6 +582,11 @@ def main() -> int:
     parser.add_argument("--hidden-dim", type=int, default=512)
     parser.add_argument("--n-conv", type=int, default=5)
     parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--pooling", choices=["mean", "sum", "max", "mean_max", "attn"], default="mean_max")
+    parser.add_argument("--jk", choices=["last", "mean", "concat"], default="concat")
+    parser.add_argument("--message-aggr", choices=["sum", "mean"], default="mean")
+    parser.add_argument("--no-edge-gates", action="store_true",
+                        help="Disable edge-wise gating in message passing")
     parser.add_argument("--resume", action="store_true",
                         help="Resume training from latest checkpoint")
     parser.add_argument("--run-id", type=str, default=None,

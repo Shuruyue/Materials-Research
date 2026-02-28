@@ -5,11 +5,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
-from atlas.models.cgcnn import CGCNN
 from atlas.data.crystal_dataset import CrystalPropertyDataset
-from atlas.models.graph_builder import CrystalGraphBuilder
+from atlas.models.utils import load_phase1_model
 from atlas.training.metrics import scalar_metrics
-from atlas.training.normalizers import TargetNormalizer
 from torch_geometric.loader import DataLoader as PyGLoader
 import numpy as np
 
@@ -53,22 +51,11 @@ def main():
 
     # 2. Rebuild Model
     print("Rebuilding model...")
-    builder = CrystalGraphBuilder()
-    # Need to match training hyperparameters (hidden_dim=512, n_conv=5)
-    # We can try to infer or hardcode. The user script used 512/5.
-    model = CGCNN(
-        node_dim=builder.node_dim,
-        edge_dim=20,
-        hidden_dim=512, 
-        n_conv=5,
-        output_dim=1,
-    ).to(DEVICE)
-    
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    
-    normalizer = TargetNormalizer(checkpoint["normalizer"])
-    print(f"Normalizer loaded: mean={normalizer.mean:.4f}, std={normalizer.std:.4f}")
+    model, normalizer = load_phase1_model(MODEL_PATH, device=DEVICE)
+    if normalizer is None:
+        print("Normalizer missing in checkpoint. Using identity.")
+    else:
+        print(f"Normalizer loaded: mean={normalizer.mean:.4f}, std={normalizer.std:.4f}")
 
     # 3. Evaluate
     print("Evaluating...")
@@ -81,7 +68,7 @@ def main():
             pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
             target = getattr(batch, PROPERTY_NAME).view(-1, 1)
             
-            pred_denorm = normalizer.denormalize(pred)
+            pred_denorm = normalizer.denormalize(pred) if normalizer is not None else pred
             
             all_pred.append(pred_denorm.cpu())
             all_target.append(target.cpu())
@@ -96,9 +83,11 @@ def main():
     print("="*50)
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
-        
-    print(f"\nBest Epoch: {checkpoint['epoch']}")
-    print(f"Saved Validation MAE: {checkpoint['val_mae']:.4f}")
+
+    if isinstance(checkpoint, dict) and "epoch" in checkpoint:
+        print(f"\nBest Epoch: {checkpoint['epoch']}")
+    if isinstance(checkpoint, dict) and "val_mae" in checkpoint:
+        print(f"Saved Validation MAE: {checkpoint['val_mae']:.4f}")
 
 if __name__ == "__main__":
     main()

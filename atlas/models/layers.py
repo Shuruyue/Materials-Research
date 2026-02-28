@@ -9,6 +9,7 @@ Neural network layers for crystal property prediction:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class MessagePassingLayer(nn.Module):
@@ -19,13 +20,27 @@ class MessagePassingLayer(nn.Module):
     Used in CGCNN-style models where rotational equivariance is not required.
     """
 
-    def __init__(self, node_dim: int, edge_dim: int):
+    def __init__(
+        self,
+        node_dim: int,
+        edge_dim: int,
+        *,
+        aggr: str = "mean",
+        use_edge_gates: bool = True,
+    ):
         super().__init__()
+        if aggr not in {"sum", "mean"}:
+            raise ValueError(f"Unsupported aggregation: {aggr}")
+        self.aggr = aggr
+        self.use_edge_gates = use_edge_gates
+
+        msg_in = node_dim * 2 + edge_dim
         self.msg_mlp = nn.Sequential(
-            nn.Linear(node_dim + edge_dim, node_dim),
+            nn.Linear(msg_in, node_dim),
             nn.SiLU(),
             nn.Linear(node_dim, node_dim),
         )
+        self.gate_mlp = nn.Linear(msg_in, node_dim) if use_edge_gates else None
         self.update_mlp = nn.Sequential(
             nn.Linear(node_dim * 2, node_dim),
             nn.SiLU(),
@@ -47,15 +62,23 @@ class MessagePassingLayer(nn.Module):
             (N, node_dim) updated node features
         """
         src, dst = edge_index
-        msg_input = torch.cat([h[src], e], dim=-1)
+        msg_input = torch.cat([h[src], h[dst], e], dim=-1)
         messages = self.msg_mlp(msg_input)
+        if self.gate_mlp is not None:
+            gates = torch.sigmoid(self.gate_mlp(msg_input))
+            messages = messages * gates
 
         # Aggregate: sum messages per target node
         agg = torch.zeros_like(h)
         agg.index_add_(0, dst, messages)
+        if self.aggr == "mean":
+            deg = torch.zeros(h.size(0), device=h.device, dtype=h.dtype)
+            deg.index_add_(0, dst, torch.ones(dst.size(0), device=h.device, dtype=h.dtype))
+            agg = agg / deg.clamp_min(1.0).unsqueeze(-1)
 
         # Update
         h_new = self.update_mlp(torch.cat([h, agg], dim=-1))
+        h_new = F.silu(h_new)
         return h_new
 
 

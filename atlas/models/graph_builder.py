@@ -102,6 +102,8 @@ class CrystalGraphBuilder:
         self.cutoff = cutoff
         self.max_neighbors = max_neighbors
         self.compute_3body = compute_3body
+        # Backward-compatibility for scripts/tests that expect builder.ELEMENTS
+        self.ELEMENTS = tuple(_ELEMENTS)
 
     @property
     def node_dim(self) -> int:

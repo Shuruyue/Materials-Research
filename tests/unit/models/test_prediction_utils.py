@@ -122,6 +122,9 @@ def test_forward_graph_model_passes_optional_kwargs_when_supported():
     )
     assert "ok" in out
     assert model.seen["tasks"] == ["formation_energy"]
-    assert model.seen["edge_vectors"] is batch.edge_vec
+    # edge_vectors is intentionally NOT passed when edge_feats is already
+    # batch.edge_vec (equivariant path) to avoid duplicate data.
+    assert model.seen["edge_vectors"] is None
     assert model.seen["edge_index_3body"] is batch.edge_index_3body
     assert model.seen["encoder_kwargs"] == {"flag": 1}
+

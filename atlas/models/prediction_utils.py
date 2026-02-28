@@ -146,7 +146,9 @@ def forward_graph_model(
 
     if "tasks" in params and tasks is not None:
         call_kwargs["tasks"] = tasks
-    if "edge_vectors" in params and hasattr(batch, "edge_vec"):
+    if "edge_vectors" in params and hasattr(batch, "edge_vec") and edge_feats is not batch.edge_vec:
+        # Avoid passing duplicate edge-vector information when the 3rd positional
+        # argument is already edge_vec (common in EquivariantGNN/MultiTaskGNN paths).
         call_kwargs["edge_vectors"] = batch.edge_vec
     if "edge_index_3body" in params and hasattr(batch, "edge_index_3body"):
         call_kwargs["edge_index_3body"] = batch.edge_index_3body

@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from atlas.config import get_config
 from atlas.models.graph_builder import CrystalGraphBuilder
+from atlas.models.prediction_utils import extract_mean_and_std
 
 
 def _to_numeric_array(values: Sequence[Any]) -> np.ndarray:
@@ -49,6 +50,49 @@ def compute_regression_metrics(targets: np.ndarray, preds: np.ndarray) -> dict[s
     return {"mae": mae, "rmse": rmse, "r2": r2}
 
 
+def compute_uncertainty_metrics(
+    targets: np.ndarray,
+    preds: np.ndarray,
+    stds: np.ndarray | None,
+) -> dict[str, float]:
+    """
+    Compute uncertainty diagnostics on finite target/pred/std triplets.
+
+    Metrics are intentionally lightweight and dependency-free.
+    """
+    if stds is None:
+        return {}
+
+    mask = np.isfinite(targets) & np.isfinite(preds) & np.isfinite(stds) & (stds > 1e-12)
+    if mask.sum() == 0:
+        return {
+            "avg_std": np.nan,
+            "gaussian_nll": np.nan,
+            "pi90_coverage": np.nan,
+            "pi95_coverage": np.nan,
+            "pi95_miscalibration": np.nan,
+        }
+
+    y = targets[mask]
+    y_hat = preds[mask]
+    sigma = stds[mask]
+    err = y - y_hat
+
+    z90 = 1.6448536269514722
+    z95 = 1.959963984540054
+    pi90_cov = float(np.mean(np.abs(err) <= z90 * sigma))
+    pi95_cov = float(np.mean(np.abs(err) <= z95 * sigma))
+    gaussian_nll = float(np.mean(0.5 * np.log(2.0 * np.pi * sigma * sigma) + 0.5 * (err * err) / (sigma * sigma)))
+
+    return {
+        "avg_std": float(np.mean(sigma)),
+        "gaussian_nll": gaussian_nll,
+        "pi90_coverage": pi90_cov,
+        "pi95_coverage": pi95_cov,
+        "pi95_miscalibration": float(abs(pi95_cov - 0.95)),
+    }
+
+
 @dataclass
 class FoldResult:
     """Compact metrics for one benchmark fold."""
@@ -60,6 +104,11 @@ class FoldResult:
     mae: float = np.nan
     rmse: float = np.nan
     r2: float = np.nan
+    avg_std: float = np.nan
+    gaussian_nll: float = np.nan
+    pi90_coverage: float = np.nan
+    pi95_coverage: float = np.nan
+    pi95_miscalibration: float = np.nan
     runtime_sec: float = 0.0
     status: str = "ok"
     error: str = ""
@@ -73,7 +122,17 @@ def aggregate_fold_results(fold_results: Sequence[FoldResult]) -> dict[str, floa
         "total_test_samples": sum(r.n_test for r in fold_results),
         "total_valid_samples": sum(r.n_valid for r in fold_results),
     }
-    for key in ("mae", "rmse", "r2", "coverage"):
+    for key in (
+        "mae",
+        "rmse",
+        "r2",
+        "coverage",
+        "avg_std",
+        "gaussian_nll",
+        "pi90_coverage",
+        "pi95_coverage",
+        "pi95_miscalibration",
+    ):
         vals = np.array(
             [float(getattr(r, key)) for r in fold_results if np.isfinite(getattr(r, key))],
             dtype=np.float64,
@@ -168,7 +227,7 @@ class MatbenchRunner:
         except Exception:
             return None
 
-    def _predict_batch(self, batch) -> np.ndarray:
+    def _predict_batch(self, batch) -> tuple[np.ndarray, np.ndarray | None]:
         """Run model forward with resilient call signatures and output extraction."""
         call_variants = (
             lambda: self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch),
@@ -199,18 +258,12 @@ class MatbenchRunner:
                 keys = ", ".join(sorted(output.keys()))
                 raise KeyError(f"Property '{self.property_name}' not found in model output keys: {keys}")
 
-        if isinstance(output, dict):
-            if "gamma" in output:
-                output = output["gamma"]
-            elif "mu" in output:
-                output = output["mu"]
-            else:
-                keys = ", ".join(sorted(output.keys()))
-                raise KeyError(f"Unsupported nested output keys: {keys}")
-
-        if torch.is_tensor(output):
-            return output.detach().cpu().reshape(-1).numpy().astype(np.float64)
-        return np.asarray(output, dtype=np.float64).reshape(-1)
+        mean_t, std_t = extract_mean_and_std(output)
+        means = mean_t.detach().cpu().reshape(-1).numpy().astype(np.float64)
+        stds = None
+        if std_t is not None:
+            stds = std_t.detach().cpu().reshape(-1).numpy().astype(np.float64)
+        return means, stds
 
     def _convert_structures(self, structures: Sequence[Any], show_progress: bool) -> list[Any]:
         iterable: Iterable[Any] = tqdm(structures, leave=False, disable=not show_progress)
@@ -234,6 +287,7 @@ class MatbenchRunner:
 
         n_test = len(inputs)
         predictions = np.full(n_test, np.nan, dtype=np.float64)
+        pred_stds = np.full(n_test, np.nan, dtype=np.float64)
 
         converted = self._convert_structures(inputs, show_progress=show_progress)
         data_list = []
@@ -256,7 +310,7 @@ class MatbenchRunner:
                 status="no_valid_structures",
                 error="structure_to_data failed for all samples",
             )
-            return targets, predictions, result
+            return targets, predictions, pred_stds, result
 
         try:
             loader = DataLoader(data_list, batch_size=self.batch_size, shuffle=False)
@@ -264,11 +318,13 @@ class MatbenchRunner:
             with torch.no_grad():
                 for batch in loader:
                     batch = batch.to(self.device)
-                    batch_pred = self._predict_batch(batch)
+                    batch_pred, batch_std = self._predict_batch(batch)
 
                     n_graphs = int(getattr(batch, "num_graphs", len(batch_pred)))
                     if batch_pred.size == 1 and n_graphs > 1:
                         batch_pred = np.repeat(batch_pred, n_graphs)
+                    if batch_std is not None and batch_std.size == 1 and n_graphs > 1:
+                        batch_std = np.repeat(batch_std, n_graphs)
                     if batch_pred.size != n_graphs and batch_pred.size == batch.batch.numel():
                         batch_indices = batch.batch.detach().cpu().numpy()
                         reduced = []
@@ -276,17 +332,31 @@ class MatbenchRunner:
                             node_mask = batch_indices == g_idx
                             reduced.append(float(np.mean(batch_pred[node_mask])))
                         batch_pred = np.asarray(reduced, dtype=np.float64)
+                    if batch_std is not None and batch_std.size != n_graphs and batch_std.size == batch.batch.numel():
+                        batch_indices = batch.batch.detach().cpu().numpy()
+                        reduced_std = []
+                        for g_idx in range(n_graphs):
+                            node_mask = batch_indices == g_idx
+                            reduced_std.append(float(np.mean(batch_std[node_mask])))
+                        batch_std = np.asarray(reduced_std, dtype=np.float64)
                     if batch_pred.size != n_graphs:
                         raise ValueError(
                             f"Prediction size mismatch: got {batch_pred.size}, expected {n_graphs}"
                         )
+                    if batch_std is not None and batch_std.size != n_graphs:
+                        raise ValueError(
+                            f"Uncertainty size mismatch: got {batch_std.size}, expected {n_graphs}"
+                        )
 
                     idx_slice = valid_indices[cursor : cursor + n_graphs]
-                    for global_idx, pred in zip(idx_slice, batch_pred):
+                    for local_idx, (global_idx, pred) in enumerate(zip(idx_slice, batch_pred)):
                         predictions[global_idx] = float(pred)
+                        if batch_std is not None:
+                            pred_stds[global_idx] = float(batch_std[local_idx])
                     cursor += n_graphs
 
             metrics = compute_regression_metrics(targets, predictions)
+            uq_metrics = compute_uncertainty_metrics(targets, predictions, pred_stds)
             result = FoldResult(
                 fold=fold,
                 n_test=n_test,
@@ -295,9 +365,14 @@ class MatbenchRunner:
                 mae=metrics["mae"],
                 rmse=metrics["rmse"],
                 r2=metrics["r2"],
+                avg_std=uq_metrics.get("avg_std", np.nan),
+                gaussian_nll=uq_metrics.get("gaussian_nll", np.nan),
+                pi90_coverage=uq_metrics.get("pi90_coverage", np.nan),
+                pi95_coverage=uq_metrics.get("pi95_coverage", np.nan),
+                pi95_miscalibration=uq_metrics.get("pi95_miscalibration", np.nan),
                 runtime_sec=time.time() - t0,
             )
-            return targets, predictions, result
+            return targets, predictions, pred_stds, result
         except Exception as exc:
             result = FoldResult(
                 fold=fold,
@@ -308,7 +383,7 @@ class MatbenchRunner:
                 status="failed",
                 error=str(exc),
             )
-            return targets, predictions, result
+            return targets, predictions, pred_stds, result
 
     def run_fold(self, task, fold: int):
         """
@@ -317,7 +392,7 @@ class MatbenchRunner:
         Returns:
             tuple[np.ndarray, np.ndarray]: targets and predictions.
         """
-        targets, preds, _ = self._run_fold_details(task, fold, show_progress=True)
+        targets, preds, _, _ = self._run_fold_details(task, fold, show_progress=True)
         return targets, preds
 
     def _default_report_path(self, task_name: str) -> Path:
@@ -345,12 +420,14 @@ class MatbenchRunner:
         fold_results: list[FoldResult] = []
         all_targets: list[np.ndarray] = []
         all_preds: list[np.ndarray] = []
+        all_stds: list[np.ndarray] = []
 
         for fold in fold_ids:
-            targets, preds, fold_result = self._run_fold_details(task, fold, show_progress=show_progress)
+            targets, preds, stds, fold_result = self._run_fold_details(task, fold, show_progress=show_progress)
             fold_results.append(fold_result)
             all_targets.append(targets)
             all_preds.append(preds)
+            all_stds.append(stds)
 
         aggregate = aggregate_fold_results(fold_results)
         if all_targets and all_preds:
@@ -359,6 +436,12 @@ class MatbenchRunner:
             global_metrics = compute_regression_metrics(merged_targets, merged_preds)
             for key, value in global_metrics.items():
                 aggregate[f"global_{key}"] = value
+
+            if all_stds:
+                merged_stds = np.concatenate(all_stds)
+                global_uq = compute_uncertainty_metrics(merged_targets, merged_preds, merged_stds)
+                for key, value in global_uq.items():
+                    aggregate[f"global_{key}"] = value
 
         report = TaskReport(
             task_name=task_name,
