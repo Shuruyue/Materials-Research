@@ -1,38 +1,32 @@
-# YEAR1_AUDIT_PLAN
+# YEAR1_AUDIT_PLAN (Public Redacted)
 
-Audit-focused closeout plan for the remaining two months of Year 1.
+This public file keeps only the minimum audit-ready contract.
+Detailed reviewer timelines, internal checkpoints, and submission logistics are maintained in private planning records.
 
-## Timeline
-- Window: 2026-03-01 to 2026-04-30.
-- Goal: clear all P0 audit blockers before Year 2 starts.
-
-## P0 Closure Targets
-1. Hard gates are executable and enforced (`validate-data`).
-2. OOD split governance is deterministic and reproducible (`make-splits`).
-3. Preflight is mandatory for Phase 1/2/5, benchmark, full-project launcher.
+## Audit Definition of Done (Public)
+1. `validate-data` hard gates are executable and enforced.
+2. `make-splits` outputs deterministic manifests and assignments.
+3. Phase launchers/benchmark/full-project run mandatory preflight.
 4. Run manifest v2 is complete and strict-valid.
-5. Local RTX 3060 replay path is available end-to-end.
-6. Public artifact path is de-identified.
+5. Local replay path can run `validate -> split -> smoke` end-to-end.
+6. Public artifacts are de-identified.
 
-## Weekly Milestones
-- W1: schema/provenance hard-fail correctness.
-- W2: units and drift baseline checks.
-- W3: split manifest v2 and assignment hash stability.
-- W4: preflight mandatory integration.
-- W5: run_manifest v2 and strict validator.
-- W6: privacy redaction and public/internal artifact split.
-- W7: mock audit replay in clean environment.
-- W8: final submission bundle and evidence index.
+## Stage Checklist
+- Stage A: Data correctness gates and trust scoring are stable.
+- Stage B: Deterministic split governance is stable.
+- Stage C: Preflight enforcement is stable across all required launchers.
+- Stage D: Reproducibility manifests pass strict validation.
+- Stage E: Public artifact redaction and privacy checks pass.
 
-## Mandatory Evidence List
+## Minimum Evidence Bundle
 - `artifacts/validation_report.json`
 - `artifacts/splits/split_manifest_*.json`
 - `artifacts/splits/split_assignment_*.csv` (or `.json`)
-- phase smoke run logs with preflight enabled
-- strict run-manifest validation output
+- smoke run logs with preflight enabled
+- strict manifest validation output
 - limitations/failure-modes/domain-shift report block
-- public bundle redaction proof
+- privacy/redaction scan output
 
-## Privacy Rule for Audit and Open Release
-- Algorithms and code can be open.
-- Personal identifiers and internal infra details must not be in public artifacts.
+## Confidentiality Rule
+- Algorithms and implementation can be open.
+- Personal identifiers, internal infrastructure details, and internal review plans stay private.
