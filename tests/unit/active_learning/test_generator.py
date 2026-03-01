@@ -55,6 +55,11 @@ def test_generate_batch(generator):
         assert "structure" in cand
         assert "method" in cand
         assert "topo_score" in cand
+        assert "generator_score" in cand
+        assert "novelty_score" in cand
+        assert "feasibility_score" in cand
+        assert "selection_utility" in cand
+        assert "adaptive_weights" in cand
 
 
 def test_substitute_method(generator):
@@ -97,6 +102,9 @@ def test_heuristic_topo_score_range(generator):
     candidates = generator.generate_batch(n_candidates=20)
     for cand in candidates:
         assert 0.0 <= cand["topo_score"] <= 1.0
+        assert cand["generator_score"] >= 0.0
+        assert 0.0 <= cand["novelty_score"] <= 1.0
+        assert 0.0 <= cand["feasibility_score"] <= 1.0
 
 
 def test_add_seeds(generator):
@@ -118,9 +126,36 @@ def test_get_top_candidates(generator):
     top = generator.get_top_candidates(n=5)
     assert len(top) <= 5
 
-    # Should be sorted by topo_score descending
-    scores = [c["topo_score"] for c in top]
+    # Should be sorted by utility descending after diversity-aware ranking.
+    scores = [c.get("selection_utility", c.get("generator_score", c["topo_score"])) for c in top]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_adaptive_weights_are_normalized(generator):
+    generator.generate_batch(n_candidates=12)
+    weights = generator.last_adaptive_weights
+    assert set(weights.keys()) == {"topo", "novelty", "feasibility", "strain"}
+    assert abs(sum(weights.values()) - 1.0) < 1e-9
+    assert all(v >= 0.0 for v in weights.values())
+
+
+def test_substitution_stats_updates_after_generation(generator):
+    generator.generate_batch(n_candidates=8, methods=["substitute"])
+    assert len(generator.substitution_stats) > 0
+    any_count = any(v.get("count", 0.0) > 0.0 for v in generator.substitution_stats.values())
+    assert any_count
+
+
+def test_structure_fingerprint_distinguishes_polymorph_like_variants():
+    from pymatgen.core import Lattice, Structure
+    from atlas.active_learning.generator import _structure_fingerprint
+
+    cubic = Structure(Lattice.cubic(6.32), ["Sn", "Te"], [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])
+    tetr = Structure(Lattice.tetragonal(4.5, 7.1), ["Sn", "Te"], [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])
+    f1 = _structure_fingerprint(cubic)
+    f2 = _structure_fingerprint(tetr)
+    assert f1.shape == f2.shape
+    assert not (f1 == f2).all()
 
 
 def test_no_seeds_raises():
