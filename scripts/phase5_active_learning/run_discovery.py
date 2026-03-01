@@ -127,7 +127,7 @@ def main():
         type=str,
         default="hybrid",
         choices=sorted(DISCOVERY_ACQUISITION_STRATEGIES),
-        help="Acquisition strategy: hybrid/stability/ei/pi/ucb/lcb/thompson/mean/uncertainty",
+        help="Acquisition strategy (see choices)",
     )
     parser.add_argument(
         "--acq-kappa",

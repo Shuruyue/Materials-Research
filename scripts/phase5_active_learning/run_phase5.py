@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from atlas.console_style import install_console_style
+from atlas.active_learning.acquisition import DISCOVERY_ACQUISITION_STRATEGIES
 from atlas.training.preflight import run_preflight
 
 install_console_style()
@@ -114,7 +115,7 @@ def main() -> int:
     parser.add_argument(
         "--acq-strategy",
         type=str,
-        choices=["hybrid", "stability", "ei", "pi", "ucb", "lcb", "thompson", "mean", "uncertainty"],
+        choices=sorted(DISCOVERY_ACQUISITION_STRATEGIES),
         default=None,
         help="Discovery acquisition strategy",
     )

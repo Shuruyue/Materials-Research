@@ -17,11 +17,13 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from atlas.active_learning.acquisition import (
     DISCOVERY_ACQUISITION_STRATEGIES,
     normalize_acquisition_strategy,
+    schedule_ucb_kappa,
     score_acquisition,
 )
 from atlas.active_learning.generator import StructureGenerator
@@ -164,16 +166,38 @@ class DiscoveryController:
         self.acquisition_kappa = float(acquisition_kappa)
         self.acquisition_best_f = float(acquisition_best_f)
         self.acquisition_jitter = float(acquisition_jitter)
+        self.acquisition_kappa_schedule = str(
+            getattr(self.profile, "acquisition_kappa_schedule", "gp_ucb")
+        )
+        self.acquisition_kappa_min = float(getattr(self.profile, "acquisition_kappa_min", 1.0))
+        self.acquisition_kappa_decay = float(getattr(self.profile, "acquisition_kappa_decay", 0.08))
+        self.acquisition_ucb_delta = float(getattr(self.profile, "acquisition_ucb_delta", 0.1))
+        self.acquisition_ucb_dimension = int(getattr(self.profile, "acquisition_ucb_dimension", 1))
+        self.use_constrained_acquisition = bool(
+            getattr(self.profile, "use_constrained_acquisition", True)
+        )
+        self.use_noisy_ei = bool(getattr(self.profile, "use_noisy_ei", True))
+        self.noisy_ei_mc_samples = int(getattr(self.profile, "noisy_ei_mc_samples", 128))
+        self.batch_diversity_strength = float(getattr(self.profile, "batch_diversity_strength", 0.15))
+        self.batch_diversity_sigma = float(getattr(self.profile, "batch_diversity_sigma", 1.0))
         self._acquisition_generator = torch.Generator().manual_seed(int(self.cfg.train.seed) + 17)
         self.method_key = getattr(self.profile, "method_key", "graph_equivariant")
         self.fallback_methods = tuple(getattr(self.profile, "fallback_methods", ()))
         self.use_gp_active = self.method_key == "gp_active_learning"
         logger.info(
-            "Acquisition strategy: %s (kappa=%.3f, best_f=%.3f, jitter=%.4f)",
+            (
+                "Acquisition strategy: %s "
+                "(kappa=%.3f, schedule=%s, best_f=%.3f, jitter=%.4f, constrained=%s, "
+                "noisy_ei=%s, diversity_lambda=%.3f)"
+            ),
             self.acquisition_strategy,
             self.acquisition_kappa,
+            self.acquisition_kappa_schedule,
             self.acquisition_best_f,
             self.acquisition_jitter,
+            self.use_constrained_acquisition,
+            self.use_noisy_ei,
+            self.batch_diversity_strength,
         )
 
         if results_dir is not None:
@@ -269,6 +293,12 @@ class DiscoveryController:
                     "acquisition_kappa": self.acquisition_kappa,
                     "acquisition_best_f": self.acquisition_best_f,
                     "acquisition_jitter": self.acquisition_jitter,
+                    "acquisition_kappa_schedule": self.acquisition_kappa_schedule,
+                    "use_constrained_acquisition": self.use_constrained_acquisition,
+                    "use_noisy_ei": self.use_noisy_ei,
+                    "noisy_ei_mc_samples": self.noisy_ei_mc_samples,
+                    "batch_diversity_strength": self.batch_diversity_strength,
+                    "batch_diversity_sigma": self.batch_diversity_sigma,
                 }
             )
 
@@ -507,6 +537,8 @@ class DiscoveryController:
         """
         strategy = self.acquisition_strategy
         has_energy_uq = candidate.energy_mean is not None and candidate.energy_std is not None
+        kappa_t = self._current_acquisition_kappa()
+        obs_mean, obs_std = self._historical_energy_observations()
 
         if strategy == "stability":
             return float(candidate.stability_score)
@@ -518,17 +550,41 @@ class DiscoveryController:
         std = torch.tensor([float(candidate.energy_std)], dtype=torch.float32).clamp(min=1e-9)
 
         if strategy == "hybrid":
-            ei = score_acquisition(
+            if self.use_noisy_ei and obs_mean is not None:
+                # Noisy EI with Monte Carlo incumbent samples.
+                # Ref: Letham et al. (2019), https://arxiv.org/abs/1706.07094
+                log_nei = score_acquisition(
+                    mean,
+                    std,
+                    strategy="log_nei",
+                    best_f=self.acquisition_best_f,
+                    maximize=False,
+                    observed_mean=obs_mean,
+                    observed_std=obs_std,
+                    nei_mc_samples=self.noisy_ei_mc_samples,
+                    jitter=self.acquisition_jitter,
+                    kappa=kappa_t,
+                    kappa_schedule="fixed",
+                    iteration=self.iteration,
+                    generator=self._acquisition_generator,
+                )
+                return float(torch.exp(log_nei).item())
+
+            # LogEI is numerically more stable than EI in deep negative tails.
+            # Ref: Ament et al. (2023), https://arxiv.org/abs/2310.20708
+            log_ei = score_acquisition(
                 mean,
                 std,
-                strategy="ei",
+                strategy="log_ei",
                 best_f=self.acquisition_best_f,
                 maximize=False,
                 jitter=self.acquisition_jitter,
-                kappa=self.acquisition_kappa,
+                kappa=kappa_t,
+                kappa_schedule="fixed",
+                iteration=self.iteration,
                 generator=self._acquisition_generator,
             )
-            return float(ei.item() * 10.0)
+            return float(torch.exp(log_ei).item())
 
         acq = score_acquisition(
             mean,
@@ -537,10 +593,122 @@ class DiscoveryController:
             best_f=self.acquisition_best_f,
             maximize=False,
             jitter=self.acquisition_jitter,
-            kappa=self.acquisition_kappa,
+            kappa=kappa_t,
+            kappa_schedule=getattr(self, "acquisition_kappa_schedule", "fixed"),
+            iteration=getattr(self, "iteration", 1),
+            ucb_dimension=getattr(self, "acquisition_ucb_dimension", 1),
+            ucb_delta=getattr(self, "acquisition_ucb_delta", 0.1),
+            kappa_min=getattr(self, "acquisition_kappa_min", 1.0),
+            kappa_decay=getattr(self, "acquisition_kappa_decay", 0.08),
+            observed_mean=obs_mean if strategy in {"nei", "log_nei"} else None,
+            observed_std=obs_std if strategy in {"nei", "log_nei"} else None,
+            nei_mc_samples=getattr(self, "noisy_ei_mc_samples", 128),
             generator=self._acquisition_generator,
         )
+        if strategy in {"log_ei", "log_pi", "log_nei"}:
+            return float(torch.exp(acq).item())
         return float(acq.item())
+
+    def _current_acquisition_kappa(self) -> float:
+        """
+        Compute time-varying UCB kappa_t.
+
+        Ref:
+        - Srinivas et al. (2010), GP-UCB: https://arxiv.org/abs/0912.3995
+        """
+        return schedule_ucb_kappa(
+            iteration=getattr(self, "iteration", 1),
+            base_kappa=getattr(self, "acquisition_kappa", 2.0),
+            mode=getattr(self, "acquisition_kappa_schedule", "fixed"),
+            dimension=getattr(self, "acquisition_ucb_dimension", 1),
+            delta=getattr(self, "acquisition_ucb_delta", 0.1),
+            kappa_min=getattr(self, "acquisition_kappa_min", 1.0),
+            decay=getattr(self, "acquisition_kappa_decay", 0.08),
+        )
+
+    def _historical_energy_observations(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        means: list[float] = []
+        stds: list[float] = []
+        for c in self.top_candidates:
+            if c.energy_mean is None:
+                continue
+            means.append(float(c.energy_mean))
+            stds.append(float(c.energy_std) if c.energy_std is not None else 0.0)
+        if not means:
+            return None, None
+        return (
+            torch.tensor(means, dtype=torch.float32),
+            torch.tensor(stds, dtype=torch.float32),
+        )
+
+    @staticmethod
+    def _candidate_feature_vector(candidate: Candidate) -> np.ndarray:
+        energy = candidate.energy_mean
+        if energy is None:
+            energy = candidate.energy_per_atom
+        energy_std = candidate.energy_std if candidate.energy_std is not None else 0.0
+        return np.array(
+            [
+                float(candidate.topo_probability),
+                float(candidate.stability_score),
+                float(candidate.heuristic_topo_score),
+                float(candidate.novelty_score),
+                float(energy if energy is not None else 0.0),
+                float(energy_std),
+            ],
+            dtype=float,
+        )
+
+    def _select_top_diverse(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
+        """
+        Greedy diversity-aware batch selection (local-penalization style).
+
+        Reference:
+        - Gonzalez et al. (2016), Batch BO via Local Penalization:
+          https://proceedings.mlr.press/v51/gonzalez16a.html
+        """
+        if n_top <= 0:
+            return []
+        if len(candidates) <= n_top:
+            return list(candidates)
+
+        lam = max(0.0, float(getattr(self, "batch_diversity_strength", 0.0)))
+        if lam <= 0.0:
+            return list(candidates[:n_top])
+
+        sigma = max(1e-6, float(getattr(self, "batch_diversity_sigma", 1.0)))
+        base = np.asarray([float(c.acquisition_value) for c in candidates], dtype=float)
+        features = np.vstack([self._candidate_feature_vector(c) for c in candidates])
+        feat_std = features.std(axis=0, keepdims=True)
+        feat_std[feat_std < 1e-8] = 1.0
+        features = (features - features.mean(axis=0, keepdims=True)) / feat_std
+
+        scale = max(1e-6, float(np.std(base)))
+        penalty_weight = lam * scale
+
+        selected_idx: list[int] = [int(np.argmax(base))]
+        selected_mask = np.zeros(len(candidates), dtype=bool)
+        selected_mask[selected_idx[0]] = True
+
+        while len(selected_idx) < n_top:
+            best_i = -1
+            best_adj = -float("inf")
+            chosen_features = features[selected_idx]
+            for i in range(len(candidates)):
+                if selected_mask[i]:
+                    continue
+                d2 = np.sum((chosen_features - features[i]) ** 2, axis=1)
+                penalty = float(np.exp(-d2 / (2.0 * sigma * sigma)).max())
+                adjusted = float(base[i] - penalty_weight * penalty)
+                if adjusted > best_adj:
+                    best_adj = adjusted
+                    best_i = i
+            if best_i < 0:
+                break
+            selected_idx.append(best_i)
+            selected_mask[best_i] = True
+
+        return [candidates[i] for i in selected_idx]
 
     def _score_and_select(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
         for c in candidates:
@@ -548,37 +716,57 @@ class DiscoveryController:
             is_new = c.formula not in self.known_formulas
             c.novelty_score = 1.0 if is_new else 0.0
 
-            stability_term = self._stability_component(c)
-            c.acquisition_value = (
-                self.weights["topo"] * c.topo_probability +
-                self.weights["stability"] * stability_term +
-                self.weights["heuristic"] * c.heuristic_topo_score +
-                self.weights["novelty"] * c.novelty_score
-            )
+            stability_term = max(0.0, float(self._stability_component(c)))
+            topo_prob = max(0.0, min(1.0, float(c.topo_probability)))
+
+            if self.use_constrained_acquisition:
+                # Expected Improvement with Constraints (EIC) style composition:
+                # utility ~ objective_utility * feasibility_probability.
+                # Ref: Gardner et al. (2014), https://proceedings.mlr.press/v32/gardner14.html
+                constrained_stability = stability_term * topo_prob
+                c.acquisition_value = (
+                    self.weights["topo"] * topo_prob +
+                    self.weights["stability"] * constrained_stability +
+                    self.weights["heuristic"] * c.heuristic_topo_score +
+                    self.weights["novelty"] * c.novelty_score
+                )
+            else:
+                c.acquisition_value = (
+                    self.weights["topo"] * topo_prob +
+                    self.weights["stability"] * stability_term +
+                    self.weights["heuristic"] * c.heuristic_topo_score +
+                    self.weights["novelty"] * c.novelty_score
+                )
 
         if self.gp_acquirer is not None:
-            gp_ucb = self.gp_acquirer.suggest_ucb(candidates)
-            if gp_ucb is not None:
+            gp_utility = self.gp_acquirer.suggest_constrained_utility(candidates)
+            if gp_utility is None:
+                gp_utility = self.gp_acquirer.suggest_ucb(candidates)
+            if gp_utility is not None:
                 blend = self.gp_acquirer.config.blend_ratio
-                for c, gp_score in zip(candidates, gp_ucb, strict=False):
+                for c, gp_score in zip(candidates, gp_utility, strict=False):
                     c.acquisition_value = (1.0 - blend) * c.acquisition_value + blend * float(gp_score)
 
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
+        top = self._select_top_diverse(candidates, n_top)
+
+        selected_ids = {id(c) for c in top}
+        remaining = [c for c in candidates if id(c) not in selected_ids]
+        ranked = top + remaining
 
         # Register winners
-        top = candidates[:n_top]
         for c in top:
             self.known_formulas.add(c.formula)
             self.top_candidates.append(c)
 
         if self.gp_acquirer is not None:
-            self.gp_acquirer.update(candidates)
+            self.gp_acquirer.update(top)
 
         # Optional: Attempt to find a synthesis pathway using reaction-network logic
         if rx is not None:
             self._analyze_pathways(top)
 
-        return candidates
+        return ranked
 
     def _analyze_pathways(self, candidates: list[Candidate]):
         """
@@ -637,12 +825,24 @@ class DiscoveryController:
             "acquisition": {
                 "strategy": self.acquisition_strategy,
                 "kappa": self.acquisition_kappa,
+                "kappa_schedule": self.acquisition_kappa_schedule,
                 "best_f": self.acquisition_best_f,
                 "jitter": self.acquisition_jitter,
+                "constrained": self.use_constrained_acquisition,
+                "use_noisy_ei": self.use_noisy_ei,
+                "noisy_ei_mc_samples": self.noisy_ei_mc_samples,
+                "batch_diversity_strength": self.batch_diversity_strength,
+                "batch_diversity_sigma": self.batch_diversity_sigma,
             },
         }
         if self.gp_acquirer is not None:
             payload["gp_history_size"] = self.gp_acquirer.history_size
+            payload["gp_objective_history_size"] = getattr(
+                self.gp_acquirer, "objective_history_size", self.gp_acquirer.history_size
+            )
+            payload["gp_feasibility_history_size"] = getattr(
+                self.gp_acquirer, "feasibility_history_size", self.gp_acquirer.history_size
+            )
         fpath = self.results_dir / filename
         with open(fpath, "w") as f:
             json.dump(payload, f, indent=2, default=str)

@@ -6,14 +6,19 @@ import torch
 from atlas.active_learning.acquisition import (
     DISCOVERY_ACQUISITION_STRATEGIES,
     normalize_acquisition_strategy,
+    schedule_ucb_kappa,
     score_acquisition,
 )
 
 
 def test_strategy_normalization_aliases():
     assert normalize_acquisition_strategy("expected_improvement") == "ei"
+    assert normalize_acquisition_strategy("log-expected-improvement") == "log_ei"
     assert normalize_acquisition_strategy("upper-confidence-bound") == "ucb"
     assert normalize_acquisition_strategy("probability_of_improvement") == "pi"
+    assert normalize_acquisition_strategy("log_pi") == "log_pi"
+    assert normalize_acquisition_strategy("noisy_expected_improvement") == "nei"
+    assert normalize_acquisition_strategy("log_noisy_expected_improvement") == "log_nei"
     assert normalize_acquisition_strategy("thompson_sampling") == "thompson"
     assert normalize_acquisition_strategy("std") == "uncertainty"
 
@@ -67,6 +72,10 @@ def test_discovery_strategy_catalog_includes_hybrid_switch_modes():
     assert "hybrid" in DISCOVERY_ACQUISITION_STRATEGIES
     assert "stability" in DISCOVERY_ACQUISITION_STRATEGIES
     assert "ei" in DISCOVERY_ACQUISITION_STRATEGIES
+    assert "log_ei" in DISCOVERY_ACQUISITION_STRATEGIES
+    assert "log_pi" in DISCOVERY_ACQUISITION_STRATEGIES
+    assert "nei" in DISCOVERY_ACQUISITION_STRATEGIES
+    assert "log_nei" in DISCOVERY_ACQUISITION_STRATEGIES
 
 
 def test_score_acquisition_aligns_std_dtype_to_mean_dtype():
@@ -100,8 +109,113 @@ def test_expected_improvement_with_tiny_std_is_finite():
     assert score.item() >= 0.0
 
 
+def test_log_ei_stays_finite_in_extreme_negative_tail():
+    mean = torch.tensor([-100.0], dtype=torch.float64)
+    std = torch.tensor([1.0], dtype=torch.float64)
+    score = score_acquisition(mean, std, strategy="log_ei", maximize=True, best_f=0.0)
+    assert torch.isfinite(score).all()
+    assert score.item() < 0.0
+
+
+def test_log_ei_matches_ei_in_regular_regime():
+    mean = torch.tensor([0.7], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    ei = score_acquisition(mean, std, strategy="ei", maximize=True, best_f=0.3)
+    log_ei = score_acquisition(mean, std, strategy="log_ei", maximize=True, best_f=0.3)
+    assert torch.exp(log_ei).item() == pytest.approx(ei.item(), rel=1e-3, abs=1e-8)
+
+
+def test_log_pi_stays_finite_and_non_positive():
+    mean = torch.tensor([-80.0], dtype=torch.float64)
+    std = torch.tensor([1.0], dtype=torch.float64)
+    log_pi = score_acquisition(mean, std, strategy="log_pi", maximize=True, best_f=0.0)
+    assert torch.isfinite(log_pi).all()
+    assert log_pi.item() <= 0.0
+
+
+def test_nei_is_finite_with_observation_uncertainty():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    obs_mean = torch.tensor([-1.1, -0.9, -1.0], dtype=torch.float64)
+    obs_std = torch.tensor([0.05, 0.10, 0.08], dtype=torch.float64)
+    nei = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=obs_mean,
+        observed_std=obs_std,
+        nei_mc_samples=64,
+    )
+    assert torch.isfinite(nei).all()
+    assert nei.item() >= 0.0
+
+
+def test_log_nei_is_finite_with_observation_uncertainty():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    obs_mean = torch.tensor([-1.1, -0.9, -1.0], dtype=torch.float64)
+    obs_std = torch.tensor([0.05, 0.10, 0.08], dtype=torch.float64)
+    log_nei = score_acquisition(
+        mean,
+        std,
+        strategy="log_nei",
+        maximize=False,
+        observed_mean=obs_mean,
+        observed_std=obs_std,
+        nei_mc_samples=64,
+    )
+    assert torch.isfinite(log_nei).all()
+    assert log_nei.item() <= 0.0
+
+
+def test_nei_observation_std_shape_mismatch_raises():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    with pytest.raises(ValueError, match="same number of elements"):
+        score_acquisition(
+            mean,
+            std,
+            strategy="nei",
+            maximize=False,
+            observed_mean=torch.tensor([-1.0, -0.9], dtype=torch.float64),
+            observed_std=torch.tensor([0.1], dtype=torch.float64),
+        )
+
+
 def test_score_acquisition_supports_broadcast_shapes():
     mean = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float32)
     std = torch.tensor([[0.01, 0.02, 0.03, 0.04]], dtype=torch.float32)
     score = score_acquisition(mean, std, strategy="ucb", maximize=True, kappa=1.0)
     assert score.shape == (3, 4)
+
+
+def test_schedule_ucb_kappa_anneal_is_monotonic_decreasing():
+    k1 = schedule_ucb_kappa(1, base_kappa=3.0, mode="anneal", kappa_min=1.0, decay=0.2)
+    k10 = schedule_ucb_kappa(10, base_kappa=3.0, mode="anneal", kappa_min=1.0, decay=0.2)
+    assert k1 > k10
+    assert k10 >= 1.0
+
+
+def test_schedule_ucb_kappa_gp_ucb_grows_with_time():
+    k1 = schedule_ucb_kappa(1, base_kappa=2.0, mode="gp_ucb", dimension=1, delta=0.1, kappa_min=1.0)
+    k50 = schedule_ucb_kappa(50, base_kappa=2.0, mode="gp_ucb", dimension=1, delta=0.1, kappa_min=1.0)
+    assert k50 >= k1
+
+
+def test_score_acquisition_uses_dynamic_kappa_schedule():
+    mean = torch.tensor([0.5], dtype=torch.float64)
+    std = torch.tensor([0.1], dtype=torch.float64)
+    fixed = score_acquisition(mean, std, strategy="ucb", maximize=True, kappa=2.0, kappa_schedule="fixed", iteration=10)
+    annealed = score_acquisition(
+        mean,
+        std,
+        strategy="ucb",
+        maximize=True,
+        kappa=3.0,
+        kappa_schedule="anneal",
+        kappa_min=1.0,
+        kappa_decay=0.4,
+        iteration=10,
+    )
+    assert annealed.item() != pytest.approx(fixed.item())
