@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -65,6 +66,8 @@ class Candidate:
     stability_score: float = 0.0
     heuristic_topo_score: float = 0.0
     novelty_score: float = 0.0
+    synthesis_score: float = 0.0
+    synthesis_feasibility: float = 0.0
     acquisition_value: float = 0.0
 
     # Properties
@@ -199,6 +202,25 @@ class DiscoveryController:
         self.pareto_feasibility_threshold = float(getattr(self.profile, "pareto_feasibility_threshold", 0.05))
         self.use_hv_batch_greedy = bool(getattr(self.profile, "use_hv_batch_greedy", True))
         self.hv_batch_weight = float(getattr(self.profile, "hv_batch_weight", 0.35))
+        self.hv_mc_samples = int(getattr(self.profile, "hv_mc_samples", 4096))
+        self.hv_mc_seed = int(getattr(self.profile, "hv_mc_seed", int(self.cfg.train.seed) + 97))
+        self.hv_use_shared_samples = bool(getattr(self.profile, "hv_use_shared_samples", True))
+        self.hv_candidate_pool_limit = int(getattr(self.profile, "hv_candidate_pool_limit", 96))
+        self.hv_chunk_size = int(getattr(self.profile, "hv_chunk_size", 512))
+        self.use_synthesis_objective = bool(
+            getattr(self.profile, "use_synthesis_objective", self.synthesizability_evaluator is not None)
+        )
+        self.synthesis_objective_weight = float(getattr(self.profile, "synthesis_objective_weight", 0.15))
+        self.synthesis_eval_topk = int(getattr(self.profile, "synthesis_eval_topk", 128))
+        self.synthesis_gate_topo_threshold = float(getattr(self.profile, "synthesis_gate_topo_threshold", 0.20))
+        self.synthesis_score_floor = float(getattr(self.profile, "synthesis_score_floor", 0.0))
+        self.synthesis_eval_strategy = str(getattr(self.profile, "synthesis_eval_strategy", "hybrid_topk_uncertain"))
+        self.synthesis_uncertainty_weight = float(getattr(self.profile, "synthesis_uncertainty_weight", 0.35))
+        self.synthesis_cache_max_size = int(getattr(self.profile, "synthesis_cache_max_size", 50000))
+        self.pareto_joint_feasibility = bool(getattr(self.profile, "pareto_joint_feasibility", True))
+        self.pareto_synthesis_feasibility_threshold = float(
+            getattr(self.profile, "pareto_synthesis_feasibility_threshold", 0.10)
+        )
         self.enable_structure_dedup = bool(getattr(self.profile, "enable_structure_dedup", True))
         self.structure_matcher_ltol = float(getattr(self.profile, "structure_matcher_ltol", 0.2))
         self.structure_matcher_stol = float(getattr(self.profile, "structure_matcher_stol", 0.3))
@@ -226,7 +248,7 @@ class DiscoveryController:
                 "(kappa=%.3f, schedule=%s, best_f=%.3f, jitter=%.4f, constrained=%s, "
                 "noisy_ei=%s, diversity_lambda=%.3f, diversity_space=%s, "
                 "dynamic_best_f=%s, pareto_rank_bonus=%s, pareto_hv_bonus=%s, "
-                "hv_batch_greedy=%s, structure_dedup=%s)"
+                "hv_batch_greedy=%s, synthesis_objective=%s, structure_dedup=%s)"
             ),
             self.acquisition_strategy,
             self.acquisition_kappa,
@@ -241,6 +263,7 @@ class DiscoveryController:
             self.use_pareto_rank_bonus,
             self.use_pareto_hv_bonus,
             self.use_hv_batch_greedy,
+            self.use_synthesis_objective,
             self.enable_structure_dedup,
         )
 
@@ -260,6 +283,7 @@ class DiscoveryController:
         self.known_structures_by_formula: dict[str, list[object]] = {}
         self.all_candidates: list[Candidate] = []
         self.top_candidates: list[Candidate] = []
+        self._synthesis_cache: OrderedDict[tuple[str, float], dict] = OrderedDict()
 
         # Auto-load previous state
         self._load_checkpoint()
@@ -451,6 +475,18 @@ class DiscoveryController:
                     "pareto_feasibility_threshold": self.pareto_feasibility_threshold,
                     "use_hv_batch_greedy": self.use_hv_batch_greedy,
                     "hv_batch_weight": self.hv_batch_weight,
+                    "hv_mc_samples": self.hv_mc_samples,
+                    "hv_use_shared_samples": self.hv_use_shared_samples,
+                    "hv_candidate_pool_limit": self.hv_candidate_pool_limit,
+                    "use_synthesis_objective": self.use_synthesis_objective,
+                    "synthesis_objective_weight": self.synthesis_objective_weight,
+                    "synthesis_eval_topk": self.synthesis_eval_topk,
+                    "synthesis_gate_topo_threshold": self.synthesis_gate_topo_threshold,
+                    "synthesis_eval_strategy": self.synthesis_eval_strategy,
+                    "synthesis_uncertainty_weight": self.synthesis_uncertainty_weight,
+                    "synthesis_cache_max_size": self.synthesis_cache_max_size,
+                    "pareto_joint_feasibility": self.pareto_joint_feasibility,
+                    "pareto_synthesis_feasibility_threshold": self.pareto_synthesis_feasibility_threshold,
                     "enable_structure_dedup": self.enable_structure_dedup,
                 }
             )
@@ -801,6 +837,164 @@ class DiscoveryController:
         )
 
     @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            out = float(value)
+            if np.isfinite(out):
+                return out
+        except Exception:
+            pass
+        return float(default)
+
+    @staticmethod
+    def _clip01(x: float) -> float:
+        return float(max(0.0, min(1.0, x)))
+
+    def _candidate_energy_value(self, candidate: Candidate) -> float:
+        if candidate.energy_mean is not None:
+            return self._safe_float(candidate.energy_mean, 0.0)
+        if candidate.energy_per_atom is not None:
+            return self._safe_float(candidate.energy_per_atom, 0.0)
+        return 0.0
+
+    def _synthesis_cache_key(self, candidate: Candidate) -> tuple[str, float]:
+        formula = str(getattr(candidate, "formula", "")).strip()
+        energy = round(self._candidate_energy_value(candidate), 6)
+        return formula, float(energy)
+
+    def _evaluate_synthesizability(self, candidate: Candidate) -> dict:
+        """
+        Cached synthesis evaluator wrapper.
+
+        The evaluator output is normalized to:
+        {"synthesizable": bool, "score": float, "pathway": list[str]}
+        """
+        if self.synthesizability_evaluator is None:
+            return {"synthesizable": False, "score": 0.0, "pathway": []}
+
+        key = self._synthesis_cache_key(candidate)
+        cached = self._synthesis_cache.get(key)
+        if cached is not None:
+            # LRU touch.
+            self._synthesis_cache.move_to_end(key)
+            return dict(cached)
+
+        formula = key[0]
+        if not formula:
+            out = {"synthesizable": False, "score": 0.0, "pathway": []}
+            self._synthesis_cache[key] = out
+            return dict(out)
+
+        energy = self._candidate_energy_value(candidate)
+        try:
+            raw = self.synthesizability_evaluator.evaluate(formula, energy)
+        except Exception as exc:
+            logger.warning("Synthesis evaluator failed for %s: %s", formula, exc)
+            raw = {}
+
+        score = self._clip01(self._safe_float(raw.get("score", 0.0), 0.0))
+        score = max(score, self._clip01(self._safe_float(getattr(self, "synthesis_score_floor", 0.0), 0.0)))
+        synthesizable = bool(raw.get("synthesizable", False))
+        pathways = raw.get("pathway", [])
+        if not isinstance(pathways, list):
+            pathways = []
+        out = {
+            "synthesizable": synthesizable,
+            "score": score,
+            "pathway": [str(p) for p in pathways[:3]],
+        }
+        self._synthesis_cache[key] = out
+        max_size = max(128, int(getattr(self, "synthesis_cache_max_size", 50000)))
+        while len(self._synthesis_cache) > max_size:
+            self._synthesis_cache.popitem(last=False)
+        return dict(out)
+
+    def _apply_synthesis_objective(self, candidates: list[Candidate]) -> list[float]:
+        """
+        Integrate pathway-level synthesizability into candidate utilities.
+
+        - Evaluates only top-K provisional candidates for tractability.
+        - Uses cached evaluator results to avoid duplicate calls.
+        """
+        if not candidates:
+            return []
+
+        # Reset stale values each iteration.
+        for c in candidates:
+            c.synthesis_score = 0.0
+            c.synthesis_feasibility = 0.0
+
+        enabled = bool(getattr(self, "use_synthesis_objective", False))
+        if not enabled or self.synthesizability_evaluator is None:
+            return [0.0 for _ in candidates]
+
+        topo_gate = float(getattr(self, "synthesis_gate_topo_threshold", 0.20))
+        topk = max(1, int(getattr(self, "synthesis_eval_topk", 128)))
+        strategy = str(getattr(self, "synthesis_eval_strategy", "hybrid_topk_uncertain")).strip().lower()
+
+        # Candidate prioritization for synthesis evaluation budget.
+        # 候选优先级：兼顾 exploitation（高分）与 exploration（高不确定性）。
+        score_order = sorted(
+            range(len(candidates)),
+            key=lambda idx: float(candidates[idx].acquisition_value),
+            reverse=True,
+        )
+        uncertainty_weight = max(0.0, float(getattr(self, "synthesis_uncertainty_weight", 0.35)))
+        uncertainty_order = sorted(
+            range(len(candidates)),
+            key=lambda idx: float(max(0.0, self._safe_float(getattr(candidates[idx], "energy_std", 0.0), 0.0))),
+            reverse=True,
+        )
+
+        selected: list[int] = []
+        seen: set[int] = set()
+        if strategy in {"topk", "top_k"}:
+            for idx in score_order:
+                if idx in seen:
+                    continue
+                selected.append(idx)
+                seen.add(idx)
+                if len(selected) >= topk:
+                    break
+        else:
+            n_uncertain = int(round(topk * uncertainty_weight))
+            n_uncertain = min(max(0, n_uncertain), topk)
+            n_top = topk - n_uncertain
+            for idx in score_order:
+                if idx in seen:
+                    continue
+                selected.append(idx)
+                seen.add(idx)
+                if len(selected) >= n_top:
+                    break
+            for idx in uncertainty_order:
+                if idx in seen:
+                    continue
+                selected.append(idx)
+                seen.add(idx)
+                if len(selected) >= topk:
+                    break
+            for idx in score_order:
+                if idx in seen:
+                    continue
+                selected.append(idx)
+                seen.add(idx)
+                if len(selected) >= topk:
+                    break
+        selected_set = set(selected[: min(topk, len(selected))])
+
+        for idx, c in enumerate(candidates):
+            if idx not in selected_set:
+                continue
+            topo = self._clip01(self._safe_float(getattr(c, "topo_probability", 0.0), 0.0))
+            if topo < topo_gate:
+                continue
+            result = self._evaluate_synthesizability(c)
+            c.synthesis_score = self._clip01(self._safe_float(result.get("score", 0.0), 0.0))
+            c.synthesis_feasibility = 1.0 if bool(result.get("synthesizable", False)) else 0.0
+        return [self._clip01(float(c.synthesis_score)) for c in candidates]
+
+    @staticmethod
     def _candidate_feature_vector(candidate: Candidate) -> np.ndarray:
         energy = candidate.energy_mean
         if energy is None:
@@ -812,6 +1006,7 @@ class DiscoveryController:
                 float(candidate.stability_score),
                 float(candidate.heuristic_topo_score),
                 float(candidate.novelty_score),
+                float(getattr(candidate, "synthesis_score", 0.0)),
                 float(energy if energy is not None else 0.0),
                 float(energy_std),
             ],
@@ -997,6 +1192,7 @@ class DiscoveryController:
         candidates: list[Candidate],
         topo_terms: list[float],
         stability_terms: list[float],
+        synthesis_terms: list[float] | None = None,
     ) -> None:
         """
         Inject Pareto rank signal (front rank + crowding) into scalar utility.
@@ -1010,13 +1206,22 @@ class DiscoveryController:
         if rank_weight <= 0.0:
             return
 
-        points = np.asarray(
-            [
-                [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
-                for t, s in zip(topo_terms, stability_terms, strict=False)
-            ],
-            dtype=float,
-        )
+        if synthesis_terms is None:
+            points = np.asarray(
+                [
+                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
+                    for t, s in zip(topo_terms, stability_terms, strict=False)
+                ],
+                dtype=float,
+            )
+        else:
+            points = np.asarray(
+                [
+                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s)), max(0.0, min(1.0, sy))]
+                    for t, s, sy in zip(topo_terms, stability_terms, synthesis_terms, strict=False)
+                ],
+                dtype=float,
+            )
         if points.size == 0:
             return
 
@@ -1067,11 +1272,143 @@ class DiscoveryController:
             hv += (right - left) * max(0.0, max_y - ry)
         return float(max(0.0, hv))
 
+    def _hypervolume(self, points: np.ndarray, reference: np.ndarray) -> float:
+        """
+        Dominated hypervolume for maximization objectives.
+
+        - Exact in 2D via geometric sweep.
+        - Monte Carlo approximation in >=3D (qEHVI/qNEHVI-style integration bridge).
+        """
+        if points.size == 0:
+            return 0.0
+        arr = np.asarray(points, dtype=float)
+        ref = np.asarray(reference, dtype=float).reshape(-1)
+        if arr.ndim != 2:
+            return 0.0
+        dim = int(arr.shape[1])
+        if dim <= 0 or ref.size != dim:
+            return 0.0
+
+        valid = arr[np.all(arr > ref.reshape(1, -1), axis=1)]
+        if valid.size == 0:
+            return 0.0
+        if dim == 1:
+            return float(max(0.0, np.max(valid[:, 0]) - ref[0]))
+        if dim == 2:
+            return self._hypervolume_2d(valid, ref)
+
+        upper = np.max(valid, axis=0)
+        side = upper - ref
+        if np.any(side <= 1e-12):
+            return 0.0
+        box_volume = float(np.prod(side))
+        if box_volume <= 0.0:
+            return 0.0
+
+        samples = max(256, int(getattr(self, "hv_mc_samples", 4096)))
+        seed = int(getattr(self, "hv_mc_seed", 12345)) + int(getattr(self, "iteration", 1))
+        rng = np.random.RandomState(seed)
+        u = rng.rand(samples, dim)
+        probes = ref.reshape(1, -1) + u * side.reshape(1, -1)
+
+        chunk = max(64, int(getattr(self, "hv_chunk_size", 512)))
+        dominated_count = 0
+        for start in range(0, samples, chunk):
+            batch = probes[start : start + chunk]
+            dominates = np.all(valid[None, :, :] >= batch[:, None, :], axis=2)
+            dominated_count += int(np.any(dominates, axis=1).sum())
+        return float(box_volume * (dominated_count / float(samples)))
+
+    def _sample_hv_probes(
+        self,
+        reference: np.ndarray,
+        upper: np.ndarray,
+        *,
+        dim: int,
+    ) -> np.ndarray:
+        samples = max(256, int(getattr(self, "hv_mc_samples", 4096)))
+        seed = int(getattr(self, "hv_mc_seed", 12345)) + int(getattr(self, "iteration", 1))
+        rng = np.random.RandomState(seed)
+        u = rng.rand(samples, dim)
+        side = (upper - reference).reshape(1, -1)
+        return reference.reshape(1, -1) + u * side
+
+    def _mc_hv_improvements_shared(
+        self,
+        hist_arr: np.ndarray,
+        cand_points: np.ndarray,
+        ref: np.ndarray,
+        feas_threshold: float,
+    ) -> np.ndarray:
+        """
+        Shared-sample Monte Carlo HV improvements for candidate pool.
+
+        Uses one probe set for all candidates to reduce repeated MC variance and cost.
+        """
+        if cand_points.size == 0:
+            return np.zeros(0, dtype=float)
+        if cand_points.shape[1] <= 2:
+            # 2D path is exact and already cheap.
+            return np.asarray(
+                [
+                    max(
+                        0.0,
+                        self._hypervolume(
+                            (
+                                p.reshape(1, cand_points.shape[1])
+                                if hist_arr.size == 0
+                                else np.vstack([hist_arr, p.reshape(1, cand_points.shape[1])])
+                            ),
+                            ref,
+                        ) - self._hypervolume(hist_arr, ref),
+                    )
+                    if p[0] >= feas_threshold
+                    else 0.0
+                    for p in cand_points
+                ],
+                dtype=float,
+            )
+
+        valid_hist = hist_arr[np.all(hist_arr > ref.reshape(1, -1), axis=1)] if hist_arr.size else np.zeros((0, cand_points.shape[1]), dtype=float)
+        valid_cands = cand_points[np.all(cand_points > ref.reshape(1, -1), axis=1)]
+        if valid_hist.size == 0 and valid_cands.size == 0:
+            return np.zeros(cand_points.shape[0], dtype=float)
+
+        merged = valid_cands if valid_hist.size == 0 else np.vstack([valid_hist, valid_cands])
+        upper = np.max(merged, axis=0)
+        side = upper - ref
+        if np.any(side <= 1e-12):
+            return np.zeros(cand_points.shape[0], dtype=float)
+
+        probes = self._sample_hv_probes(ref, upper, dim=cand_points.shape[1])
+        box_volume = float(np.prod(side))
+        if box_volume <= 0.0:
+            return np.zeros(cand_points.shape[0], dtype=float)
+
+        if valid_hist.size == 0:
+            dominated_hist = np.zeros(probes.shape[0], dtype=bool)
+        else:
+            dominates_hist = np.all(valid_hist[None, :, :] >= probes[:, None, :], axis=2)
+            dominated_hist = np.any(dominates_hist, axis=1)
+
+        improvements = np.zeros(cand_points.shape[0], dtype=float)
+        for idx, p in enumerate(cand_points):
+            if p[0] < feas_threshold:
+                continue
+            if not np.all(p > ref):
+                continue
+            dominates_p = np.all(p.reshape(1, -1) >= probes, axis=1)
+            dominated_after = dominated_hist | dominates_p
+            gain_ratio = max(0.0, float(dominated_after.mean() - dominated_hist.mean()))
+            improvements[idx] = box_volume * gain_ratio
+        return improvements
+
     def _apply_pareto_hv_bonus(
         self,
         candidates: list[Candidate],
         topo_terms: list[float],
         stability_terms: list[float],
+        synthesis_terms: list[float] | None = None,
     ) -> None:
         """
         Add deterministic EHVI-style bonus on top of scalar acquisition score.
@@ -1092,22 +1429,40 @@ class DiscoveryController:
         if hv_weight <= 0.0:
             return
         feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
+        use_joint_feas = bool(getattr(self, "pareto_joint_feasibility", False))
+        syn_feas_threshold = float(getattr(self, "pareto_synthesis_feasibility_threshold", 0.10))
 
-        hist_points: list[tuple[float, float]] = []
+        use_synthesis = synthesis_terms is not None
+        hist_points: list[tuple[float, ...]] = []
         for c in self.all_candidates:
             topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
             stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
             if topo < feas_threshold:
                 continue
-            hist_points.append((topo, stab))
+            if use_synthesis:
+                syn = max(0.0, min(1.0, float(getattr(c, "synthesis_score", 0.0))))
+                if use_joint_feas and syn < syn_feas_threshold:
+                    continue
+                hist_points.append((topo, stab, syn))
+            else:
+                hist_points.append((topo, stab))
 
-        cand_points = np.asarray(
-            [
-                [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
-                for t, s in zip(topo_terms, stability_terms, strict=False)
-            ],
-            dtype=float,
-        )
+        if use_synthesis:
+            cand_points = np.asarray(
+                [
+                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s)), max(0.0, min(1.0, sy))]
+                    for t, s, sy in zip(topo_terms, stability_terms, synthesis_terms, strict=False)
+                ],
+                dtype=float,
+            )
+        else:
+            cand_points = np.asarray(
+                [
+                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
+                    for t, s in zip(topo_terms, stability_terms, strict=False)
+                ],
+                dtype=float,
+            )
         if cand_points.size == 0:
             return
 
@@ -1115,19 +1470,41 @@ class DiscoveryController:
             hist_arr = np.asarray(hist_points, dtype=float)
             merged = np.vstack([hist_arr, cand_points])
         else:
-            hist_arr = np.zeros((0, 2), dtype=float)
+            hist_arr = np.zeros((0, cand_points.shape[1]), dtype=float)
             merged = cand_points
 
         ref = np.min(merged, axis=0) - 1e-3
-        baseline = self._hypervolume_2d(hist_arr, ref)
+        if use_joint_feas and use_synthesis:
+            candidate_feas_mask = (cand_points[:, 0] >= feas_threshold) & (cand_points[:, 2] >= syn_feas_threshold)
+        else:
+            candidate_feas_mask = cand_points[:, 0] >= feas_threshold
 
-        improvements = np.zeros(len(candidates), dtype=float)
-        for idx, point in enumerate(cand_points):
-            if point[0] < feas_threshold:
-                continue
-            augmented = point.reshape(1, 2) if hist_arr.size == 0 else np.vstack([hist_arr, point.reshape(1, 2)])
-            hv_after = self._hypervolume_2d(augmented, ref)
-            improvements[idx] = max(0.0, hv_after - baseline)
+        pool_limit = max(8, int(getattr(self, "hv_candidate_pool_limit", 96)))
+        base_vals = np.asarray([float(c.acquisition_value) for c in candidates], dtype=float)
+        feasible_indices = np.flatnonzero(candidate_feas_mask)
+        if feasible_indices.size > pool_limit:
+            order = np.argsort(base_vals[feasible_indices])[::-1]
+            keep = feasible_indices[order[:pool_limit]]
+            candidate_feas_mask = np.zeros_like(candidate_feas_mask, dtype=bool)
+            candidate_feas_mask[keep] = True
+
+        filtered = cand_points.copy()
+        filtered[~candidate_feas_mask] = ref.reshape(1, -1)
+        if bool(getattr(self, "hv_use_shared_samples", True)):
+            improvements = self._mc_hv_improvements_shared(hist_arr, filtered, ref, feas_threshold)
+        else:
+            baseline = self._hypervolume(hist_arr, ref)
+            improvements = np.zeros(len(candidates), dtype=float)
+            for idx, point in enumerate(filtered):
+                if not candidate_feas_mask[idx]:
+                    continue
+                augmented = (
+                    point.reshape(1, cand_points.shape[1])
+                    if hist_arr.size == 0
+                    else np.vstack([hist_arr, point.reshape(1, cand_points.shape[1])])
+                )
+                hv_after = self._hypervolume(augmented, ref)
+                improvements[idx] = max(0.0, hv_after - baseline)
 
         max_imp = float(np.max(improvements))
         if max_imp <= 0.0:
@@ -1194,19 +1571,33 @@ class DiscoveryController:
         ref = None
         feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
         if use_hv:
-            hist_points: list[tuple[float, float]] = []
+            obj_dim = 2
+            if objective_map:
+                try:
+                    first_obj = next(iter(objective_map.values()))
+                    obj_dim = int(np.asarray(first_obj, dtype=float).reshape(-1).shape[0])
+                except Exception:
+                    obj_dim = 2
+
+            hist_points: list[tuple[float, ...]] = []
             for c in self.all_candidates:
                 topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
                 stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
                 if topo < feas_threshold:
                     continue
-                hist_points.append((topo, stab))
+                if obj_dim >= 3:
+                    syn = max(0.0, min(1.0, float(getattr(c, "synthesis_score", 0.0))))
+                    hist_points.append((topo, stab, syn))
+                else:
+                    hist_points.append((topo, stab))
             if hist_points:
                 hist_arr = np.asarray(hist_points, dtype=float)
+            else:
+                hist_arr = np.zeros((0, obj_dim), dtype=float)
 
             candidate_obj = np.vstack(
                 [
-                    np.asarray(objective_map.get(id(c), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    np.asarray(objective_map.get(id(c), np.zeros(obj_dim, dtype=float)), dtype=float).reshape(obj_dim)
                     for c in candidates
                 ]
             )
@@ -1219,33 +1610,50 @@ class DiscoveryController:
             chosen_features = features[selected_idx] if features is not None else None
             current_hv = 0.0
             selected_obj: list[np.ndarray] = []
+            use_joint_feas = bool(getattr(self, "pareto_joint_feasibility", False))
+            syn_feas_threshold = float(getattr(self, "pareto_synthesis_feasibility_threshold", 0.10))
             if use_hv and ref is not None:
+                obj_dim = int(ref.shape[0])
                 selected_obj = [
-                    np.asarray(objective_map.get(id(candidates[idx]), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    np.asarray(
+                        objective_map.get(id(candidates[idx]), np.zeros(obj_dim, dtype=float)),
+                        dtype=float,
+                    ).reshape(obj_dim)
                     for idx in selected_idx
                 ]
                 current_arr = hist_arr
                 if selected_obj:
                     selected_stack = np.vstack(selected_obj)
                     current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
-                current_hv = self._hypervolume_2d(current_arr, ref)
+                current_hv = self._hypervolume(current_arr, ref)
 
             hv_gain_cache: dict[int, float] = {}
             max_hv_gain = 0.0
             if use_hv and ref is not None:
+                obj_dim = int(ref.shape[0])
                 for i in range(len(candidates)):
                     if selected_mask[i]:
                         continue
-                    p = np.asarray(objective_map.get(id(candidates[i]), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    p = np.asarray(
+                        objective_map.get(id(candidates[i]), np.zeros(obj_dim, dtype=float)),
+                        dtype=float,
+                    ).reshape(obj_dim)
                     if p[0] < feas_threshold:
+                        hv_gain_cache[i] = 0.0
+                        continue
+                    if use_joint_feas and obj_dim >= 3 and p[2] < syn_feas_threshold:
                         hv_gain_cache[i] = 0.0
                         continue
                     current_arr = hist_arr
                     if selected_obj:
                         selected_stack = np.vstack(selected_obj)
                         current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
-                    augmented = p.reshape(1, 2) if current_arr.size == 0 else np.vstack([current_arr, p.reshape(1, 2)])
-                    gain = max(0.0, self._hypervolume_2d(augmented, ref) - current_hv)
+                    augmented = (
+                        p.reshape(1, obj_dim)
+                        if current_arr.size == 0
+                        else np.vstack([current_arr, p.reshape(1, obj_dim)])
+                    )
+                    gain = max(0.0, self._hypervolume(augmented, ref) - current_hv)
                     hv_gain_cache[i] = gain
                     if gain > max_hv_gain:
                         max_hv_gain = gain
@@ -1276,6 +1684,7 @@ class DiscoveryController:
     def _score_and_select(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
         topo_terms: list[float] = []
         stability_terms: list[float] = []
+        synthesis_terms: list[float] = []
         objective_map: dict[int, np.ndarray] = {}
         for c in candidates:
             # Novelty is structure-aware to avoid collapsing polymorphs by formula.
@@ -1287,7 +1696,9 @@ class DiscoveryController:
             topo_prob = max(0.0, min(1.0, float(c.topo_probability)))
             topo_terms.append(topo_prob)
             stability_terms.append(stability_term)
-            objective_map[id(c)] = np.array([topo_prob, stability_term], dtype=float)
+            synthesis_terms.append(0.0)
+            c.synthesis_score = 0.0
+            c.synthesis_feasibility = 0.0
 
             if self.use_constrained_acquisition:
                 # Expected Improvement with Constraints (EIC) style composition:
@@ -1317,8 +1728,34 @@ class DiscoveryController:
                 for c, gp_score in zip(candidates, gp_utility, strict=False):
                     c.acquisition_value = (1.0 - blend) * c.acquisition_value + blend * float(gp_score)
 
-        self._apply_pareto_rank_bonus(candidates, topo_terms, stability_terms)
-        self._apply_pareto_hv_bonus(candidates, topo_terms, stability_terms)
+        synthesis_scores = self._apply_synthesis_objective(candidates)
+        synthesis_weight = min(max(float(getattr(self, "synthesis_objective_weight", 0.0)), 0.0), 1.0)
+        use_synthesis = bool(getattr(self, "use_synthesis_objective", False)) and synthesis_weight > 0.0
+        for idx, c in enumerate(candidates):
+            synth = self._clip01(self._safe_float(synthesis_scores[idx] if idx < len(synthesis_scores) else 0.0, 0.0))
+            if self.use_constrained_acquisition:
+                synth = synth * self._clip01(self._safe_float(c.topo_probability, 0.0))
+            synthesis_terms[idx] = synth
+            if use_synthesis:
+                c.acquisition_value = (1.0 - synthesis_weight) * float(c.acquisition_value) + synthesis_weight * synth
+
+            if use_synthesis:
+                objective_map[id(c)] = np.array([topo_terms[idx], stability_terms[idx], synthesis_terms[idx]], dtype=float)
+            else:
+                objective_map[id(c)] = np.array([topo_terms[idx], stability_terms[idx]], dtype=float)
+
+        self._apply_pareto_rank_bonus(
+            candidates,
+            topo_terms,
+            stability_terms,
+            synthesis_terms if use_synthesis else None,
+        )
+        self._apply_pareto_hv_bonus(
+            candidates,
+            topo_terms,
+            stability_terms,
+            synthesis_terms if use_synthesis else None,
+        )
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
         top = self._select_top_diverse(candidates, n_top, objective_map=objective_map)
 
@@ -1365,9 +1802,13 @@ class DiscoveryController:
              target_idx = graph.add_node(cand.formula)
 
              if self.synthesizability_evaluator:
-                 eval_result = self.synthesizability_evaluator.evaluate(cand.formula, cand.energy_per_atom)
+                 eval_result = self._evaluate_synthesizability(cand)
+                 cand.synthesis_score = self._clip01(self._safe_float(eval_result.get("score", 0.0), 0.0))
+                 cand.synthesis_feasibility = 1.0 if bool(eval_result.get("synthesizable", False)) else 0.0
                  if eval_result["synthesizable"]:
-                     cand.mutations += " " + eval_result["pathway"][0]
+                     pathways = eval_result.get("pathway", [])
+                     if pathways:
+                         cand.mutations += " " + str(pathways[0])
              elif cand.energy_per_atom and cand.energy_per_atom < -1.0:
                  graph.add_edge(precursor_idx, target_idx, "Exothermic Formation")
                  cand.mutations += " [Synthesizable via direct elements]"
@@ -1422,6 +1863,18 @@ class DiscoveryController:
                 "pareto_feasibility_threshold": self.pareto_feasibility_threshold,
                 "use_hv_batch_greedy": self.use_hv_batch_greedy,
                 "hv_batch_weight": self.hv_batch_weight,
+                "hv_mc_samples": self.hv_mc_samples,
+                "hv_use_shared_samples": self.hv_use_shared_samples,
+                "hv_candidate_pool_limit": self.hv_candidate_pool_limit,
+                "use_synthesis_objective": self.use_synthesis_objective,
+                "synthesis_objective_weight": self.synthesis_objective_weight,
+                "synthesis_eval_topk": self.synthesis_eval_topk,
+                "synthesis_gate_topo_threshold": self.synthesis_gate_topo_threshold,
+                "synthesis_eval_strategy": self.synthesis_eval_strategy,
+                "synthesis_uncertainty_weight": self.synthesis_uncertainty_weight,
+                "synthesis_cache_max_size": self.synthesis_cache_max_size,
+                "pareto_joint_feasibility": self.pareto_joint_feasibility,
+                "pareto_synthesis_feasibility_threshold": self.pareto_synthesis_feasibility_threshold,
                 "enable_structure_dedup": self.enable_structure_dedup,
             },
         }

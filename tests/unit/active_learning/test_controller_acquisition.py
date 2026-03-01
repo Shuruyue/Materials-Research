@@ -44,6 +44,21 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.pareto_feasibility_threshold = 0.05
     controller.use_hv_batch_greedy = False
     controller.hv_batch_weight = 0.35
+    controller.hv_mc_samples = 4096
+    controller.hv_mc_seed = 17
+    controller.hv_use_shared_samples = True
+    controller.hv_candidate_pool_limit = 96
+    controller.hv_chunk_size = 256
+    controller.use_synthesis_objective = False
+    controller.synthesis_objective_weight = 0.15
+    controller.synthesis_eval_topk = 128
+    controller.synthesis_gate_topo_threshold = 0.2
+    controller.synthesis_score_floor = 0.0
+    controller.synthesis_eval_strategy = "hybrid_topk_uncertain"
+    controller.synthesis_uncertainty_weight = 0.35
+    controller.synthesis_cache_max_size = 50000
+    controller.pareto_joint_feasibility = True
+    controller.pareto_synthesis_feasibility_threshold = 0.10
     controller.enable_structure_dedup = False
     controller._structure_matcher = None
     controller.weights = {"topo": 0.4, "stability": 0.3, "heuristic": 0.15, "novelty": 0.15}
@@ -53,6 +68,7 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.top_candidates = []
     controller.gp_acquirer = None
     controller.synthesizability_evaluator = None
+    controller._synthesis_cache = {}
     controller.iteration = 1
     controller._acquisition_generator = torch.Generator().manual_seed(7)
     return controller
@@ -239,3 +255,136 @@ def test_hv_batch_greedy_prefers_complementary_objective_point():
     selected_formulas = {c.formula for c in selected}
     assert "A" in selected_formulas
     assert "B" in selected_formulas
+
+
+def test_synthesis_objective_biases_ranking_when_enabled():
+    class _DummySynth:
+        def evaluate(self, formula, energy):
+            score = {"A": 0.2, "B": 0.9}.get(str(formula), 0.0)
+            return {"synthesizable": score >= 0.5, "score": score, "pathway": [f"X -> {formula}"]}
+
+    controller = _controller_stub("hybrid")
+    controller.use_synthesis_objective = True
+    controller.synthesis_objective_weight = 1.0
+    controller.synthesis_eval_topk = 8
+    controller.synthesis_gate_topo_threshold = 0.0
+    controller.synthesizability_evaluator = _DummySynth()
+    controller._stability_component = lambda c: 0.5
+    controller.use_pareto_rank_bonus = False
+    controller.use_pareto_hv_bonus = False
+    controller.use_hv_batch_greedy = False
+
+    a = Candidate(structure=None, formula="A", topo_probability=1.0, stability_score=0.5)
+    b = Candidate(structure=None, formula="B", topo_probability=1.0, stability_score=0.5)
+
+    ranked = controller._score_and_select([a, b], n_top=2)
+    assert ranked[0].formula == "B"
+    assert b.synthesis_score > a.synthesis_score
+
+
+def test_hypervolume_supports_three_objectives():
+    controller = _controller_stub("hybrid")
+    controller.hv_mc_samples = 12000
+    controller.hv_mc_seed = 3
+    points = np.array(
+        [
+            [0.80, 0.30, 0.40],
+            [0.40, 0.80, 0.50],
+        ],
+        dtype=float,
+    )
+    ref = np.array([0.0, 0.0, 0.0], dtype=float)
+    hv = controller._hypervolume(points, ref)
+    assert hv > 0.0
+    assert hv < 0.40
+
+
+def test_hv_batch_greedy_supports_three_objective_map():
+    controller = _controller_stub("hybrid")
+    controller.batch_diversity_strength = 0.0
+    controller.use_hv_batch_greedy = True
+    controller.hv_batch_weight = 1.0
+    controller.pareto_feasibility_threshold = 0.0
+    controller.hv_mc_samples = 10000
+    controller.hv_mc_seed = 9
+
+    c0 = Candidate(structure=None, formula="A", acquisition_value=1.0, topo_probability=1.0, stability_score=0.60, synthesis_score=0.20)
+    c1 = Candidate(structure=None, formula="B", acquisition_value=1.0, topo_probability=0.60, stability_score=1.00, synthesis_score=0.90)
+    c2 = Candidate(structure=None, formula="C", acquisition_value=1.0, topo_probability=0.95, stability_score=0.55, synthesis_score=0.15)
+    candidates = [c0, c1, c2]
+    objective_map = {
+        id(c0): np.array([1.0, 0.6, 0.2], dtype=float),
+        id(c1): np.array([0.6, 1.0, 0.9], dtype=float),
+        id(c2): np.array([0.95, 0.55, 0.15], dtype=float),
+    }
+
+    selected = controller._select_top_diverse(candidates, n_top=2, objective_map=objective_map)
+    selected_formulas = {c.formula for c in selected}
+    assert "A" in selected_formulas
+    assert "B" in selected_formulas
+
+
+def test_synthesis_hybrid_budget_selects_uncertain_candidate():
+    class _DummySynth:
+        def evaluate(self, formula, energy):
+            return {"synthesizable": True, "score": 0.8 if formula == "C" else 0.1, "pathway": [f"P->{formula}"]}
+
+    controller = _controller_stub("hybrid")
+    controller.use_synthesis_objective = True
+    controller.synthesis_eval_topk = 2
+    controller.synthesis_eval_strategy = "hybrid_topk_uncertain"
+    controller.synthesis_uncertainty_weight = 0.5
+    controller.synthesis_gate_topo_threshold = 0.0
+    controller.synthesizability_evaluator = _DummySynth()
+    controller.use_pareto_rank_bonus = False
+    controller.use_pareto_hv_bonus = False
+    controller.use_hv_batch_greedy = False
+    controller._stability_component = lambda c: 0.4
+
+    # A, B have higher provisional score; C has highest uncertainty and should be evaluated.
+    a = Candidate(structure=None, formula="A", topo_probability=0.9, stability_score=0.5, energy_std=0.1)
+    b = Candidate(structure=None, formula="B", topo_probability=0.8, stability_score=0.5, energy_std=0.2)
+    c = Candidate(structure=None, formula="C", topo_probability=0.7, stability_score=0.5, energy_std=1.5)
+    controller._score_and_select([a, b, c], n_top=3)
+
+    assert c.synthesis_score > 0.0
+
+
+def test_synthesis_cache_lru_capacity_is_enforced():
+    class _DummySynth:
+        def evaluate(self, formula, energy):
+            return {"synthesizable": True, "score": 0.1, "pathway": []}
+
+    controller = _controller_stub("hybrid")
+    controller.synthesizability_evaluator = _DummySynth()
+    controller.synthesis_cache_max_size = 2
+
+    c1 = Candidate(structure=None, formula="A", energy_mean=-1.0)
+    c2 = Candidate(structure=None, formula="B", energy_mean=-1.0)
+    c3 = Candidate(structure=None, formula="C", energy_mean=-1.0)
+    controller._evaluate_synthesizability(c1)
+    controller._evaluate_synthesizability(c2)
+    controller._evaluate_synthesizability(c3)
+
+    assert len(controller._synthesis_cache) == 2
+    assert ("A", -1.0) not in controller._synthesis_cache
+
+
+def test_joint_feasibility_gate_blocks_low_synthesis_in_hv():
+    controller = _controller_stub("hybrid")
+    controller.use_pareto_hv_bonus = True
+    controller.pareto_feasibility_threshold = 0.0
+    controller.pareto_joint_feasibility = True
+    controller.pareto_synthesis_feasibility_threshold = 0.4
+    controller.hv_use_shared_samples = True
+    controller.hv_mc_samples = 8000
+
+    a = Candidate(structure=None, formula="A", acquisition_value=0.5, topo_probability=1.0, stability_score=0.6, synthesis_score=0.9)
+    b = Candidate(structure=None, formula="B", acquisition_value=0.5, topo_probability=1.0, stability_score=0.7, synthesis_score=0.1)
+    cands = [a, b]
+    topo_terms = [1.0, 1.0]
+    stability_terms = [0.6, 0.7]
+    synthesis_terms = [0.9, 0.1]
+
+    controller._apply_pareto_hv_bonus(cands, topo_terms, stability_terms, synthesis_terms)
+    assert a.acquisition_value > b.acquisition_value
