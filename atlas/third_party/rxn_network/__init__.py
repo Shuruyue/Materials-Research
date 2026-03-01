@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version("reaction-network")
+try:
+    __version__ = version("reaction-network")
+except PackageNotFoundError:
+    # Vendored source tree fallback.
+    __version__ = "0+local"
