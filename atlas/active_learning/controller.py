@@ -13,6 +13,7 @@ Optimization:
 import gc
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,6 +39,13 @@ try:
     import rustworkx as rx
 except ImportError:
     rx = None
+
+try:
+    from pymatgen.analysis.structure_matcher import StructureMatcher
+    from pymatgen.core import Element
+except Exception:  # pragma: no cover - optional runtime dependency
+    StructureMatcher = None
+    Element = None
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -180,6 +188,34 @@ class DiscoveryController:
         self.noisy_ei_mc_samples = int(getattr(self.profile, "noisy_ei_mc_samples", 128))
         self.batch_diversity_strength = float(getattr(self.profile, "batch_diversity_strength", 0.15))
         self.batch_diversity_sigma = float(getattr(self.profile, "batch_diversity_sigma", 1.0))
+        self.batch_diversity_space = str(getattr(self.profile, "batch_diversity_space", "chemistry"))
+        self.dynamic_best_f = bool(getattr(self.profile, "dynamic_best_f", True))
+        self.dynamic_best_f_quantile = float(getattr(self.profile, "dynamic_best_f_quantile", 0.0))
+        self.max_observation_history = int(getattr(self.profile, "max_observation_history", 5000))
+        self.use_pareto_rank_bonus = bool(getattr(self.profile, "use_pareto_rank_bonus", True))
+        self.pareto_rank_bonus_weight = float(getattr(self.profile, "pareto_rank_bonus_weight", 0.2))
+        self.use_pareto_hv_bonus = bool(getattr(self.profile, "use_pareto_hv_bonus", True))
+        self.pareto_hv_bonus_weight = float(getattr(self.profile, "pareto_hv_bonus_weight", 0.25))
+        self.pareto_feasibility_threshold = float(getattr(self.profile, "pareto_feasibility_threshold", 0.05))
+        self.use_hv_batch_greedy = bool(getattr(self.profile, "use_hv_batch_greedy", True))
+        self.hv_batch_weight = float(getattr(self.profile, "hv_batch_weight", 0.35))
+        self.enable_structure_dedup = bool(getattr(self.profile, "enable_structure_dedup", True))
+        self.structure_matcher_ltol = float(getattr(self.profile, "structure_matcher_ltol", 0.2))
+        self.structure_matcher_stol = float(getattr(self.profile, "structure_matcher_stol", 0.3))
+        self.structure_matcher_angle_tol = float(getattr(self.profile, "structure_matcher_angle_tol", 5.0))
+        self._structure_matcher = None
+        if self.enable_structure_dedup and StructureMatcher is not None:
+            try:
+                self._structure_matcher = StructureMatcher(
+                    ltol=self.structure_matcher_ltol,
+                    stol=self.structure_matcher_stol,
+                    angle_tol=self.structure_matcher_angle_tol,
+                    primitive_cell=True,
+                    scale=True,
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to initialize StructureMatcher; fallback to formula dedup. Error: {exc}")
+                self._structure_matcher = None
         self._acquisition_generator = torch.Generator().manual_seed(int(self.cfg.train.seed) + 17)
         self.method_key = getattr(self.profile, "method_key", "graph_equivariant")
         self.fallback_methods = tuple(getattr(self.profile, "fallback_methods", ()))
@@ -188,7 +224,9 @@ class DiscoveryController:
             (
                 "Acquisition strategy: %s "
                 "(kappa=%.3f, schedule=%s, best_f=%.3f, jitter=%.4f, constrained=%s, "
-                "noisy_ei=%s, diversity_lambda=%.3f)"
+                "noisy_ei=%s, diversity_lambda=%.3f, diversity_space=%s, "
+                "dynamic_best_f=%s, pareto_rank_bonus=%s, pareto_hv_bonus=%s, "
+                "hv_batch_greedy=%s, structure_dedup=%s)"
             ),
             self.acquisition_strategy,
             self.acquisition_kappa,
@@ -198,6 +236,12 @@ class DiscoveryController:
             self.use_constrained_acquisition,
             self.use_noisy_ei,
             self.batch_diversity_strength,
+            self.batch_diversity_space,
+            self.dynamic_best_f,
+            self.use_pareto_rank_bonus,
+            self.use_pareto_hv_bonus,
+            self.use_hv_batch_greedy,
+            self.enable_structure_dedup,
         )
 
         if results_dir is not None:
@@ -213,11 +257,93 @@ class DiscoveryController:
         # State
         self.iteration = 0
         self.known_formulas: set[str] = set()
+        self.known_structures_by_formula: dict[str, list[object]] = {}
         self.all_candidates: list[Candidate] = []
         self.top_candidates: list[Candidate] = []
 
         # Auto-load previous state
         self._load_checkpoint()
+
+    @staticmethod
+    def _safe_reduced_formula(structure: object, fallback: str = "") -> str:
+        try:
+            return str(structure.composition.reduced_formula)
+        except Exception:
+            return str(fallback)
+
+    def _register_structure_in_bucket(self, structure: object, buckets: dict[str, list[object]]) -> None:
+        if structure is None:
+            return
+        formula = self._safe_reduced_formula(structure)
+        if not formula:
+            return
+        buckets.setdefault(formula, []).append(structure)
+
+    def _register_known_structure(self, structure: object, formula_hint: str = "") -> None:
+        if structure is None and not formula_hint:
+            return
+        formula = self._safe_reduced_formula(structure, fallback=formula_hint)
+        if formula:
+            self.known_formulas.add(formula)
+        if structure is None:
+            return
+        # Structure-level dedup for polymorph preservation.
+        # Ref: pymatgen StructureMatcher (Ong et al., 2013), https://pymatgen.org/
+        self._register_structure_in_bucket(structure, self.known_structures_by_formula)
+
+    def _structures_match(self, a: object, b: object) -> bool:
+        if a is None or b is None:
+            return False
+        if self._structure_matcher is None:
+            return self._safe_reduced_formula(a) == self._safe_reduced_formula(b)
+        try:
+            return bool(self._structure_matcher.fit(a, b))
+        except Exception:
+            return self._safe_reduced_formula(a) == self._safe_reduced_formula(b)
+
+    def _is_duplicate_structure(
+        self,
+        structure: object,
+        *,
+        extra_buckets: dict[str, list[object]] | None = None,
+    ) -> bool:
+        if structure is None:
+            return False
+        formula = self._safe_reduced_formula(structure)
+        if not formula:
+            return False
+
+        if not self.enable_structure_dedup:
+            return formula in self.known_formulas
+
+        known_bucket = self.known_structures_by_formula.get(formula, [])
+        for known_structure in known_bucket:
+            if self._structures_match(structure, known_structure):
+                return True
+
+        if extra_buckets is not None:
+            for known_structure in extra_buckets.get(formula, []):
+                if self._structures_match(structure, known_structure):
+                    return True
+
+        return False
+
+    def _current_best_f(self, observed_mean: torch.Tensor | None) -> float:
+        """
+        Dynamic incumbent for EI/NEI in minimization setting.
+
+        Reference:
+        - Jones et al. (1998), EGO incumbent update:
+          https://link.springer.com/article/10.1023/A:1008306431147
+        """
+        fallback = float(self.acquisition_best_f)
+        if not self.dynamic_best_f or observed_mean is None or observed_mean.numel() == 0:
+            return fallback
+
+        q = min(max(float(self.dynamic_best_f_quantile), 0.0), 1.0)
+        if q <= 0.0:
+            return float(torch.min(observed_mean).item())
+        return float(torch.quantile(observed_mean, q).item())
 
     def _load_checkpoint(self):
         """Scan results directory and restore state."""
@@ -228,7 +354,7 @@ class DiscoveryController:
 
         logger.info(f"Found {len(files)} checkpoints. Restoring state...")
 
-        # Load all history to populate known formulas
+        # Load all history to populate dedup state and incumbent observations.
         for f in files:
             try:
                 with open(f) as fp:
@@ -237,11 +363,19 @@ class DiscoveryController:
                     self.iteration = max(self.iteration, iter_num)
 
                     for cand_dict in data.get("candidates", []):
-                        formula = cand_dict.get("formula")
+                        formula = cand_dict.get("formula", "")
                         if formula:
-                            self.known_formulas.add(formula)
-                        # We don't load full objects to RAM to save space,
-                        # just formulas for novelty check.
+                            self.known_formulas.add(str(formula))
+                        # Rebuild structure buckets from checkpointed winners when available.
+                        # This keeps polymorph-aware dedup active across resume.
+                        try:
+                            cand = Candidate.from_dict(dict(cand_dict))
+                            ref_structure = cand.relaxed_structure or cand.structure
+                            self._register_known_structure(ref_structure, formula_hint=cand.formula)
+                            self.all_candidates.append(cand)
+                        except Exception:
+                            # Checkpoints may have partial candidate payloads.
+                            continue
 
             except Exception as e:
                 logger.warning(f"Failed to load checkpoint {f}: {e}")
@@ -261,7 +395,15 @@ class DiscoveryController:
         except Exception:
             pass
 
-        logger.info(f"Resuming from Iteration {self.iteration}. Known formulas: {len(self.known_formulas)}")
+        if len(self.all_candidates) > self.max_observation_history:
+            self.all_candidates = self.all_candidates[-self.max_observation_history :]
+
+        logger.info(
+            "Resuming from Iteration %s. Known formulas: %s, known structure buckets: %s",
+            self.iteration,
+            len(self.known_formulas),
+            len(self.known_structures_by_formula),
+        )
 
     def run_discovery_loop(
         self,
@@ -299,6 +441,17 @@ class DiscoveryController:
                     "noisy_ei_mc_samples": self.noisy_ei_mc_samples,
                     "batch_diversity_strength": self.batch_diversity_strength,
                     "batch_diversity_sigma": self.batch_diversity_sigma,
+                    "batch_diversity_space": self.batch_diversity_space,
+                    "dynamic_best_f": self.dynamic_best_f,
+                    "dynamic_best_f_quantile": self.dynamic_best_f_quantile,
+                    "use_pareto_rank_bonus": self.use_pareto_rank_bonus,
+                    "pareto_rank_bonus_weight": self.pareto_rank_bonus_weight,
+                    "use_pareto_hv_bonus": self.use_pareto_hv_bonus,
+                    "pareto_hv_bonus_weight": self.pareto_hv_bonus_weight,
+                    "pareto_feasibility_threshold": self.pareto_feasibility_threshold,
+                    "use_hv_batch_greedy": self.use_hv_batch_greedy,
+                    "hv_batch_weight": self.hv_batch_weight,
+                    "enable_structure_dedup": self.enable_structure_dedup,
                 }
             )
 
@@ -326,11 +479,15 @@ class DiscoveryController:
                 raw_candidates = []
             stage_timings["generate"] = time.time() - t_gen
 
-            # Filter duplicates immediately
-            new_raw = [
-                r for r in raw_candidates
-                if r["structure"].composition.reduced_formula not in self.known_formulas
-            ]
+            # Phase 1: structure-aware dedup (polymorph-safe) before expensive relaxation.
+            staged_buckets: dict[str, list[object]] = {}
+            new_raw: list[dict] = []
+            for r in raw_candidates:
+                struct = r.get("structure")
+                if self._is_duplicate_structure(struct, extra_buckets=staged_buckets):
+                    continue
+                new_raw.append(r)
+                self._register_structure_in_bucket(struct, staged_buckets)
             print(f"        Generated {len(raw_candidates)}, New Unique: {len(new_raw)}")
 
             if not new_raw:
@@ -539,6 +696,7 @@ class DiscoveryController:
         has_energy_uq = candidate.energy_mean is not None and candidate.energy_std is not None
         kappa_t = self._current_acquisition_kappa()
         obs_mean, obs_std = self._historical_energy_observations()
+        best_f_t = self._current_best_f(obs_mean)
 
         if strategy == "stability":
             return float(candidate.stability_score)
@@ -557,7 +715,7 @@ class DiscoveryController:
                     mean,
                     std,
                     strategy="log_nei",
-                    best_f=self.acquisition_best_f,
+                    best_f=best_f_t,
                     maximize=False,
                     observed_mean=obs_mean,
                     observed_std=obs_std,
@@ -576,7 +734,7 @@ class DiscoveryController:
                 mean,
                 std,
                 strategy="log_ei",
-                best_f=self.acquisition_best_f,
+                best_f=best_f_t,
                 maximize=False,
                 jitter=self.acquisition_jitter,
                 kappa=kappa_t,
@@ -590,7 +748,7 @@ class DiscoveryController:
             mean,
             std,
             strategy=strategy,
-            best_f=self.acquisition_best_f,
+            best_f=best_f_t,
             maximize=False,
             jitter=self.acquisition_jitter,
             kappa=kappa_t,
@@ -629,7 +787,8 @@ class DiscoveryController:
     def _historical_energy_observations(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         means: list[float] = []
         stds: list[float] = []
-        for c in self.top_candidates:
+        history = self.all_candidates if self.all_candidates else self.top_candidates
+        for c in history:
             if c.energy_mean is None:
                 continue
             means.append(float(c.energy_mean))
@@ -659,13 +818,345 @@ class DiscoveryController:
             dtype=float,
         )
 
-    def _select_top_diverse(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
+    def _candidate_diversity_vector(self, candidate: Candidate) -> np.ndarray:
         """
-        Greedy diversity-aware batch selection (local-penalization style).
+        Chemical-space descriptor used by local penalization.
+
+        Reference:
+        - Ward et al. (2016), compositional descriptors for materials:
+          https://doi.org/10.1038/npjcompumats.2016.28
+        """
+        struct = candidate.relaxed_structure or candidate.structure
+        if struct is None or not hasattr(struct, "composition"):
+            return self._candidate_feature_vector(candidate)
+
+        comp = struct.composition
+        try:
+            amount_dict = comp.get_el_amt_dict()
+        except Exception:
+            return self._candidate_feature_vector(candidate)
+
+        total = float(sum(amount_dict.values()))
+        if total <= 0:
+            return self._candidate_feature_vector(candidate)
+
+        z_vals: list[float] = []
+        frac_vals: list[float] = []
+        for el, amt in amount_dict.items():
+            if amt <= 0:
+                continue
+            if Element is None:
+                continue
+            try:
+                z = float(Element(el).Z)
+            except Exception:
+                continue
+            frac = float(amt / total)
+            z_vals.append(z)
+            frac_vals.append(frac)
+
+        if not z_vals:
+            return self._candidate_feature_vector(candidate)
+
+        z_arr = np.asarray(z_vals, dtype=float)
+        f_arr = np.asarray(frac_vals, dtype=float)
+        z_mean = float(np.sum(f_arr * z_arr))
+        z_var = float(np.sum(f_arr * (z_arr - z_mean) ** 2))
+        entropy = float(-np.sum(f_arr * np.log(np.clip(f_arr, 1e-12, 1.0))))
+        n_elem = float(len(z_vals))
+        max_frac = float(np.max(f_arr))
+
+        volume_per_atom = 0.0
+        try:
+            n_sites = max(1, int(struct.num_sites))
+            volume_per_atom = float(struct.volume) / float(n_sites)
+        except Exception:
+            volume_per_atom = 0.0
+
+        return np.array(
+            [z_mean, math.sqrt(max(0.0, z_var)), entropy, n_elem, max_frac, volume_per_atom],
+            dtype=float,
+        )
+
+    @staticmethod
+    def _pareto_front(points: np.ndarray) -> np.ndarray:
+        if points.size == 0:
+            return points.reshape(0, 2)
+        n = points.shape[0]
+        keep = np.ones(n, dtype=bool)
+        for i in range(n):
+            if not keep[i]:
+                continue
+            for j in range(n):
+                if i == j:
+                    continue
+                dominates = np.all(points[j] >= points[i]) and np.any(points[j] > points[i])
+                if dominates:
+                    keep[i] = False
+                    break
+        return points[keep]
+
+    @staticmethod
+    def _non_dominated_sort(points: np.ndarray) -> list[np.ndarray]:
+        """
+        Non-dominated sorting (maximization) used in NSGA-II style ranking.
+
+        Reference:
+        - Deb et al. (2002), NSGA-II:
+          https://doi.org/10.1109/4235.996017
+        """
+        if points.size == 0:
+            return []
+
+        remaining = np.arange(points.shape[0], dtype=int)
+        fronts: list[np.ndarray] = []
+        while remaining.size > 0:
+            mask = np.ones(remaining.size, dtype=bool)
+            rem_points = points[remaining]
+            for i in range(remaining.size):
+                if not mask[i]:
+                    continue
+                p = rem_points[i]
+                dominates = np.all(rem_points >= p, axis=1) & np.any(rem_points > p, axis=1)
+                dominates[i] = False
+                if np.any(dominates):
+                    mask[i] = False
+            front = remaining[mask]
+            fronts.append(front)
+            remaining = remaining[~mask]
+        return fronts
+
+    @staticmethod
+    def _crowding_distance(points: np.ndarray) -> np.ndarray:
+        """
+        Crowding-distance metric for front diversity in objective space.
+
+        Reference:
+        - Deb et al. (2002), NSGA-II:
+          https://doi.org/10.1109/4235.996017
+        """
+        n, m = points.shape
+        if n == 0:
+            return np.zeros(0, dtype=float)
+        if n <= 2:
+            return np.full(n, np.inf, dtype=float)
+
+        dist = np.zeros(n, dtype=float)
+        for dim in range(m):
+            order = np.argsort(points[:, dim])
+            dist[order[0]] = np.inf
+            dist[order[-1]] = np.inf
+            lo = float(points[order[0], dim])
+            hi = float(points[order[-1], dim])
+            denom = max(1e-12, hi - lo)
+            for idx in range(1, n - 1):
+                c = order[idx]
+                if np.isinf(dist[c]):
+                    continue
+                prev_v = float(points[order[idx - 1], dim])
+                next_v = float(points[order[idx + 1], dim])
+                dist[c] += (next_v - prev_v) / denom
+        return dist
+
+    @classmethod
+    def _pareto_rank_score(cls, points: np.ndarray) -> np.ndarray:
+        """
+        Convert Pareto fronts + crowding into normalized ranking score [0, 1].
+        """
+        if points.size == 0:
+            return np.zeros(0, dtype=float)
+
+        scores = np.zeros(points.shape[0], dtype=float)
+        fronts = cls._non_dominated_sort(points)
+        if not fronts:
+            return scores
+
+        for rank, front_idx in enumerate(fronts):
+            front_points = points[front_idx]
+            crowd = cls._crowding_distance(front_points)
+            finite = crowd[np.isfinite(crowd)]
+            if finite.size > 0:
+                cmin = float(np.min(finite))
+                cmax = float(np.max(finite))
+                denom = max(1e-12, cmax - cmin)
+                crowd_norm = np.ones_like(crowd, dtype=float)
+                finite_mask = np.isfinite(crowd)
+                crowd_norm[finite_mask] = (crowd[finite_mask] - cmin) / denom
+            else:
+                crowd_norm = np.ones_like(crowd, dtype=float)
+            rank_term = 1.0 / (1.0 + float(rank))
+            scores[front_idx] = rank_term * (0.75 + 0.25 * crowd_norm)
+
+        max_score = float(np.max(scores))
+        if max_score > 0.0:
+            scores /= max_score
+        return scores
+
+    def _apply_pareto_rank_bonus(
+        self,
+        candidates: list[Candidate],
+        topo_terms: list[float],
+        stability_terms: list[float],
+    ) -> None:
+        """
+        Inject Pareto rank signal (front rank + crowding) into scalar utility.
+        """
+        if not bool(getattr(self, "use_pareto_rank_bonus", False)):
+            return
+        if not candidates:
+            return
+
+        rank_weight = min(max(float(getattr(self, "pareto_rank_bonus_weight", 0.0)), 0.0), 1.0)
+        if rank_weight <= 0.0:
+            return
+
+        points = np.asarray(
+            [
+                [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
+                for t, s in zip(topo_terms, stability_terms, strict=False)
+            ],
+            dtype=float,
+        )
+        if points.size == 0:
+            return
+
+        feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
+        feas_mask = points[:, 0] >= feas_threshold
+        feasible_points = points[feas_mask]
+        rank_scores = np.zeros(points.shape[0], dtype=float)
+        if feasible_points.size > 0:
+            rank_scores[feas_mask] = self._pareto_rank_score(feasible_points)
+
+        for idx, c in enumerate(candidates):
+            c.acquisition_value = (1.0 - rank_weight) * float(c.acquisition_value) + rank_weight * float(
+                rank_scores[idx]
+            )
+
+    @classmethod
+    def _hypervolume_2d(cls, points: np.ndarray, reference: np.ndarray) -> float:
+        """
+        Exact 2D dominated hypervolume for maximization objectives.
+
+        Reference:
+        - Daulton et al. (2020), differentiable EHVI:
+          https://arxiv.org/abs/2006.05078
+        """
+        if points.size == 0:
+            return 0.0
+
+        pts = cls._pareto_front(points)
+        rx, ry = float(reference[0]), float(reference[1])
+        valid = pts[(pts[:, 0] > rx) & (pts[:, 1] > ry)]
+        if valid.size == 0:
+            return 0.0
+
+        x_coords = sorted({rx, *[float(x) for x in valid[:, 0]]})
+        if len(x_coords) <= 1:
+            return 0.0
+
+        hv = 0.0
+        for idx in range(len(x_coords) - 1):
+            left = x_coords[idx]
+            right = x_coords[idx + 1]
+            if right <= left:
+                continue
+            active = valid[valid[:, 0] >= right]
+            if active.size == 0:
+                continue
+            max_y = float(np.max(active[:, 1]))
+            hv += (right - left) * max(0.0, max_y - ry)
+        return float(max(0.0, hv))
+
+    def _apply_pareto_hv_bonus(
+        self,
+        candidates: list[Candidate],
+        topo_terms: list[float],
+        stability_terms: list[float],
+    ) -> None:
+        """
+        Add deterministic EHVI-style bonus on top of scalar acquisition score.
+
+        This is a low-cost bridge toward EHVI/qNEHVI-style decision policies,
+        while preserving the existing controller interface.
+
+        References:
+        - Daulton et al. (2020), qEHVI: https://arxiv.org/abs/2006.05078
+        - Daulton et al. (2021), qNEHVI: https://arxiv.org/abs/2105.08195
+        """
+        if not bool(getattr(self, "use_pareto_hv_bonus", False)):
+            return
+        if not candidates:
+            return
+
+        hv_weight = min(max(float(getattr(self, "pareto_hv_bonus_weight", 0.0)), 0.0), 1.0)
+        if hv_weight <= 0.0:
+            return
+        feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
+
+        hist_points: list[tuple[float, float]] = []
+        for c in self.all_candidates:
+            topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
+            stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
+            if topo < feas_threshold:
+                continue
+            hist_points.append((topo, stab))
+
+        cand_points = np.asarray(
+            [
+                [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
+                for t, s in zip(topo_terms, stability_terms, strict=False)
+            ],
+            dtype=float,
+        )
+        if cand_points.size == 0:
+            return
+
+        if hist_points:
+            hist_arr = np.asarray(hist_points, dtype=float)
+            merged = np.vstack([hist_arr, cand_points])
+        else:
+            hist_arr = np.zeros((0, 2), dtype=float)
+            merged = cand_points
+
+        ref = np.min(merged, axis=0) - 1e-3
+        baseline = self._hypervolume_2d(hist_arr, ref)
+
+        improvements = np.zeros(len(candidates), dtype=float)
+        for idx, point in enumerate(cand_points):
+            if point[0] < feas_threshold:
+                continue
+            augmented = point.reshape(1, 2) if hist_arr.size == 0 else np.vstack([hist_arr, point.reshape(1, 2)])
+            hv_after = self._hypervolume_2d(augmented, ref)
+            improvements[idx] = max(0.0, hv_after - baseline)
+
+        max_imp = float(np.max(improvements))
+        if max_imp <= 0.0:
+            return
+        normalized_imp = improvements / max_imp
+        for idx, c in enumerate(candidates):
+            c.acquisition_value = (1.0 - hv_weight) * float(c.acquisition_value) + hv_weight * float(
+                normalized_imp[idx]
+            )
+
+    def _select_top_diverse(
+        self,
+        candidates: list[Candidate],
+        n_top: int,
+        *,
+        objective_map: dict[int, np.ndarray] | None = None,
+    ) -> list[Candidate]:
+        """
+        Greedy diversity-aware batch selection.
+
+        Combines:
+        - Local penalization in feature space.
+        - Optional greedy hypervolume-gain bonus (qEHVI-inspired).
 
         Reference:
         - Gonzalez et al. (2016), Batch BO via Local Penalization:
           https://proceedings.mlr.press/v51/gonzalez16a.html
+        - Daulton et al. (2020), qEHVI:
+          https://arxiv.org/abs/2006.05078
         """
         if n_top <= 0:
             return []
@@ -673,33 +1164,105 @@ class DiscoveryController:
             return list(candidates)
 
         lam = max(0.0, float(getattr(self, "batch_diversity_strength", 0.0)))
-        if lam <= 0.0:
+        use_hv = bool(getattr(self, "use_hv_batch_greedy", False)) and objective_map is not None
+        if lam <= 0.0 and not use_hv:
             return list(candidates[:n_top])
 
         sigma = max(1e-6, float(getattr(self, "batch_diversity_sigma", 1.0)))
         base = np.asarray([float(c.acquisition_value) for c in candidates], dtype=float)
-        features = np.vstack([self._candidate_feature_vector(c) for c in candidates])
-        feat_std = features.std(axis=0, keepdims=True)
-        feat_std[feat_std < 1e-8] = 1.0
-        features = (features - features.mean(axis=0, keepdims=True)) / feat_std
+        if lam > 0.0:
+            diversity_space = str(getattr(self, "batch_diversity_space", "chemistry")).strip().lower()
+            if diversity_space == "performance":
+                features = np.vstack([self._candidate_feature_vector(c) for c in candidates])
+            else:
+                features = np.vstack([self._candidate_diversity_vector(c) for c in candidates])
+            feat_std = features.std(axis=0, keepdims=True)
+            feat_std[feat_std < 1e-8] = 1.0
+            features = (features - features.mean(axis=0, keepdims=True)) / feat_std
+        else:
+            features = None
 
         scale = max(1e-6, float(np.std(base)))
         penalty_weight = lam * scale
+        hv_weight = max(0.0, float(getattr(self, "hv_batch_weight", 0.0))) * scale
 
         selected_idx: list[int] = [int(np.argmax(base))]
         selected_mask = np.zeros(len(candidates), dtype=bool)
         selected_mask[selected_idx[0]] = True
 
+        hist_arr = np.zeros((0, 2), dtype=float)
+        ref = None
+        feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
+        if use_hv:
+            hist_points: list[tuple[float, float]] = []
+            for c in self.all_candidates:
+                topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
+                stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
+                if topo < feas_threshold:
+                    continue
+                hist_points.append((topo, stab))
+            if hist_points:
+                hist_arr = np.asarray(hist_points, dtype=float)
+
+            candidate_obj = np.vstack(
+                [
+                    np.asarray(objective_map.get(id(c), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    for c in candidates
+                ]
+            )
+            merged = candidate_obj if hist_arr.size == 0 else np.vstack([hist_arr, candidate_obj])
+            ref = np.min(merged, axis=0) - 1e-3
+
         while len(selected_idx) < n_top:
             best_i = -1
             best_adj = -float("inf")
-            chosen_features = features[selected_idx]
+            chosen_features = features[selected_idx] if features is not None else None
+            current_hv = 0.0
+            selected_obj: list[np.ndarray] = []
+            if use_hv and ref is not None:
+                selected_obj = [
+                    np.asarray(objective_map.get(id(candidates[idx]), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    for idx in selected_idx
+                ]
+                current_arr = hist_arr
+                if selected_obj:
+                    selected_stack = np.vstack(selected_obj)
+                    current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
+                current_hv = self._hypervolume_2d(current_arr, ref)
+
+            hv_gain_cache: dict[int, float] = {}
+            max_hv_gain = 0.0
+            if use_hv and ref is not None:
+                for i in range(len(candidates)):
+                    if selected_mask[i]:
+                        continue
+                    p = np.asarray(objective_map.get(id(candidates[i]), np.zeros(2, dtype=float)), dtype=float).reshape(2)
+                    if p[0] < feas_threshold:
+                        hv_gain_cache[i] = 0.0
+                        continue
+                    current_arr = hist_arr
+                    if selected_obj:
+                        selected_stack = np.vstack(selected_obj)
+                        current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
+                    augmented = p.reshape(1, 2) if current_arr.size == 0 else np.vstack([current_arr, p.reshape(1, 2)])
+                    gain = max(0.0, self._hypervolume_2d(augmented, ref) - current_hv)
+                    hv_gain_cache[i] = gain
+                    if gain > max_hv_gain:
+                        max_hv_gain = gain
+
             for i in range(len(candidates)):
                 if selected_mask[i]:
                     continue
-                d2 = np.sum((chosen_features - features[i]) ** 2, axis=1)
-                penalty = float(np.exp(-d2 / (2.0 * sigma * sigma)).max())
-                adjusted = float(base[i] - penalty_weight * penalty)
+                penalty = 0.0
+                if chosen_features is not None and features is not None and penalty_weight > 0.0:
+                    d2 = np.sum((chosen_features - features[i]) ** 2, axis=1)
+                    penalty = float(np.exp(-d2 / (2.0 * sigma * sigma)).max())
+                hv_bonus = 0.0
+                if use_hv and hv_weight > 0.0:
+                    gain = hv_gain_cache.get(i, 0.0)
+                    if max_hv_gain > 0.0:
+                        hv_bonus = hv_weight * (gain / max_hv_gain)
+                adjusted = float(base[i] - penalty_weight * penalty + hv_bonus)
                 if adjusted > best_adj:
                     best_adj = adjusted
                     best_i = i
@@ -711,13 +1274,20 @@ class DiscoveryController:
         return [candidates[i] for i in selected_idx]
 
     def _score_and_select(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
+        topo_terms: list[float] = []
+        stability_terms: list[float] = []
+        objective_map: dict[int, np.ndarray] = {}
         for c in candidates:
-            # Novelty check (already screened, but good for scoring)
-            is_new = c.formula not in self.known_formulas
+            # Novelty is structure-aware to avoid collapsing polymorphs by formula.
+            candidate_structure = c.relaxed_structure or c.structure
+            is_new = not self._is_duplicate_structure(candidate_structure)
             c.novelty_score = 1.0 if is_new else 0.0
 
             stability_term = max(0.0, float(self._stability_component(c)))
             topo_prob = max(0.0, min(1.0, float(c.topo_probability)))
+            topo_terms.append(topo_prob)
+            stability_terms.append(stability_term)
+            objective_map[id(c)] = np.array([topo_prob, stability_term], dtype=float)
 
             if self.use_constrained_acquisition:
                 # Expected Improvement with Constraints (EIC) style composition:
@@ -747,8 +1317,10 @@ class DiscoveryController:
                 for c, gp_score in zip(candidates, gp_utility, strict=False):
                     c.acquisition_value = (1.0 - blend) * c.acquisition_value + blend * float(gp_score)
 
+        self._apply_pareto_rank_bonus(candidates, topo_terms, stability_terms)
+        self._apply_pareto_hv_bonus(candidates, topo_terms, stability_terms)
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
-        top = self._select_top_diverse(candidates, n_top)
+        top = self._select_top_diverse(candidates, n_top, objective_map=objective_map)
 
         selected_ids = {id(c) for c in top}
         remaining = [c for c in candidates if id(c) not in selected_ids]
@@ -756,11 +1328,17 @@ class DiscoveryController:
 
         # Register winners
         for c in top:
-            self.known_formulas.add(c.formula)
+            self._register_known_structure(c.relaxed_structure or c.structure, formula_hint=c.formula)
             self.top_candidates.append(c)
 
+        self.all_candidates.extend(candidates)
+        if len(self.all_candidates) > self.max_observation_history:
+            self.all_candidates = self.all_candidates[-self.max_observation_history :]
+
         if self.gp_acquirer is not None:
-            self.gp_acquirer.update(top)
+            # Update surrogate on all evaluated points to avoid top-k censoring bias.
+            # Ref: Letham et al. (2019), noisy BO under observation uncertainty.
+            self.gp_acquirer.update(candidates)
 
         # Optional: Attempt to find a synthesis pathway using reaction-network logic
         if rx is not None:
@@ -780,6 +1358,7 @@ class DiscoveryController:
         # In a full implementation, we would extract available precursors
         # from Materials Project/JARVIS and link them to the target candidates
         # via mass-balanced edges. Here we simulate the network builder.
+        precursor_idx = graph.add_node("__ELEMENTS__")
 
         for cand in candidates:
              # Add target node
@@ -790,7 +1369,7 @@ class DiscoveryController:
                  if eval_result["synthesizable"]:
                      cand.mutations += " " + eval_result["pathway"][0]
              elif cand.energy_per_atom and cand.energy_per_atom < -1.0:
-                 graph.add_edge(0, target_idx, "Exothermic Formation")
+                 graph.add_edge(precursor_idx, target_idx, "Exothermic Formation")
                  cand.mutations += " [Synthesizable via direct elements]"
 
         logger.info(f"Built pathway graph with {graph.num_nodes()} nodes and {graph.num_edges()} edges.")
@@ -833,6 +1412,17 @@ class DiscoveryController:
                 "noisy_ei_mc_samples": self.noisy_ei_mc_samples,
                 "batch_diversity_strength": self.batch_diversity_strength,
                 "batch_diversity_sigma": self.batch_diversity_sigma,
+                "batch_diversity_space": self.batch_diversity_space,
+                "dynamic_best_f": self.dynamic_best_f,
+                "dynamic_best_f_quantile": self.dynamic_best_f_quantile,
+                "use_pareto_rank_bonus": self.use_pareto_rank_bonus,
+                "pareto_rank_bonus_weight": self.pareto_rank_bonus_weight,
+                "use_pareto_hv_bonus": self.use_pareto_hv_bonus,
+                "pareto_hv_bonus_weight": self.pareto_hv_bonus_weight,
+                "pareto_feasibility_threshold": self.pareto_feasibility_threshold,
+                "use_hv_batch_greedy": self.use_hv_batch_greedy,
+                "hv_batch_weight": self.hv_batch_weight,
+                "enable_structure_dedup": self.enable_structure_dedup,
             },
         }
         if self.gp_acquirer is not None:

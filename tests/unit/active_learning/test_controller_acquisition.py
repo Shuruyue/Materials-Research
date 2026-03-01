@@ -1,8 +1,20 @@
 """Focused tests for DiscoveryController acquisition strategy behavior."""
 
+import numpy as np
 import torch
 
 from atlas.active_learning.controller import Candidate, DiscoveryController
+
+
+class _FakeComposition:
+    def __init__(self, formula: str):
+        self.reduced_formula = formula
+
+
+class _FakeStructure:
+    def __init__(self, formula: str, sid: int):
+        self.composition = _FakeComposition(formula)
+        self.sid = sid
 
 
 def _controller_stub(strategy: str) -> DiscoveryController:
@@ -20,9 +32,24 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.noisy_ei_mc_samples = 64
     controller.batch_diversity_strength = 0.15
     controller.batch_diversity_sigma = 1.0
+    controller.batch_diversity_space = "performance"
     controller.use_constrained_acquisition = True
+    controller.dynamic_best_f = True
+    controller.dynamic_best_f_quantile = 0.0
+    controller.max_observation_history = 5000
+    controller.use_pareto_rank_bonus = False
+    controller.pareto_rank_bonus_weight = 0.2
+    controller.use_pareto_hv_bonus = False
+    controller.pareto_hv_bonus_weight = 0.25
+    controller.pareto_feasibility_threshold = 0.05
+    controller.use_hv_batch_greedy = False
+    controller.hv_batch_weight = 0.35
+    controller.enable_structure_dedup = False
+    controller._structure_matcher = None
     controller.weights = {"topo": 0.4, "stability": 0.3, "heuristic": 0.15, "novelty": 0.15}
     controller.known_formulas = set()
+    controller.known_structures_by_formula = {}
+    controller.all_candidates = []
     controller.top_candidates = []
     controller.gp_acquirer = None
     controller.synthesizability_evaluator = None
@@ -101,3 +128,114 @@ def test_score_and_select_uses_feasibility_constraint_term():
     ranked = controller._score_and_select([a, b], n_top=2)
     assert ranked[0].formula == "A"
     assert a.acquisition_value > b.acquisition_value
+
+
+def test_dynamic_best_f_changes_hybrid_stability_score():
+    dynamic_controller = _controller_stub("hybrid")
+    dynamic_controller.use_noisy_ei = False
+    dynamic_controller.dynamic_best_f = True
+    dynamic_controller.all_candidates = [
+        Candidate(structure=None, formula="H1", energy_mean=-1.2, energy_std=0.0),
+        Candidate(structure=None, formula="H2", energy_mean=-1.0, energy_std=0.0),
+    ]
+    fixed_controller = _controller_stub("hybrid")
+    fixed_controller.use_noisy_ei = False
+    fixed_controller.dynamic_best_f = False
+    fixed_controller.all_candidates = list(dynamic_controller.all_candidates)
+
+    query = Candidate(
+        structure=None,
+        formula="Q",
+        stability_score=0.2,
+        energy_mean=-0.95,
+        energy_std=0.1,
+    )
+    dynamic_score = dynamic_controller._stability_component(query)
+    fixed_score = fixed_controller._stability_component(query)
+    assert dynamic_score < fixed_score
+
+
+def test_score_and_select_updates_gp_with_all_evaluated_candidates():
+    class _DummyGP:
+        class config:  # noqa: N801 - mirrors runtime object shape
+            blend_ratio = 0.0
+
+        def __init__(self):
+            self.last_update_count = 0
+
+        def suggest_constrained_utility(self, candidates):
+            return np.zeros(len(candidates), dtype=float)
+
+        def suggest_ucb(self, candidates):
+            return np.zeros(len(candidates), dtype=float)
+
+        def update(self, candidates):
+            self.last_update_count = len(candidates)
+
+    controller = _controller_stub("hybrid")
+    controller.gp_acquirer = _DummyGP()
+    controller.use_pareto_hv_bonus = False
+
+    candidates = [
+        Candidate(structure=None, formula="A", topo_probability=0.9, stability_score=0.8, energy_mean=-1.0, energy_std=0.1),
+        Candidate(structure=None, formula="B", topo_probability=0.4, stability_score=0.6, energy_mean=-0.8, energy_std=0.1),
+        Candidate(structure=None, formula="C", topo_probability=0.2, stability_score=0.5, energy_mean=-0.6, energy_std=0.1),
+    ]
+    controller._score_and_select(candidates, n_top=1)
+    assert controller.gp_acquirer.last_update_count == len(candidates)
+
+
+def test_structure_aware_dedup_does_not_collapse_polymorphs():
+    controller = _controller_stub("hybrid")
+    controller.enable_structure_dedup = True
+    controller._structures_match = lambda a, b: getattr(a, "sid", None) == getattr(b, "sid", None)
+
+    known = _FakeStructure("SiO2", sid=1)
+    same_polymorph = _FakeStructure("SiO2", sid=1)
+    different_polymorph = _FakeStructure("SiO2", sid=2)
+    controller._register_known_structure(known, formula_hint="SiO2")
+
+    assert controller._is_duplicate_structure(same_polymorph) is True
+    assert controller._is_duplicate_structure(different_polymorph) is False
+
+
+def test_pareto_rank_bonus_demotes_dominated_candidate():
+    controller = _controller_stub("hybrid")
+    controller.weights = {"topo": 0.0, "stability": 0.0, "heuristic": 0.0, "novelty": 0.0}
+    controller.use_pareto_rank_bonus = True
+    controller.use_pareto_hv_bonus = False
+    controller.use_hv_batch_greedy = False
+    controller.pareto_feasibility_threshold = 0.0
+    controller._stability_component = lambda c: float(c.stability_score)
+
+    a = Candidate(structure=None, formula="A", topo_probability=0.95, stability_score=0.2)
+    b = Candidate(structure=None, formula="B", topo_probability=0.2, stability_score=0.95)
+    d = Candidate(structure=None, formula="D", topo_probability=0.1, stability_score=0.1)
+
+    ranked = controller._score_and_select([a, b, d], n_top=3)
+    assert ranked[-1].formula == "D"
+    assert d.acquisition_value < a.acquisition_value
+    assert d.acquisition_value < b.acquisition_value
+
+
+def test_hv_batch_greedy_prefers_complementary_objective_point():
+    controller = _controller_stub("hybrid")
+    controller.batch_diversity_strength = 0.0
+    controller.use_hv_batch_greedy = True
+    controller.hv_batch_weight = 1.0
+    controller.pareto_feasibility_threshold = 0.0
+
+    c0 = Candidate(structure=None, formula="A", acquisition_value=1.0, topo_probability=1.0, stability_score=0.6)
+    c1 = Candidate(structure=None, formula="B", acquisition_value=1.0, topo_probability=0.6, stability_score=1.0)
+    c2 = Candidate(structure=None, formula="C", acquisition_value=1.0, topo_probability=0.8, stability_score=0.5)
+    candidates = [c0, c1, c2]
+    objective_map = {
+        id(c0): np.array([1.0, 0.6], dtype=float),
+        id(c1): np.array([0.6, 1.0], dtype=float),
+        id(c2): np.array([0.8, 0.5], dtype=float),
+    }
+
+    selected = controller._select_top_diverse(candidates, n_top=2, objective_map=objective_map)
+    selected_formulas = {c.formula for c in selected}
+    assert "A" in selected_formulas
+    assert "B" in selected_formulas
