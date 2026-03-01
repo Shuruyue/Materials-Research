@@ -49,20 +49,108 @@ DISCOVERY_ACQUISITION_STRATEGIES = (
     *BASE_ACQUISITION_STRATEGIES,
 )
 
+_CONTROLLER_ONLY_ACQUISITION_STRATEGIES = ("hybrid", "stability")
+_MIN_STD = 1e-9
+_INV_SQRT_2PI = 0.3989422804014327
+
 
 def _as_tensor(x: torch.Tensor | float, ref: torch.Tensor | None = None) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
+        if ref is not None and (x.dtype != ref.dtype or x.device != ref.device):
+            return x.to(dtype=ref.dtype, device=ref.device)
         return x
     if ref is not None:
         return torch.as_tensor(x, dtype=ref.dtype, device=ref.device)
     return torch.as_tensor(x, dtype=torch.float32)
 
 
+def _sanitize_std(std: torch.Tensor) -> torch.Tensor:
+    if not torch.is_floating_point(std):
+        std = std.to(torch.float32)
+    floor = max(_MIN_STD, torch.finfo(std.dtype).tiny)
+    std = std.abs()
+    std = torch.nan_to_num(
+        std,
+        nan=floor,
+        posinf=torch.finfo(std.dtype).max,
+        neginf=floor,
+    )
+    return std.clamp(min=floor)
+
+
+def _prepare_mean_std(
+    mean: torch.Tensor | float,
+    std: torch.Tensor | float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    mean_t = _as_tensor(mean)
+    std_t = _as_tensor(std, ref=mean_t)
+    if not torch.is_floating_point(mean_t):
+        mean_t = mean_t.to(torch.float32)
+        std_t = std_t.to(dtype=mean_t.dtype, device=mean_t.device)
+    std_t = _sanitize_std(std_t)
+    return mean_t, std_t
+
+
+def _expected_improvement_prepared(
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    best_f: float,
+    jitter: float,
+) -> torch.Tensor:
+    delta = mean - best_f - jitter
+    z = delta / std
+    cdf = torch.special.ndtr(z)
+    pdf = _INV_SQRT_2PI * torch.exp(-0.5 * z * z)
+    ei = delta * cdf + std * pdf
+    return torch.clamp(ei, min=0.0)
+
+
+def _probability_of_improvement_prepared(
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    best_f: float,
+    jitter: float,
+) -> torch.Tensor:
+    z = (mean - best_f - jitter) / std
+    return torch.special.ndtr(z)
+
+
+def _upper_confidence_bound_prepared(
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    kappa: float,
+    maximize: bool,
+) -> torch.Tensor:
+    if maximize:
+        return mean + kappa * std
+    return mean - kappa * std
+
+
+def _thompson_sampling_prepared(
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    noise = torch.randn(
+        mean.shape,
+        dtype=mean.dtype,
+        device=mean.device,
+        generator=generator,
+    )
+    return mean + std * noise
+
+
 def normalize_acquisition_strategy(strategy: str) -> str:
     key = str(strategy).strip().lower().replace(" ", "_")
     if key not in ACQUISITION_ALIASES:
-        available = ", ".join(sorted(DISCOVERY_ACQUISITION_STRATEGIES))
-        raise ValueError(f"Unknown acquisition strategy: {strategy!r}. Available: {available}")
+        available = ", ".join(BASE_ACQUISITION_STRATEGIES)
+        controller_only = ", ".join(_CONTROLLER_ONLY_ACQUISITION_STRATEGIES)
+        raise ValueError(
+            f"Unknown acquisition strategy: {strategy!r}. "
+            f"Supported in score_acquisition: {available}. "
+            f"Controller-only strategies: {controller_only}."
+        )
     return ACQUISITION_ALIASES[key]
 
 
@@ -79,20 +167,12 @@ def expected_improvement(
     EI(x) = (mu - f_best - xi) * Phi(Z) + sigma * phi(Z)
     where Z = (mu - f_best - xi) / sigma
     """
-    mean = _as_tensor(mean)
-    std = _as_tensor(std, ref=mean).clamp(min=1e-9)
-
+    mean_t, std_t = _prepare_mean_std(mean, std)
     if not maximize:
         # Transform minimization into maximization.
-        return expected_improvement(-mean, std, -best_f, maximize=True, jitter=jitter)
-
-    normal = torch.distributions.Normal(0.0, 1.0)
-    delta = mean - best_f - jitter
-    z = delta / std
-    cdf = normal.cdf(z)
-    pdf = normal.log_prob(z).exp()
-    ei = delta * cdf + std * pdf
-    return torch.clamp(ei, min=0.0)
+        mean_t = -mean_t
+        best_f = -best_f
+    return _expected_improvement_prepared(mean_t, std_t, best_f=best_f, jitter=jitter)
 
 
 def probability_of_improvement(
@@ -103,16 +183,12 @@ def probability_of_improvement(
     jitter: float = 0.01,
 ) -> torch.Tensor:
     """Compute probability of improvement (PI)."""
-    mean = _as_tensor(mean)
-    std = _as_tensor(std, ref=mean).clamp(min=1e-9)
-
+    mean_t, std_t = _prepare_mean_std(mean, std)
     if not maximize:
         # Transform minimization into maximization.
-        return probability_of_improvement(-mean, std, -best_f, maximize=True, jitter=jitter)
-
-    normal = torch.distributions.Normal(0.0, 1.0)
-    z = (mean - best_f - jitter) / std
-    return normal.cdf(z)
+        mean_t = -mean_t
+        best_f = -best_f
+    return _probability_of_improvement_prepared(mean_t, std_t, best_f=best_f, jitter=jitter)
 
 
 def upper_confidence_bound(
@@ -127,11 +203,8 @@ def upper_confidence_bound(
     maximize=True  -> UCB = mu + kappa * sigma
     maximize=False -> LCB = mu - kappa * sigma
     """
-    mean = _as_tensor(mean)
-    std = _as_tensor(std, ref=mean).clamp(min=1e-9)
-    if maximize:
-        return mean + kappa * std
-    return mean - kappa * std
+    mean_t, std_t = _prepare_mean_std(mean, std)
+    return _upper_confidence_bound_prepared(mean_t, std_t, kappa=kappa, maximize=maximize)
 
 
 def thompson_sampling(
@@ -141,15 +214,8 @@ def thompson_sampling(
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Draw one Thompson sample from Normal(mean, std)."""
-    mean = _as_tensor(mean)
-    std = _as_tensor(std, ref=mean).clamp(min=1e-9)
-    noise = torch.randn(
-        mean.shape,
-        dtype=mean.dtype,
-        device=mean.device,
-        generator=generator,
-    )
-    return mean + std * noise
+    mean_t, std_t = _prepare_mean_std(mean, std)
+    return _thompson_sampling_prepared(mean_t, std_t, generator=generator)
 
 
 def score_acquisition(
@@ -169,23 +235,31 @@ def score_acquisition(
     Returns a utility tensor where larger values are always preferred.
     """
     canon = normalize_acquisition_strategy(strategy)
-    mean = _as_tensor(mean)
-    std = _as_tensor(std, ref=mean).clamp(min=1e-9)
+    mean_t, std_t = _prepare_mean_std(mean, std)
 
     if canon == "ei":
-        return expected_improvement(mean, std, best_f=best_f, maximize=maximize, jitter=jitter)
+        if not maximize:
+            mean_t = -mean_t
+            best_f = -best_f
+        return _expected_improvement_prepared(mean_t, std_t, best_f=best_f, jitter=jitter)
     if canon == "pi":
-        return probability_of_improvement(mean, std, best_f=best_f, maximize=maximize, jitter=jitter)
-    if canon in {"ucb", "lcb"}:
-        bound = upper_confidence_bound(mean, std, kappa=kappa, maximize=maximize)
+        if not maximize:
+            mean_t = -mean_t
+            best_f = -best_f
+        return _probability_of_improvement_prepared(mean_t, std_t, best_f=best_f, jitter=jitter)
+    if canon == "ucb":
+        bound = _upper_confidence_bound_prepared(mean_t, std_t, kappa=kappa, maximize=maximize)
+        return bound if maximize else -bound
+    if canon == "lcb":
+        bound = _upper_confidence_bound_prepared(mean_t, std_t, kappa=kappa, maximize=not maximize)
         return bound if maximize else -bound
     if canon == "thompson":
-        sample = thompson_sampling(mean, std, generator=generator)
+        sample = _thompson_sampling_prepared(mean_t, std_t, generator=generator)
         return sample if maximize else -sample
     if canon == "mean":
-        return mean if maximize else -mean
+        return mean_t if maximize else -mean_t
     if canon == "uncertainty":
-        return std
+        return std_t
 
     # Defensive fallback; should never execute due to normalization.
     raise ValueError(f"Unsupported acquisition strategy: {strategy!r}")
