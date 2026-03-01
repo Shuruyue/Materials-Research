@@ -68,6 +68,7 @@ class Candidate:
     novelty_score: float = 0.0
     synthesis_score: float = 0.0
     synthesis_feasibility: float = 0.0
+    ood_score: float = 0.0
     acquisition_value: float = 0.0
 
     # Properties
@@ -207,6 +208,7 @@ class DiscoveryController:
         self.hv_use_shared_samples = bool(getattr(self.profile, "hv_use_shared_samples", True))
         self.hv_candidate_pool_limit = int(getattr(self.profile, "hv_candidate_pool_limit", 96))
         self.hv_chunk_size = int(getattr(self.profile, "hv_chunk_size", 512))
+        self.experimental_algorithms_enabled = bool(getattr(self.profile, "experimental_algorithms_enabled", True))
         self.use_synthesis_objective = bool(
             getattr(self.profile, "use_synthesis_objective", self.synthesizability_evaluator is not None)
         )
@@ -216,12 +218,25 @@ class DiscoveryController:
         self.synthesis_score_floor = float(getattr(self.profile, "synthesis_score_floor", 0.0))
         self.synthesis_eval_strategy = str(getattr(self.profile, "synthesis_eval_strategy", "hybrid_topk_uncertain"))
         self.synthesis_uncertainty_weight = float(getattr(self.profile, "synthesis_uncertainty_weight", 0.35))
+        self.synthesis_uncertainty_decay = float(getattr(self.profile, "synthesis_uncertainty_decay", 0.8))
+        self.synthesis_time_budget_sec = float(getattr(self.profile, "synthesis_time_budget_sec", 1.25))
         self.synthesis_cache_max_size = int(getattr(self.profile, "synthesis_cache_max_size", 50000))
         self.pareto_joint_feasibility = bool(getattr(self.profile, "pareto_joint_feasibility", True))
         self.pareto_synthesis_feasibility_threshold = float(
             getattr(self.profile, "pareto_synthesis_feasibility_threshold", 0.10)
         )
+        self.use_ood_penalty = bool(getattr(self.profile, "use_ood_penalty", True))
+        self.ood_penalty_weight = float(getattr(self.profile, "ood_penalty_weight", 0.15))
+        self.ood_history_min_points = int(getattr(self.profile, "ood_history_min_points", 24))
+        self.ood_quantile = float(getattr(self.profile, "ood_quantile", 0.95))
+        self.ood_space = str(getattr(self.profile, "ood_space", "chemistry"))
+        self.max_pathway_annotations_per_iter = int(getattr(self.profile, "max_pathway_annotations_per_iter", 8))
         self.enable_structure_dedup = bool(getattr(self.profile, "enable_structure_dedup", True))
+        if not self.experimental_algorithms_enabled:
+            # Conservative mode for production reliability.
+            # 生产保守模式：关闭实验性策略，保留确定性核心流程。
+            self.use_synthesis_objective = False
+            self.hv_use_shared_samples = False
         self.structure_matcher_ltol = float(getattr(self.profile, "structure_matcher_ltol", 0.2))
         self.structure_matcher_stol = float(getattr(self.profile, "structure_matcher_stol", 0.3))
         self.structure_matcher_angle_tol = float(getattr(self.profile, "structure_matcher_angle_tol", 5.0))
@@ -248,7 +263,8 @@ class DiscoveryController:
                 "(kappa=%.3f, schedule=%s, best_f=%.3f, jitter=%.4f, constrained=%s, "
                 "noisy_ei=%s, diversity_lambda=%.3f, diversity_space=%s, "
                 "dynamic_best_f=%s, pareto_rank_bonus=%s, pareto_hv_bonus=%s, "
-                "hv_batch_greedy=%s, synthesis_objective=%s, structure_dedup=%s)"
+                "hv_batch_greedy=%s, synthesis_objective=%s, "
+                "ood_penalty=%s, structure_dedup=%s)"
             ),
             self.acquisition_strategy,
             self.acquisition_kappa,
@@ -264,6 +280,7 @@ class DiscoveryController:
             self.use_pareto_hv_bonus,
             self.use_hv_batch_greedy,
             self.use_synthesis_objective,
+            self.use_ood_penalty,
             self.enable_structure_dedup,
         )
 
@@ -478,15 +495,25 @@ class DiscoveryController:
                     "hv_mc_samples": self.hv_mc_samples,
                     "hv_use_shared_samples": self.hv_use_shared_samples,
                     "hv_candidate_pool_limit": self.hv_candidate_pool_limit,
+                    "hv_chunk_size": self.hv_chunk_size,
+                    "experimental_algorithms_enabled": self.experimental_algorithms_enabled,
                     "use_synthesis_objective": self.use_synthesis_objective,
                     "synthesis_objective_weight": self.synthesis_objective_weight,
                     "synthesis_eval_topk": self.synthesis_eval_topk,
                     "synthesis_gate_topo_threshold": self.synthesis_gate_topo_threshold,
                     "synthesis_eval_strategy": self.synthesis_eval_strategy,
                     "synthesis_uncertainty_weight": self.synthesis_uncertainty_weight,
+                    "synthesis_uncertainty_decay": self.synthesis_uncertainty_decay,
+                    "synthesis_time_budget_sec": self.synthesis_time_budget_sec,
                     "synthesis_cache_max_size": self.synthesis_cache_max_size,
                     "pareto_joint_feasibility": self.pareto_joint_feasibility,
                     "pareto_synthesis_feasibility_threshold": self.pareto_synthesis_feasibility_threshold,
+                    "use_ood_penalty": self.use_ood_penalty,
+                    "ood_penalty_weight": self.ood_penalty_weight,
+                    "ood_history_min_points": self.ood_history_min_points,
+                    "ood_quantile": self.ood_quantile,
+                    "ood_space": self.ood_space,
+                    "max_pathway_annotations_per_iter": self.max_pathway_annotations_per_iter,
                     "enable_structure_dedup": self.enable_structure_dedup,
                 }
             )
@@ -904,7 +931,7 @@ class DiscoveryController:
             "pathway": [str(p) for p in pathways[:3]],
         }
         self._synthesis_cache[key] = out
-        max_size = max(128, int(getattr(self, "synthesis_cache_max_size", 50000)))
+        max_size = max(1, int(getattr(self, "synthesis_cache_max_size", 50000)))
         while len(self._synthesis_cache) > max_size:
             self._synthesis_cache.popitem(last=False)
         return dict(out)
@@ -982,16 +1009,32 @@ class DiscoveryController:
                 if len(selected) >= topk:
                     break
         selected_set = set(selected[: min(topk, len(selected))])
+        eval_budget_sec = max(0.0, float(getattr(self, "synthesis_time_budget_sec", 0.0)))
+        t0 = time.perf_counter()
+        decay = max(0.0, float(getattr(self, "synthesis_uncertainty_decay", 0.0)))
+        timed_out = False
 
         for idx, c in enumerate(candidates):
+            if eval_budget_sec > 0.0 and (time.perf_counter() - t0) > eval_budget_sec:
+                timed_out = True
+                break
             if idx not in selected_set:
                 continue
             topo = self._clip01(self._safe_float(getattr(c, "topo_probability", 0.0), 0.0))
             if topo < topo_gate:
                 continue
             result = self._evaluate_synthesizability(c)
-            c.synthesis_score = self._clip01(self._safe_float(result.get("score", 0.0), 0.0))
+            score = self._clip01(self._safe_float(result.get("score", 0.0), 0.0))
+            if decay > 0.0:
+                energy_std = max(0.0, self._safe_float(getattr(c, "energy_std", 0.0), 0.0))
+                score *= float(math.exp(-decay * energy_std))
+            c.synthesis_score = self._clip01(score)
             c.synthesis_feasibility = 1.0 if bool(result.get("synthesizable", False)) else 0.0
+        if timed_out:
+            logger.info(
+                "Synthesis evaluation hit time budget %.3fs; remaining candidates deferred.",
+                eval_budget_sec,
+            )
         return [self._clip01(float(c.synthesis_score)) for c in candidates]
 
     @staticmethod
@@ -1072,6 +1115,125 @@ class DiscoveryController:
             [z_mean, math.sqrt(max(0.0, z_var)), entropy, n_elem, max_frac, volume_per_atom],
             dtype=float,
         )
+
+    def _candidate_ood_vector(self, candidate: Candidate) -> np.ndarray:
+        """
+        Feature space used by OOD penalty.
+
+        - `chemistry`: composition/structure descriptor.
+        - `performance`: predicted objective descriptor.
+        """
+        space = str(getattr(self, "ood_space", "chemistry")).strip().lower()
+        if space in {"performance", "objective", "acquisition"}:
+            return self._candidate_feature_vector(candidate)
+        return self._candidate_diversity_vector(candidate)
+
+    def _historical_ood_matrix(self) -> np.ndarray:
+        """
+        Build historical matrix for OOD calibration.
+        """
+        history = self.all_candidates if self.all_candidates else self.top_candidates
+        vectors: list[np.ndarray] = []
+        for c in history:
+            try:
+                v = np.asarray(self._candidate_ood_vector(c), dtype=float).reshape(-1)
+            except Exception:
+                continue
+            if v.size == 0 or not np.all(np.isfinite(v)):
+                continue
+            vectors.append(v)
+        if not vectors:
+            return np.zeros((0, 0), dtype=float)
+        dim = int(min(v.shape[0] for v in vectors))
+        if dim <= 0:
+            return np.zeros((0, 0), dtype=float)
+        return np.vstack([v[:dim] for v in vectors])
+
+    def _estimate_ood_scores(self, candidates: list[Candidate]) -> list[float]:
+        """
+        Estimate OOD (out-of-distribution) scores in [0, 1].
+
+        Method:
+        - Robust standardization via median/IQR.
+        - Radius threshold by historical distance quantile.
+        - Smooth excess-distance map: `score = 1 - exp(-excess_ratio)`.
+
+        References:
+        - Huber (1981), Robust Statistics.
+        - Rousseeuw & Croux (1993), robust scale estimators.
+        """
+        if not candidates:
+            return []
+        if not bool(getattr(self, "use_ood_penalty", False)):
+            return [0.0 for _ in candidates]
+
+        hist = self._historical_ood_matrix()
+        min_points = max(1, int(getattr(self, "ood_history_min_points", 24)))
+        if hist.shape[0] < min_points or hist.shape[1] <= 0:
+            return [0.0 for _ in candidates]
+
+        center = np.median(hist, axis=0)
+        q25 = np.percentile(hist, 25.0, axis=0)
+        q75 = np.percentile(hist, 75.0, axis=0)
+        scale = q75 - q25
+        # Fallback when IQR degenerates on low-variance dimensions.
+        # 低方差维度回退到标准差，避免尺度塌陷。
+        std_fallback = np.std(hist, axis=0)
+        scale = np.where(scale < 1e-8, std_fallback, scale)
+        scale = np.where(scale < 1e-8, 1.0, scale)
+
+        hist_z = (hist - center.reshape(1, -1)) / scale.reshape(1, -1)
+        hist_dist = np.sqrt(np.mean(hist_z * hist_z, axis=1))
+        q = min(max(float(getattr(self, "ood_quantile", 0.95)), 0.50), 0.999)
+        threshold = float(np.quantile(hist_dist, q))
+        threshold = max(threshold, 1e-6)
+
+        dim = int(hist.shape[1])
+        out: list[float] = []
+        for c in candidates:
+            try:
+                v = np.asarray(self._candidate_ood_vector(c), dtype=float).reshape(-1)
+            except Exception:
+                out.append(0.0)
+                continue
+            if v.size <= 0:
+                out.append(0.0)
+                continue
+            if v.size < dim:
+                padded = np.zeros(dim, dtype=float)
+                padded[: v.size] = v
+                v_use = padded
+            else:
+                v_use = v[:dim]
+            if not np.all(np.isfinite(v_use)):
+                out.append(0.0)
+                continue
+            z = (v_use - center) / scale
+            dist = float(math.sqrt(float(np.mean(z * z))))
+            excess = max(0.0, dist - threshold)
+            ratio = excess / threshold
+            out.append(self._clip01(1.0 - math.exp(-ratio)))
+        return out
+
+    def _apply_ood_penalty(self, candidates: list[Candidate]) -> None:
+        """
+        Apply multiplicative OOD penalty to final acquisition utility.
+
+        utility' = utility * (1 - w * ood_score), with w in [0, 1].
+        """
+        if not candidates:
+            return
+        penalty_weight = min(max(float(getattr(self, "ood_penalty_weight", 0.0)), 0.0), 1.0)
+        if penalty_weight <= 0.0 or not bool(getattr(self, "use_ood_penalty", False)):
+            for c in candidates:
+                c.ood_score = 0.0
+            return
+
+        ood_scores = self._estimate_ood_scores(candidates)
+        for idx, c in enumerate(candidates):
+            score = self._clip01(self._safe_float(ood_scores[idx] if idx < len(ood_scores) else 0.0, 0.0))
+            c.ood_score = score
+            c.acquisition_value = float(c.acquisition_value) * (1.0 - penalty_weight * score)
 
     @staticmethod
     def _pareto_front(points: np.ndarray) -> np.ndarray:
@@ -1691,6 +1853,7 @@ class DiscoveryController:
             candidate_structure = c.relaxed_structure or c.structure
             is_new = not self._is_duplicate_structure(candidate_structure)
             c.novelty_score = 1.0 if is_new else 0.0
+            c.ood_score = 0.0
 
             stability_term = max(0.0, float(self._stability_component(c)))
             topo_prob = max(0.0, min(1.0, float(c.topo_probability)))
@@ -1756,6 +1919,7 @@ class DiscoveryController:
             stability_terms,
             synthesis_terms if use_synthesis else None,
         )
+        self._apply_ood_penalty(candidates)
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
         top = self._select_top_diverse(candidates, n_top, objective_map=objective_map)
 
@@ -1796,12 +1960,17 @@ class DiscoveryController:
         # from Materials Project/JARVIS and link them to the target candidates
         # via mass-balanced edges. Here we simulate the network builder.
         precursor_idx = graph.add_node("__ELEMENTS__")
+        max_annotations = int(getattr(self, "max_pathway_annotations_per_iter", 8))
+        annotation_limit = len(candidates) if max_annotations <= 0 else max(0, max_annotations)
+        annotated = 0
 
         for cand in candidates:
              # Add target node
              target_idx = graph.add_node(cand.formula)
 
              if self.synthesizability_evaluator:
+                 if annotated >= annotation_limit:
+                     continue
                  eval_result = self._evaluate_synthesizability(cand)
                  cand.synthesis_score = self._clip01(self._safe_float(eval_result.get("score", 0.0), 0.0))
                  cand.synthesis_feasibility = 1.0 if bool(eval_result.get("synthesizable", False)) else 0.0
@@ -1809,10 +1978,17 @@ class DiscoveryController:
                      pathways = eval_result.get("pathway", [])
                      if pathways:
                          cand.mutations += " " + str(pathways[0])
+                 annotated += 1
              elif cand.energy_per_atom and cand.energy_per_atom < -1.0:
                  graph.add_edge(precursor_idx, target_idx, "Exothermic Formation")
                  cand.mutations += " [Synthesizable via direct elements]"
 
+        if self.synthesizability_evaluator and annotation_limit < len(candidates):
+            logger.info(
+                "Pathway annotations capped at %s this iteration (candidates=%s).",
+                annotation_limit,
+                len(candidates),
+            )
         logger.info(f"Built pathway graph with {graph.num_nodes()} nodes and {graph.num_edges()} edges.")
 
     def _save_iteration(self, iteration: int, top_candidates: list[Candidate]):
@@ -1864,17 +2040,27 @@ class DiscoveryController:
                 "use_hv_batch_greedy": self.use_hv_batch_greedy,
                 "hv_batch_weight": self.hv_batch_weight,
                 "hv_mc_samples": self.hv_mc_samples,
+                "hv_chunk_size": self.hv_chunk_size,
                 "hv_use_shared_samples": self.hv_use_shared_samples,
                 "hv_candidate_pool_limit": self.hv_candidate_pool_limit,
+                "experimental_algorithms_enabled": self.experimental_algorithms_enabled,
                 "use_synthesis_objective": self.use_synthesis_objective,
                 "synthesis_objective_weight": self.synthesis_objective_weight,
                 "synthesis_eval_topk": self.synthesis_eval_topk,
                 "synthesis_gate_topo_threshold": self.synthesis_gate_topo_threshold,
                 "synthesis_eval_strategy": self.synthesis_eval_strategy,
                 "synthesis_uncertainty_weight": self.synthesis_uncertainty_weight,
+                "synthesis_uncertainty_decay": self.synthesis_uncertainty_decay,
+                "synthesis_time_budget_sec": self.synthesis_time_budget_sec,
                 "synthesis_cache_max_size": self.synthesis_cache_max_size,
                 "pareto_joint_feasibility": self.pareto_joint_feasibility,
                 "pareto_synthesis_feasibility_threshold": self.pareto_synthesis_feasibility_threshold,
+                "use_ood_penalty": self.use_ood_penalty,
+                "ood_penalty_weight": self.ood_penalty_weight,
+                "ood_history_min_points": self.ood_history_min_points,
+                "ood_quantile": self.ood_quantile,
+                "ood_space": self.ood_space,
+                "max_pathway_annotations_per_iter": self.max_pathway_annotations_per_iter,
                 "enable_structure_dedup": self.enable_structure_dedup,
             },
         }

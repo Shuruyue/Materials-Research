@@ -1,7 +1,9 @@
 """Focused tests for DiscoveryController acquisition strategy behavior."""
 
+from collections import OrderedDict
 import numpy as np
 import torch
+from unittest.mock import patch
 
 from atlas.active_learning.controller import Candidate, DiscoveryController
 
@@ -49,6 +51,7 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.hv_use_shared_samples = True
     controller.hv_candidate_pool_limit = 96
     controller.hv_chunk_size = 256
+    controller.experimental_algorithms_enabled = True
     controller.use_synthesis_objective = False
     controller.synthesis_objective_weight = 0.15
     controller.synthesis_eval_topk = 128
@@ -56,9 +59,17 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.synthesis_score_floor = 0.0
     controller.synthesis_eval_strategy = "hybrid_topk_uncertain"
     controller.synthesis_uncertainty_weight = 0.35
+    controller.synthesis_uncertainty_decay = 0.8
+    controller.synthesis_time_budget_sec = 1.25
     controller.synthesis_cache_max_size = 50000
     controller.pareto_joint_feasibility = True
     controller.pareto_synthesis_feasibility_threshold = 0.10
+    controller.use_ood_penalty = False
+    controller.ood_penalty_weight = 0.15
+    controller.ood_history_min_points = 24
+    controller.ood_quantile = 0.95
+    controller.ood_space = "chemistry"
+    controller.max_pathway_annotations_per_iter = 8
     controller.enable_structure_dedup = False
     controller._structure_matcher = None
     controller.weights = {"topo": 0.4, "stability": 0.3, "heuristic": 0.15, "novelty": 0.15}
@@ -68,7 +79,7 @@ def _controller_stub(strategy: str) -> DiscoveryController:
     controller.top_candidates = []
     controller.gp_acquirer = None
     controller.synthesizability_evaluator = None
-    controller._synthesis_cache = {}
+    controller._synthesis_cache = OrderedDict()
     controller.iteration = 1
     controller._acquisition_generator = torch.Generator().manual_seed(7)
     return controller
@@ -388,3 +399,112 @@ def test_joint_feasibility_gate_blocks_low_synthesis_in_hv():
 
     controller._apply_pareto_hv_bonus(cands, topo_terms, stability_terms, synthesis_terms)
     assert a.acquisition_value > b.acquisition_value
+
+
+def test_synthesis_time_budget_stops_remaining_evaluations():
+    controller = _controller_stub("hybrid")
+    controller.use_synthesis_objective = True
+    controller.synthesizability_evaluator = object()
+    controller.synthesis_eval_topk = 3
+    controller.synthesis_gate_topo_threshold = 0.0
+    controller.synthesis_time_budget_sec = 0.01
+    controller.synthesis_eval_strategy = "topk"
+
+    call_count = {"n": 0}
+
+    def _fake_eval(_cand):
+        call_count["n"] += 1
+        return {"synthesizable": True, "score": 0.7, "pathway": []}
+
+    controller._evaluate_synthesizability = _fake_eval
+    cands = [
+        Candidate(structure=None, formula="A", topo_probability=0.9, acquisition_value=0.9),
+        Candidate(structure=None, formula="B", topo_probability=0.8, acquisition_value=0.8),
+        Candidate(structure=None, formula="C", topo_probability=0.7, acquisition_value=0.7),
+    ]
+    with patch(
+        "atlas.active_learning.controller.time.perf_counter",
+        side_effect=[0.0, 0.0, 0.02, 0.03, 0.04],
+    ):
+        scores = controller._apply_synthesis_objective(cands)
+
+    assert call_count["n"] == 1
+    assert scores[0] > 0.0
+    assert scores[1] == 0.0
+    assert scores[2] == 0.0
+
+
+def test_synthesis_uncertainty_decay_penalizes_high_std_candidate():
+    controller = _controller_stub("hybrid")
+    controller.use_synthesis_objective = True
+    controller.synthesis_eval_topk = 2
+    controller.synthesis_gate_topo_threshold = 0.0
+    controller.synthesis_eval_strategy = "topk"
+    controller.synthesis_uncertainty_decay = 2.0
+    controller.synthesizability_evaluator = object()
+    controller._evaluate_synthesizability = lambda _cand: {
+        "synthesizable": True,
+        "score": 1.0,
+        "pathway": [],
+    }
+
+    low_std = Candidate(structure=None, formula="A", topo_probability=0.8, acquisition_value=0.9, energy_std=0.0)
+    high_std = Candidate(structure=None, formula="B", topo_probability=0.8, acquisition_value=0.8, energy_std=1.0)
+    controller._apply_synthesis_objective([low_std, high_std])
+
+    assert low_std.synthesis_score > high_std.synthesis_score
+    assert high_std.synthesis_score < 1.0
+
+
+def test_ood_penalty_reduces_outlier_utility():
+    controller = _controller_stub("hybrid")
+    controller.use_ood_penalty = True
+    controller.ood_penalty_weight = 1.0
+    controller.ood_history_min_points = 4
+    controller.ood_quantile = 0.8
+    controller.ood_space = "performance"
+    controller.use_pareto_rank_bonus = False
+    controller.use_pareto_hv_bonus = False
+    controller.use_hv_batch_greedy = False
+    controller.use_constrained_acquisition = False
+    controller._stability_component = lambda _c: 0.5
+    controller.weights = {"topo": 0.5, "stability": 0.5, "heuristic": 0.0, "novelty": 0.0}
+
+    controller.all_candidates = [
+        Candidate(
+            structure=None,
+            formula=f"H{i}",
+            topo_probability=0.52 + 0.01 * (i % 2),
+            stability_score=0.5,
+            heuristic_topo_score=0.0,
+            novelty_score=0.0,
+            energy_mean=-1.0 + 0.01 * i,
+            energy_std=0.05,
+        )
+        for i in range(6)
+    ]
+
+    inlier = Candidate(
+        structure=None,
+        formula="IN",
+        topo_probability=0.53,
+        stability_score=0.5,
+        heuristic_topo_score=0.0,
+        energy_mean=-0.98,
+        energy_std=0.05,
+    )
+    outlier = Candidate(
+        structure=None,
+        formula="OUT",
+        topo_probability=0.99,
+        stability_score=0.5,
+        heuristic_topo_score=0.0,
+        energy_mean=3.0,
+        energy_std=3.0,
+    )
+
+    ranked = controller._score_and_select([inlier, outlier], n_top=2)
+
+    by_formula = {c.formula: c for c in ranked}
+    assert by_formula["OUT"].ood_score > by_formula["IN"].ood_score
+    assert by_formula["OUT"].acquisition_value < by_formula["IN"].acquisition_value
