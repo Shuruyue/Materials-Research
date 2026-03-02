@@ -1,5 +1,7 @@
 """Unit tests for atlas.data.split_governance."""
 
+import itertools
+import pytest
 
 from atlas.data.split_governance import (
     SplitManifest,
@@ -54,6 +56,18 @@ class TestIIDSplit:
         s2 = iid_split(ids, seed=99)
         assert s1["train"] != s2["train"]
 
+    def test_small_n_positive_ratios_nonempty_when_feasible(self):
+        ids = ["S0", "S1", "S2"]
+        splits = iid_split(ids, seed=42, ratios=(0.8, 0.1, 0.1))
+        assert len(splits["train"]) == 1
+        assert len(splits["val"]) == 1
+        assert len(splits["test"]) == 1
+
+    def test_ratio_validation(self):
+        ids = [f"S{i}" for i in range(10)]
+        with pytest.raises(ValueError):
+            iid_split(ids, ratios=(0.8, -0.1, 0.3))
+
 
 # ---------------------------------------------------------------------------
 # Compositional split
@@ -100,6 +114,130 @@ class TestCompositionalSplit:
         # All should be in exactly one split
         assert sum(len(s) > 0 for s in [in_train, in_val, in_test]) == 1
 
+    def test_extreme_group_imbalance_avoids_empty_positive_split(self):
+        ids = [f"S{i}" for i in range(110)]
+        elems = ["H", "He", "Li", "Be", "B", "C", "N", "F", "Ne", "Na"]
+        formulas = ["K2O"] * 100 + [f"{e}2O" for e in elems]
+        splits = compositional_split(ids, formulas, seed=42, ratios=(0.8, 0.1, 0.1))
+        assert len(splits["train"]) > 0
+        assert len(splits["val"]) > 0
+        assert len(splits["test"]) > 0
+
+    def test_mismatched_parallel_lengths_raise(self):
+        ids = [f"S{i}" for i in range(10)]
+        formulas = ["Li2O"] * 9
+        with pytest.raises(ValueError):
+            compositional_split(ids, formulas, seed=42)
+
+    def test_label_balance_regularization_reduces_target_drift(self):
+        ids = [f"S{i}" for i in range(12)]
+        formulas = (
+            ["Li2O"] * 2
+            + ["Na2O"] * 2
+            + ["K2O"] * 2
+            + ["Fe2O3"] * 2
+            + ["Co2O3"] * 2
+            + ["Ni2O3"] * 2
+        )
+        # Three high-target systems, three low-target systems.
+        targets = [10.0] * 6 + [0.0] * 6
+
+        baseline = compositional_split(
+            ids,
+            formulas,
+            seed=42,
+            ratios=(0.34, 0.33, 0.33),
+            targets=targets,
+            label_weight=0.0,
+            leakage_weight=0.0,
+            n_restarts=16,
+        )
+        balanced = compositional_split(
+            ids,
+            formulas,
+            seed=42,
+            ratios=(0.34, 0.33, 0.33),
+            targets=targets,
+            label_weight=2.0,
+            leakage_weight=0.0,
+            n_restarts=16,
+        )
+
+        tmap = {sid: t for sid, t in zip(ids, targets)}
+        global_mean = sum(targets) / len(targets)
+
+        def split_drift(splits):
+            drift = 0.0
+            used = 0
+            for split in ("train", "val", "test"):
+                vals = [tmap[sid] for sid in splits[split]]
+                if not vals:
+                    continue
+                drift += abs(sum(vals) / len(vals) - global_mean)
+                used += 1
+            return drift / max(used, 1)
+
+        assert split_drift(balanced) <= split_drift(baseline)
+
+    def test_feature_leakage_penalty_reduces_cross_split_similarity(self):
+        ids = ["S0", "S1", "S2", "S3"]
+        formulas = ["Li2O", "Na2O", "Fe2O3", "Co2O3"]
+        # S0~S1 and S2~S3 are near-duplicates in feature space.
+        feats = [
+            [1.0, 0.0],
+            [0.98, 0.02],
+            [0.0, 1.0],
+            [0.02, 0.98],
+        ]
+
+        baseline = compositional_split(
+            ids,
+            formulas,
+            seed=7,
+            ratios=(0.5, 0.25, 0.25),
+            feature_vectors=feats,
+            leakage_weight=0.0,
+            n_restarts=8,
+        )
+        leakage_aware = compositional_split(
+            ids,
+            formulas,
+            seed=7,
+            ratios=(0.5, 0.25, 0.25),
+            feature_vectors=feats,
+            leakage_weight=2.0,
+            n_restarts=8,
+        )
+
+        f = {sid: vec for sid, vec in zip(ids, feats)}
+
+        def cosine(a, b):
+            na = sum(x * x for x in a) ** 0.5
+            nb = sum(x * x for x in b) ** 0.5
+            if na == 0 or nb == 0:
+                return 0.0
+            return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+        def cross_split_similarity(splits):
+            assign = {}
+            for split in ("train", "val", "test"):
+                for sid in splits[split]:
+                    assign[sid] = split
+            sim = 0.0
+            for a, b in itertools.combinations(ids, 2):
+                if assign[a] != assign[b]:
+                    sim += max(cosine(f[a], f[b]), 0.0)
+            return sim
+
+        assert cross_split_similarity(leakage_aware) <= cross_split_similarity(baseline)
+
+    def test_feature_dimension_mismatch_raises(self):
+        ids = ["S0", "S1", "S2"]
+        formulas = ["Li2O", "Na2O", "Fe2O3"]
+        feats = [[1.0, 0.0], [0.0], [0.0, 1.0]]
+        with pytest.raises(ValueError):
+            compositional_split(ids, formulas, feature_vectors=feats)
+
 
 # ---------------------------------------------------------------------------
 # Prototype split
@@ -141,6 +279,12 @@ class TestPrototypeSplit:
         in_val = sg225_ids & set(splits["val"])
         in_test = sg225_ids & set(splits["test"])
         assert sum(len(s) > 0 for s in [in_train, in_val, in_test]) == 1
+
+    def test_mismatched_parallel_lengths_raise(self):
+        ids = [f"S{i}" for i in range(10)]
+        sgs = ["225"] * 9
+        with pytest.raises(ValueError):
+            prototype_split(ids, sgs, seed=42)
 
 
 # ---------------------------------------------------------------------------
