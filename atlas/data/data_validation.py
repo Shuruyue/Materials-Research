@@ -142,16 +142,41 @@ def compute_trust_score(
         for prop in properties:
             stats = property_stats.get(prop)
             val = sample.get(prop)
-            if stats and val is not None and stats.get("std", 0) > 0:
+            if not stats or val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+
+            # Prefer robust location/scale when available.
+            # Reference: Rousseeuw & Croux (1993), robust scale estimation.
+            median = stats.get("median")
+            mad = stats.get("mad")
+            if (
+                median is not None
+                and mad is not None
+                and float(mad) > 1e-12
+                and math.isfinite(float(median))
+            ):
                 try:
-                    z = abs(float(val) - stats["mean"]) / stats["std"]
+                    robust_sigma = 1.4826 * float(mad)
+                    z = abs(fval - float(median)) / robust_sigma
                 except (TypeError, ValueError):
                     z = 999
-                if z <= 3:
-                    prop_score += 15.0 / n_props
-                elif z <= 5:
-                    prop_score += 8.0 / n_props
-                # beyond 5σ → 0
+            elif stats.get("std", 0) and float(stats["std"]) > 1e-12:
+                try:
+                    z = abs(fval - float(stats["mean"])) / float(stats["std"])
+                except (TypeError, ValueError):
+                    z = 999
+            else:
+                continue
+
+            if z <= 3:
+                prop_score += 15.0 / n_props
+            elif z <= 5:
+                prop_score += 8.0 / n_props
+            # beyond 5σ -> 0
         ts.plausibility_points = min(15.0, prop_score)
     else:
         ts.plausibility_points = 8.0  # neutral when no stats available
@@ -202,6 +227,7 @@ class ValidationReport:
     duplicate_count: int = 0
     outlier_count: int = 0
     drift_summary: dict[str, float] = field(default_factory=dict)
+    drift_alert_count: int = 0
     gate_pass: bool = True
     gate_failures: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
@@ -221,6 +247,7 @@ class ValidationReport:
             "duplicate_count": self.duplicate_count,
             "outlier_count": self.outlier_count,
             "drift_summary": self.drift_summary,
+            "drift_alert_count": self.drift_alert_count,
             "gate_pass": self.gate_pass,
             "gate_failures": self.gate_failures,
             "trust_tier_counts": self.trust_tier_counts,
@@ -254,6 +281,7 @@ class ValidationReport:
             f"| Unit violations | {self.unit_violations} | {'✅' if self.unit_violations == 0 else '❌'} |",
             f"| Duplicates | {self.duplicate_count} | ⚠️ (warning) |",
             f"| Outliers | {self.outlier_count} | ⚠️ (warning) |",
+            f"| Drift alerts | {self.drift_alert_count} | {'⚠️' if self.drift_alert_count > 0 else '✅'} |",
             "",
             f"**Overall**: {'✅ PASS' if self.gate_pass else '❌ FAIL'}",
             "",
@@ -277,7 +305,7 @@ class ValidationReport:
             f.write("\n".join(lines))
         return path
 
-    def apply_gates(self, *, strict: bool = False) -> None:
+    def apply_gates(self, *, strict: bool = False, drift_hard_gate: bool = False) -> None:
         """Apply gate rules and set pass/fail."""
         self.gate_failures = []
         if self.schema_violations > 0:
@@ -296,6 +324,10 @@ class ValidationReport:
             self.gate_failures.append(
                 f"unit_violations={self.unit_violations} (must be 0)"
             )
+        if drift_hard_gate and self.drift_alert_count > 0:
+            self.gate_failures.append(
+                f"drift_alert_count={self.drift_alert_count} (hard gate: must be 0)"
+            )
         if strict:
             if self.duplicate_count > 0:
                 self.gate_failures.append(
@@ -304,6 +336,10 @@ class ValidationReport:
             if self.outlier_count > 0:
                 self.gate_failures.append(
                     f"outlier_count={self.outlier_count} (strict: must be 0)"
+                )
+            if self.drift_alert_count > 0:
+                self.gate_failures.append(
+                    f"drift_alert_count={self.drift_alert_count} (strict: must be 0)"
                 )
         self.gate_pass = len(self.gate_failures) == 0
 
@@ -443,6 +479,9 @@ def check_outliers(
     """Return indices of values beyond ``sigma_threshold`` from median.
 
     Uses median + MAD (median absolute deviation) for robustness.
+
+    Reference:
+    Rousseeuw & Croux (1993), alternatives to classical variance scale estimators.
     """
     if not values:
         return []
@@ -549,6 +588,42 @@ def summarize_properties(
     return out
 
 
+def collect_property_values(
+    records: list[dict[str, Any]],
+    properties: list[str] | None,
+    *,
+    allow_source_fallback: bool = True,
+) -> dict[str, list[float]]:
+    """Collect finite float values for each property.
+
+    When ``allow_source_fallback`` is enabled, canonical property names
+    are mapped back to source columns via ``PROPERTY_MAP``.
+    """
+    if not properties:
+        return {}
+    rev_map: dict[str, str] = {}
+    if allow_source_fallback:
+        with contextlib.suppress(Exception):
+            from atlas.data.crystal_dataset import PROPERTY_MAP
+
+            rev_map = {v: k for k, v in PROPERTY_MAP.items()}
+    out = {prop: [] for prop in properties}
+    for rec in records:
+        for prop in properties:
+            raw = rec.get(prop)
+            if raw is None:
+                source_col = rev_map.get(prop)
+                if source_col:
+                    raw = rec.get(source_col)
+            if raw is None:
+                continue
+            with contextlib.suppress(TypeError, ValueError):
+                val = float(raw)
+                if math.isfinite(val):
+                    out[prop].append(val)
+    return out
+
+
 def compute_mean_shift_drift(
     baseline_summary: dict[str, dict[str, float]] | None,
     current_summary: dict[str, dict[str, float]],
@@ -573,6 +648,302 @@ def compute_mean_shift_drift(
         denom = abs(b_std) if math.isfinite(b_std) and abs(b_std) > 1e-12 else 1.0
         drift[prop] = abs(c_mean - b_mean) / denom
     return drift
+
+
+def _to_clean_array(values: list[float]) -> np.ndarray:
+    clean: list[float] = []
+    for v in values:
+        if v is None:
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            fv = float(v)
+            if math.isfinite(fv):
+                clean.append(fv)
+    return np.asarray(clean, dtype=float)
+
+
+def _median_heuristic_bandwidth(values: np.ndarray) -> float:
+    """Median-heuristic kernel bandwidth for 1D RBF-MMD."""
+    if values.size < 2:
+        return 1.0
+    sample = values
+    if sample.size > 256:
+        rng = np.random.RandomState(0)
+        sample = sample[rng.choice(sample.size, size=256, replace=False)]
+    diffs = sample[:, None] - sample[None, :]
+    d2 = (diffs * diffs).astype(float)
+    tri = d2[np.triu_indices_from(d2, k=1)]
+    tri = tri[tri > 0]
+    if tri.size == 0:
+        return 1.0
+    return max(1e-6, float(np.sqrt(np.median(tri))))
+
+
+def compute_wasserstein_1d(
+    values_old: list[float],
+    values_new: list[float],
+) -> float:
+    """Compute empirical 1-Wasserstein distance for one-dimensional samples.
+
+    Reference:
+    Ramdas et al. (2015), Wasserstein two-sample testing.
+    """
+    old = np.sort(_to_clean_array(values_old))
+    new = np.sort(_to_clean_array(values_new))
+    if old.size < 2 or new.size < 2:
+        return 0.0
+
+    grid = np.unique(np.concatenate([old, new]))
+    if grid.size < 2:
+        return 0.0
+
+    cdf_old = np.searchsorted(old, grid[:-1], side="right") / float(old.size)
+    cdf_new = np.searchsorted(new, grid[:-1], side="right") / float(new.size)
+    widths = np.diff(grid)
+    w1 = float(np.sum(np.abs(cdf_old - cdf_new) * widths))
+    return max(0.0, w1)
+
+
+def compute_ks_2sample(
+    values_old: list[float],
+    values_new: list[float],
+    *,
+    method: str = "auto",
+    n_permutations: int = 256,
+    random_state: int = 0,
+) -> tuple[float, float]:
+    """Kolmogorov-Smirnov two-sample test.
+
+    Method selection:
+    - ``asymptotic``: classical KS asymptotic p-value.
+    - ``permutation``: permutation-calibrated p-value.
+    - ``auto``: chooses permutation when sample is small or heavily tied.
+
+    References:
+    Kolmogorov (1933), Smirnov (1948), and permutation testing practice.
+    """
+
+    def _ks_statistic(sorted_old: np.ndarray, sorted_new: np.ndarray) -> float:
+        grid = np.unique(np.concatenate([sorted_old, sorted_new]))
+        if grid.size == 0:
+            return 0.0
+        cdf_old = np.searchsorted(sorted_old, grid, side="right") / float(
+            sorted_old.size
+        )
+        cdf_new = np.searchsorted(sorted_new, grid, side="right") / float(
+            sorted_new.size
+        )
+        return float(np.max(np.abs(cdf_old - cdf_new)))
+
+    def _asymptotic_pvalue(stat: float, n: int, m: int) -> float:
+        en = math.sqrt((float(n) * float(m)) / float(n + m))
+        if en <= 0:
+            return 1.0
+        lam = (en + 0.12 + 0.11 / en) * stat
+        if lam <= 1e-12:
+            return 1.0
+        series = 0.0
+        for j in range(1, 101):
+            term = ((-1) ** (j - 1)) * math.exp(-2.0 * (lam * lam) * (j * j))
+            series += term
+            if abs(term) < 1e-10:
+                break
+        return max(0.0, min(1.0, 2.0 * series))
+
+    def _permutation_pvalue(
+        old_arr: np.ndarray,
+        new_arr: np.ndarray,
+        observed_stat: float,
+        *,
+        n_perm: int,
+        seed: int,
+    ) -> float:
+        combined = np.concatenate([old_arr, new_arr])
+        n_old = old_arr.size
+        rng = np.random.RandomState(seed)
+        exceed = 0
+        n_perm = max(64, int(n_perm))
+        for _ in range(n_perm):
+            perm = rng.permutation(combined.size)
+            perm_old = np.sort(combined[perm[:n_old]])
+            perm_new = np.sort(combined[perm[n_old:]])
+            stat = _ks_statistic(perm_old, perm_new)
+            if stat >= observed_stat - 1e-12:
+                exceed += 1
+        return (exceed + 1.0) / (n_perm + 1.0)
+
+    old = np.sort(_to_clean_array(values_old))
+    new = np.sort(_to_clean_array(values_new))
+    if old.size < 5 or new.size < 5:
+        return 0.0, 1.0
+    stat = _ks_statistic(old, new)
+
+    tie_frac_old = 1.0 - (np.unique(old).size / float(old.size))
+    tie_frac_new = 1.0 - (np.unique(new).size / float(new.size))
+    auto_needs_perm = (
+        min(old.size, new.size) < 40
+        or tie_frac_old > 0.1
+        or tie_frac_new > 0.1
+    )
+    chosen = method
+    if chosen not in {"auto", "asymptotic", "permutation"}:
+        chosen = "auto"
+    if chosen == "auto":
+        chosen = "permutation" if auto_needs_perm else "asymptotic"
+
+    if chosen == "permutation":
+        pvalue = _permutation_pvalue(
+            old,
+            new,
+            stat,
+            n_perm=n_permutations,
+            seed=random_state,
+        )
+    else:
+        pvalue = _asymptotic_pvalue(stat, int(old.size), int(new.size))
+    return stat, pvalue
+
+
+def compute_mmd_rbf(
+    values_old: list[float],
+    values_new: list[float],
+    *,
+    max_points: int = 512,
+) -> float:
+    """Compute unbiased RBF-MMD^2 between two one-dimensional samples.
+
+    Reference:
+    Gretton et al. (2012), kernel two-sample tests (MMD).
+    """
+    old = _to_clean_array(values_old)
+    new = _to_clean_array(values_new)
+    if old.size < 2 or new.size < 2:
+        return 0.0
+
+    rng = np.random.RandomState(0)
+    if old.size > max_points:
+        old = old[rng.choice(old.size, size=max_points, replace=False)]
+    if new.size > max_points:
+        new = new[rng.choice(new.size, size=max_points, replace=False)]
+
+    sigma = _median_heuristic_bandwidth(np.concatenate([old, new]))
+    gamma = 1.0 / (2.0 * sigma * sigma)
+
+    diff_xx = old[:, None] - old[None, :]
+    diff_yy = new[:, None] - new[None, :]
+    diff_xy = old[:, None] - new[None, :]
+    k_xx = np.exp(-gamma * (diff_xx * diff_xx))
+    k_yy = np.exp(-gamma * (diff_yy * diff_yy))
+    k_xy = np.exp(-gamma * (diff_xy * diff_xy))
+
+    m = float(old.size)
+    n = float(new.size)
+    if m < 2 or n < 2:
+        return 0.0
+    term_xx = (k_xx.sum() - np.trace(k_xx)) / (m * (m - 1.0))
+    term_yy = (k_yy.sum() - np.trace(k_yy)) / (n * (n - 1.0))
+    term_xy = k_xy.mean()
+    mmd2 = float(term_xx + term_yy - 2.0 * term_xy)
+    return max(0.0, mmd2)
+
+
+def benjamini_hochberg_qvalues(pvalues: dict[str, float]) -> dict[str, float]:
+    """Benjamini-Hochberg FDR adjustment.
+
+    Reference:
+    Benjamini & Hochberg (1995), controlling false discovery rate.
+    """
+    if not pvalues:
+        return {}
+    items = sorted(
+        ((k, min(1.0, max(0.0, float(v)))) for k, v in pvalues.items()),
+        key=lambda x: x[1],
+    )
+    m = len(items)
+    qvals: list[float] = [1.0] * m
+    running = 1.0
+    for rank in range(m, 0, -1):
+        _, p = items[rank - 1]
+        raw = (p * m) / float(rank)
+        running = min(running, raw)
+        qvals[rank - 1] = min(1.0, running)
+    return {items[i][0]: qvals[i] for i in range(m)}
+
+
+def compute_distribution_drift(
+    baseline_values: dict[str, list[float]] | None,
+    current_values: dict[str, list[float]],
+    *,
+    alpha: float = 0.05,
+    effect_threshold: float = 0.1,
+    mmd_effect_threshold: float = 0.01,
+    ks_method: str = "auto",
+    ks_permutations: int = 256,
+    max_points: int = 512,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Compute distribution-level drift stats and drift alerts per property.
+
+    Alert rule:
+    (KS q-value <= alpha) and (scaled Wasserstein >= effect_threshold)
+    and (MMD^2 >= mmd_effect_threshold)
+    where scaled Wasserstein is normalized by baseline IQR.
+    """
+    if not baseline_values:
+        return {}, []
+
+    details: dict[str, dict[str, Any]] = {}
+    pvalues: dict[str, float] = {}
+    for prop, new_vals in current_values.items():
+        old_vals = baseline_values.get(prop, [])
+        if len(old_vals) < 10 or len(new_vals) < 10:
+            continue
+        ks_stat, ks_p = compute_ks_2sample(
+            old_vals,
+            new_vals,
+            method=ks_method,
+            n_permutations=ks_permutations,
+            random_state=0,
+        )
+        w1 = compute_wasserstein_1d(old_vals, new_vals)
+        mmd2 = compute_mmd_rbf(old_vals, new_vals, max_points=max_points)
+
+        old_arr = _to_clean_array(old_vals)
+        if old_arr.size >= 2:
+            q1, q3 = np.quantile(old_arr, [0.25, 0.75])
+            iqr = float(q3 - q1)
+        else:
+            iqr = 0.0
+        denom = iqr if iqr > 1e-12 else 1.0
+        scaled_w1 = w1 / denom
+
+        details[prop] = {
+            "n_old": float(len(old_vals)),
+            "n_new": float(len(new_vals)),
+            "ks_stat": ks_stat,
+            "ks_pvalue": ks_p,
+            "wasserstein": w1,
+            "scaled_wasserstein": scaled_w1,
+            "mmd2_rbf": mmd2,
+        }
+        pvalues[prop] = ks_p
+
+    qvals = benjamini_hochberg_qvalues(pvalues)
+    alerts: list[str] = []
+    for prop, stats in details.items():
+        qv = qvals.get(prop, 1.0)
+        w1_ok = float(stats["scaled_wasserstein"]) >= effect_threshold
+        mmd_ok = float(stats["mmd2_rbf"]) >= mmd_effect_threshold
+        is_alert = bool(
+            qv <= alpha and w1_ok and mmd_ok
+        )
+        stats["ks_qvalue"] = qv
+        stats["alert_rule"] = "ks_q & scaled_w1 & mmd2"
+        stats["w1_effect_threshold"] = effect_threshold
+        stats["mmd_effect_threshold"] = mmd_effect_threshold
+        stats["alert"] = is_alert
+        if is_alert:
+            alerts.append(prop)
+    return details, alerts
 
 
 def compute_drift(
@@ -620,6 +991,14 @@ def validate_dataset(
     required_fields: list[str] | None = None,
     units_spec: dict[str, dict[str, Any]] | None = None,
     baseline_property_summary: dict[str, dict[str, float]] | None = None,
+    baseline_property_values: dict[str, list[float]] | None = None,
+    drift_alpha: float = 0.05,
+    drift_effect_threshold: float = 0.1,
+    drift_mmd_effect_threshold: float = 0.01,
+    drift_ks_method: str = "auto",
+    drift_ks_permutations: int = 256,
+    drift_max_points: int = 512,
+    drift_hard_gate: bool = False,
     strict: bool = False,
 ) -> ValidationReport:
     """Run full validation pipeline on a list of sample records.
@@ -636,6 +1015,23 @@ def validate_dataset(
         Pre-computed per-property mean/std for trust scoring.
     required_fields : list[str], optional
         Fields required in schema (default: ``["jid", "atoms"]``).
+    baseline_property_values : dict, optional
+        Optional per-property baseline value lists for two-sample drift tests.
+        If provided, KS/Wasserstein/MMD drift metrics are computed.
+    drift_alpha : float
+        BH-FDR significance threshold used for drift alerts.
+    drift_effect_threshold : float
+        Minimum scaled Wasserstein effect size for a drift alert.
+    drift_mmd_effect_threshold : float
+        Minimum RBF-MMD^2 effect size for a drift alert.
+    drift_ks_method : str
+        KS p-value method: auto, asymptotic, permutation.
+    drift_ks_permutations : int
+        Permutation count when KS permutation calibration is used.
+    drift_max_points : int
+        Maximum sample size per split for MMD computation.
+    drift_hard_gate : bool
+        If True, non-zero drift alerts fail hard gates.
     strict : bool
         If True, warnings (duplicates, outliers) also cause gate failure.
     """
@@ -692,6 +1088,21 @@ def validate_dataset(
     report.drift_summary = compute_mean_shift_drift(
         baseline_property_summary, property_summary
     )
+    current_property_values = collect_property_values(records, properties)
+    if baseline_property_values:
+        drift_details, drift_alerts = compute_distribution_drift(
+            baseline_property_values,
+            current_property_values,
+            alpha=drift_alpha,
+            effect_threshold=drift_effect_threshold,
+            mmd_effect_threshold=drift_mmd_effect_threshold,
+            ks_method=drift_ks_method,
+            ks_permutations=drift_ks_permutations,
+            max_points=drift_max_points,
+        )
+        report.details["distribution_drift"] = drift_details
+        report.details["distribution_drift_alerts"] = drift_alerts
+        report.drift_alert_count = len(drift_alerts)
 
     # Trust scoring
     tier_counts: dict[str, int] = {"raw": 0, "curated": 0, "benchmark": 0}
@@ -703,7 +1114,7 @@ def validate_dataset(
     report.trust_tier_counts = tier_counts
 
     report.duration_sec = time.time() - t0
-    report.apply_gates(strict=strict)
+    report.apply_gates(strict=strict, drift_hard_gate=drift_hard_gate)
     return report
 
 
@@ -773,6 +1184,54 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional previous validation JSON report used for drift summary",
+    )
+    parser.add_argument(
+        "--baseline-input",
+        type=Path,
+        default=None,
+        help="Optional baseline dataset (.json/.jsonl/.csv) for two-sample drift tests.",
+    )
+    parser.add_argument(
+        "--drift-alpha",
+        type=float,
+        default=0.05,
+        help="FDR threshold alpha for drift alerts (default: 0.05).",
+    )
+    parser.add_argument(
+        "--drift-effect-threshold",
+        type=float,
+        default=0.1,
+        help="Minimum scaled Wasserstein effect size for a drift alert.",
+    )
+    parser.add_argument(
+        "--drift-mmd-effect-threshold",
+        type=float,
+        default=0.01,
+        help="Minimum RBF-MMD^2 effect size for a drift alert.",
+    )
+    parser.add_argument(
+        "--drift-ks-method",
+        type=str,
+        default="auto",
+        choices=["auto", "asymptotic", "permutation"],
+        help="KS p-value method used in drift testing.",
+    )
+    parser.add_argument(
+        "--drift-ks-permutations",
+        type=int,
+        default=256,
+        help="Permutation count for KS permutation mode.",
+    )
+    parser.add_argument(
+        "--drift-max-points",
+        type=int,
+        default=512,
+        help="Maximum sample count per side for MMD computation.",
+    )
+    parser.add_argument(
+        "--drift-hard-gate",
+        action="store_true",
+        help="Fail validation if drift alerts are detected.",
     )
     parser.add_argument(
         "--schema-version",
@@ -919,7 +1378,7 @@ def _compute_property_stats(
     properties: list[str],
     records: list[dict[str, Any]],
 ) -> dict[str, dict[str, float]]:
-    """Compute per-property mean/std from training records."""
+    """Compute per-property robust and classical stats from records."""
     from atlas.data.crystal_dataset import PROPERTY_MAP
 
     rev_map = {v: k for k, v in PROPERTY_MAP.items()}
@@ -928,15 +1387,84 @@ def _compute_property_stats(
         vals: list[float] = []
         source_col = rev_map.get(prop)
         for r in records:
-            v = r.get(source_col) if source_col else r.get(prop)
+            v = r.get(prop)
+            if v is None and source_col:
+                v = r.get(source_col)
             if v is not None:
                 with contextlib.suppress(TypeError, ValueError):
-                    vals.append(float(v))
+                    fv = float(v)
+                    if math.isfinite(fv):
+                        vals.append(fv)
         if vals:
-            mean = sum(vals) / len(vals)
-            std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
-            stats[prop] = {"mean": mean, "std": std}
+            arr = np.asarray(vals, dtype=float)
+            mean = float(arr.mean())
+            std = float(arr.std(ddof=0))
+            median = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - median)))
+            stats[prop] = {
+                "mean": mean,
+                "std": std,
+                "median": median,
+                "mad": mad,
+            }
     return stats
+
+
+def _select_records_for_property_stats(
+    records: list[dict[str, Any]],
+    split_ids: dict[str, set[str]] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Choose records used to estimate trust-score property stats.
+
+    Prefers train split records to avoid information leakage.
+    """
+    if not records:
+        return [], "empty"
+    if not split_ids:
+        return records, "all_records"
+    train_ids = {str(x) for x in split_ids.get("train", set())}
+    if not train_ids:
+        return records, "all_records"
+    selected: list[dict[str, Any]] = []
+    for i, rec in enumerate(records):
+        if _sample_id(rec, i) in train_ids:
+            selected.append(rec)
+    if not selected:
+        return records, "all_records_fallback"
+    return selected, "train_split"
+
+
+def _collect_property_values_from_records(
+    properties: list[str],
+    records: list[dict[str, Any]],
+) -> dict[str, list[float]]:
+    """Collect canonical property values with source-column fallback."""
+    return collect_property_values(records, properties, allow_source_fallback=True)
+
+
+def _summarize_property_values(
+    property_values: dict[str, list[float]],
+) -> dict[str, dict[str, float]]:
+    summary: dict[str, dict[str, float]] = {}
+    for prop, vals in property_values.items():
+        if not vals:
+            summary[prop] = {
+                "count": 0.0,
+                "mean": math.nan,
+                "std": math.nan,
+                "min": math.nan,
+                "max": math.nan,
+            }
+            continue
+        arr = np.asarray(vals, dtype=float)
+        summary[prop] = {
+            "count": float(arr.size),
+            "mean": float(arr.mean()),
+            "std": float(arr.std(ddof=0)),
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+        }
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -971,8 +1499,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     units_spec = _load_units_spec(args.units_spec)
     baseline_summary = _load_baseline_property_summary(args.baseline_report)
+    baseline_property_values: dict[str, list[float]] | None = None
+    if args.baseline_input is not None:
+        baseline_records = _load_records_from_input(args.baseline_input)
+        baseline_property_values = _collect_property_values_from_records(
+            properties, baseline_records
+        )
+        if baseline_summary is None:
+            baseline_summary = _summarize_property_values(baseline_property_values)
+    stats_records, stats_source = _select_records_for_property_stats(
+        all_records, split_ids
+    )
     property_stats = (
-        _compute_property_stats(properties, all_records) if not args.quick else {}
+        _compute_property_stats(properties, stats_records) if not args.quick else {}
     )
 
     # Run validation
@@ -983,10 +1522,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         property_stats=property_stats or None,
         units_spec=units_spec,
         baseline_property_summary=baseline_summary,
+        baseline_property_values=None if args.quick else baseline_property_values,
+        drift_alpha=args.drift_alpha,
+        drift_effect_threshold=args.drift_effect_threshold,
+        drift_mmd_effect_threshold=args.drift_mmd_effect_threshold,
+        drift_ks_method=args.drift_ks_method,
+        drift_ks_permutations=max(32, int(args.drift_ks_permutations)),
+        drift_max_points=max(32, int(args.drift_max_points)),
+        drift_hard_gate=args.drift_hard_gate,
         strict=args.strict,
     )
     report.schema_version = args.schema_version
     report.details["provenance_injected_from_source"] = provenance_injected
+    report.details["property_stats_source"] = stats_source
+    report.details["property_stats_n_records"] = len(stats_records)
 
     # Resolve output paths
     from atlas.config import get_config
@@ -1007,6 +1556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  leakage={report.leakage_count}")
     print(f"  duplicates={report.duplicate_count}")
     print(f"  outliers={report.outlier_count}")
+    print(f"  drift_alerts={report.drift_alert_count}")
     print(f"  trust tiers: {report.trust_tier_counts}")
 
     if not report.gate_pass:

@@ -5,13 +5,20 @@
 from atlas.data.data_validation import (
     ValidationReport,
     _load_records_from_input,
+    _select_records_for_property_stats,
+    benjamini_hochberg_qvalues,
+    collect_property_values,
     check_duplicates,
     check_leakage,
     check_outliers,
     check_provenance,
     check_schema,
     compute_drift,
+    compute_distribution_drift,
+    compute_ks_2sample,
+    compute_mmd_rbf,
     compute_trust_score,
+    compute_wasserstein_1d,
     validate_dataset,
 )
 
@@ -185,6 +192,60 @@ class TestComputeDrift:
         assert compute_drift([1.0, 2.0], [3.0, 4.0]) == 0.0
 
 
+class TestDistributionMetrics:
+    def test_wasserstein_identical(self):
+        vals = [float(i) for i in range(50)]
+        w1 = compute_wasserstein_1d(vals, vals)
+        assert w1 == 0.0
+
+    def test_wasserstein_shifted(self):
+        old = [float(i) for i in range(50)]
+        new = [float(i + 10) for i in range(50)]
+        w1 = compute_wasserstein_1d(old, new)
+        assert w1 > 0
+
+    def test_mmd_shifted(self):
+        old = [float(i) for i in range(80)]
+        new = [float(i + 20) for i in range(80)]
+        mmd2 = compute_mmd_rbf(old, new, max_points=128)
+        assert mmd2 > 0
+
+    def test_bh_qvalues(self):
+        qvals = benjamini_hochberg_qvalues({"a": 0.001, "b": 0.02, "c": 0.9})
+        assert set(qvals) == {"a", "b", "c"}
+        assert qvals["a"] <= qvals["b"] <= qvals["c"]
+
+    def test_distribution_drift_alert(self):
+        baseline = {"formation_energy": [float(i) for i in range(100)]}
+        current = {"formation_energy": [float(i + 50) for i in range(100)]}
+        details, alerts = compute_distribution_drift(
+            baseline,
+            current,
+            alpha=0.05,
+            effect_threshold=0.05,
+            max_points=256,
+        )
+        assert "formation_energy" in details
+        assert "formation_energy" in alerts
+
+    def test_ks_permutation_handles_ties(self):
+        old = [0.0] * 40 + [1.0] * 40
+        new = [0.0] * 10 + [1.0] * 70
+        stat, p = compute_ks_2sample(
+            old,
+            new,
+            method="permutation",
+            n_permutations=128,
+        )
+        assert stat > 0
+        assert p < 0.05
+
+    def test_collect_property_values_source_fallback(self):
+        records = [{"formation_energy_peratom": -1.23}]
+        out = collect_property_values(records, ["formation_energy"])
+        assert out["formation_energy"] == [-1.23]
+
+
 # ---------------------------------------------------------------------------
 # Trust scoring
 # ---------------------------------------------------------------------------
@@ -250,6 +311,38 @@ class TestDeterministicSeeding:
         assert r1.provenance_missing == r2.provenance_missing
         assert r1.duplicate_count == r2.duplicate_count
 
+    def test_validation_strict_fails_on_drift_alert(self):
+        records = [
+            {
+                "jid": f"J{i}",
+                "atoms": {},
+                "provenance_type": "dft_primary",
+                "formation_energy": float(i + 30),
+            }
+            for i in range(60)
+        ]
+        baseline_values = {"formation_energy": [float(i) for i in range(60)]}
+        report = validate_dataset(
+            records,
+            properties=["formation_energy"],
+            baseline_property_values=baseline_values,
+            strict=True,
+            drift_effect_threshold=0.05,
+        )
+        assert report.drift_alert_count >= 1
+        assert report.gate_pass is False
+
+    def test_select_records_for_property_stats_prefers_train(self):
+        records = [
+            {"jid": "A", "formation_energy": 1.0},
+            {"jid": "B", "formation_energy": 2.0},
+            {"jid": "C", "formation_energy": 3.0},
+        ]
+        split_ids = {"train": {"A", "C"}, "val": {"B"}, "test": set()}
+        selected, source = _select_records_for_property_stats(records, split_ids)
+        assert source == "train_split"
+        assert [r["jid"] for r in selected] == ["A", "C"]
+
 
 # ---------------------------------------------------------------------------
 # ValidationReport
@@ -280,6 +373,13 @@ class TestValidationReport:
         assert report.gate_pass is True  # non-strict: dupes are warning
         report.apply_gates(strict=True)
         assert report.gate_pass is False  # strict: dupes are failure
+
+    def test_gate_drift_hard_gate(self):
+        report = ValidationReport(drift_alert_count=2)
+        report.apply_gates(drift_hard_gate=False)
+        assert report.gate_pass is True
+        report.apply_gates(drift_hard_gate=True)
+        assert report.gate_pass is False
 
     def test_to_dict(self):
         report = ValidationReport(n_samples=100, schema_violations=0)
