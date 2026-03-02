@@ -228,6 +228,7 @@ class ValidationReport:
     outlier_count: int = 0
     drift_summary: dict[str, float] = field(default_factory=dict)
     drift_alert_count: int = 0
+    joint_drift_alert_count: int = 0
     gate_pass: bool = True
     gate_failures: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
@@ -248,6 +249,7 @@ class ValidationReport:
             "outlier_count": self.outlier_count,
             "drift_summary": self.drift_summary,
             "drift_alert_count": self.drift_alert_count,
+            "joint_drift_alert_count": self.joint_drift_alert_count,
             "gate_pass": self.gate_pass,
             "gate_failures": self.gate_failures,
             "trust_tier_counts": self.trust_tier_counts,
@@ -282,6 +284,7 @@ class ValidationReport:
             f"| Duplicates | {self.duplicate_count} | ⚠️ (warning) |",
             f"| Outliers | {self.outlier_count} | ⚠️ (warning) |",
             f"| Drift alerts | {self.drift_alert_count} | {'⚠️' if self.drift_alert_count > 0 else '✅'} |",
+            f"| Joint drift alerts | {self.joint_drift_alert_count} | {'⚠️' if self.joint_drift_alert_count > 0 else '✅'} |",
             "",
             f"**Overall**: {'✅ PASS' if self.gate_pass else '❌ FAIL'}",
             "",
@@ -305,7 +308,13 @@ class ValidationReport:
             f.write("\n".join(lines))
         return path
 
-    def apply_gates(self, *, strict: bool = False, drift_hard_gate: bool = False) -> None:
+    def apply_gates(
+        self,
+        *,
+        strict: bool = False,
+        drift_hard_gate: bool = False,
+        joint_drift_hard_gate: bool = False,
+    ) -> None:
         """Apply gate rules and set pass/fail."""
         self.gate_failures = []
         if self.schema_violations > 0:
@@ -328,6 +337,10 @@ class ValidationReport:
             self.gate_failures.append(
                 f"drift_alert_count={self.drift_alert_count} (hard gate: must be 0)"
             )
+        if joint_drift_hard_gate and self.joint_drift_alert_count > 0:
+            self.gate_failures.append(
+                f"joint_drift_alert_count={self.joint_drift_alert_count} (hard gate: must be 0)"
+            )
         if strict:
             if self.duplicate_count > 0:
                 self.gate_failures.append(
@@ -340,6 +353,11 @@ class ValidationReport:
             if self.drift_alert_count > 0:
                 self.gate_failures.append(
                     f"drift_alert_count={self.drift_alert_count} (strict: must be 0)"
+                )
+            if self.joint_drift_alert_count > 0:
+                self.gate_failures.append(
+                    "joint_drift_alert_count="
+                    f"{self.joint_drift_alert_count} (strict: must be 0)"
                 )
         self.gate_pass = len(self.gate_failures) == 0
 
@@ -622,6 +640,230 @@ def collect_property_values(
                 if math.isfinite(val):
                     out[prop].append(val)
     return out
+
+
+def _records_to_joint_matrix(
+    records: list[dict[str, Any]],
+    properties: list[str] | None,
+) -> np.ndarray:
+    """
+    Build multivariate property matrix (NaN allowed) from records.
+
+    Source-column fallback is applied via ``PROPERTY_MAP`` when available.
+    """
+    if not properties:
+        return np.zeros((0, 0), dtype=float)
+
+    rev_map: dict[str, str] = {}
+    with contextlib.suppress(Exception):
+        from atlas.data.crystal_dataset import PROPERTY_MAP
+
+        rev_map = {v: k for k, v in PROPERTY_MAP.items()}
+
+    rows: list[list[float]] = []
+    for rec in records:
+        vals: list[float] = []
+        for prop in properties:
+            raw = rec.get(prop)
+            if raw is None:
+                source_col = rev_map.get(prop)
+                if source_col:
+                    raw = rec.get(source_col)
+            if raw is None:
+                vals.append(float("nan"))
+                continue
+            with contextlib.suppress(TypeError, ValueError):
+                fv = float(raw)
+                if math.isfinite(fv):
+                    vals.append(fv)
+                    continue
+            vals.append(float("nan"))
+        rows.append(vals)
+
+    if not rows:
+        return np.zeros((0, len(properties)), dtype=float)
+    return np.asarray(rows, dtype=float)
+
+
+def _subsample_rows(x: np.ndarray, max_points: int, seed: int) -> np.ndarray:
+    if x.shape[0] <= max_points:
+        return x
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(x.shape[0], size=max_points, replace=False)
+    return x[idx]
+
+
+def _robust_standardize_pair(
+    old: np.ndarray,
+    new: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    pooled = np.vstack([old, new])
+    center = np.median(pooled, axis=0)
+    mad = np.median(np.abs(pooled - center), axis=0)
+    scale = 1.4826 * mad
+    # Fallback to pooled std on near-constant dimensions.
+    std = np.std(pooled, axis=0)
+    scale = np.where(scale > 1e-8, scale, np.where(std > 1e-8, std, 1.0))
+    return (old - center) / scale, (new - center) / scale
+
+
+def _average_pairwise_l2(a: np.ndarray, b: np.ndarray, *, same: bool) -> float:
+    if same:
+        if a.shape[0] < 2:
+            return 0.0
+        diff = a[:, None, :] - a[None, :, :]
+        dist = np.linalg.norm(diff, axis=2)
+        total = float(dist.sum() - np.trace(dist))
+        denom = float(a.shape[0] * (a.shape[0] - 1))
+        return total / max(denom, 1.0)
+
+    if a.shape[0] == 0 or b.shape[0] == 0:
+        return 0.0
+    diff = a[:, None, :] - b[None, :, :]
+    dist = np.linalg.norm(diff, axis=2)
+    return float(dist.mean())
+
+
+def compute_energy_distance_multivariate(
+    values_old: np.ndarray,
+    values_new: np.ndarray,
+) -> float:
+    """
+    Compute multivariate energy distance between two samples.
+
+    Reference:
+    Székely & Rizzo (2013), energy statistics for multivariate distributions.
+    """
+    old = np.asarray(values_old, dtype=float)
+    new = np.asarray(values_new, dtype=float)
+    if old.ndim != 2 or new.ndim != 2:
+        raise ValueError("values_old/values_new must be 2D arrays")
+    if old.shape[1] != new.shape[1]:
+        raise ValueError(
+            f"feature dimension mismatch: {old.shape[1]} != {new.shape[1]}"
+        )
+    if old.shape[0] < 2 or new.shape[0] < 2:
+        return 0.0
+    cross = _average_pairwise_l2(old, new, same=False)
+    within_old = _average_pairwise_l2(old, old, same=True)
+    within_new = _average_pairwise_l2(new, new, same=True)
+    dist = 2.0 * cross - within_old - within_new
+    return max(0.0, float(dist))
+
+
+def compute_joint_distribution_drift(
+    baseline_records: list[dict[str, Any]] | None,
+    current_records: list[dict[str, Any]],
+    *,
+    properties: list[str] | None,
+    alpha: float = 0.05,
+    effect_threshold: float = 0.20,
+    n_permutations: int = 256,
+    max_points: int = 256,
+    min_samples: int = 16,
+    include_missing_indicators: bool = True,
+    random_state: int = 0,
+) -> dict[str, Any]:
+    """
+    Compute multivariate joint drift via permutation-calibrated energy distance.
+
+    Missing values are handled by robust median imputation, with optional
+    missingness indicator augmentation to preserve shift signal from NA patterns.
+
+    Alert rule:
+    ``(pvalue <= alpha) and (energy_distance >= effect_threshold)``.
+    """
+    detail: dict[str, Any] = {
+        "method": "energy_distance_permutation",
+        "alpha": float(alpha),
+        "effect_threshold": float(effect_threshold),
+        "n_permutations": int(max(32, n_permutations)),
+        "max_points": int(max(32, max_points)),
+        "min_samples": int(max(4, min_samples)),
+        "alert": False,
+        "skipped": False,
+    }
+    if not baseline_records or not properties:
+        detail["skipped"] = True
+        detail["reason"] = "missing_baseline_or_properties"
+        return detail
+
+    x_raw = _records_to_joint_matrix(baseline_records, properties)
+    y_raw = _records_to_joint_matrix(current_records, properties)
+    detail["n_old_raw"] = int(x_raw.shape[0])
+    detail["n_new_raw"] = int(y_raw.shape[0])
+    detail["n_features"] = int(x_raw.shape[1]) if x_raw.ndim == 2 else 0
+    detail["n_old_complete_case"] = int(np.sum(np.all(np.isfinite(x_raw), axis=1))) if x_raw.size else 0
+    detail["n_new_complete_case"] = int(np.sum(np.all(np.isfinite(y_raw), axis=1))) if y_raw.size else 0
+    if (
+        x_raw.shape[0] < int(max(4, min_samples))
+        or y_raw.shape[0] < int(max(4, min_samples))
+        or x_raw.shape[1] == 0
+    ):
+        detail["skipped"] = True
+        detail["reason"] = "insufficient_samples_or_features"
+        return detail
+
+    pooled_raw = np.vstack([x_raw, y_raw])
+    finite_cols = np.any(np.isfinite(pooled_raw), axis=0)
+    if not np.any(finite_cols):
+        detail["skipped"] = True
+        detail["reason"] = "all_features_missing"
+        return detail
+
+    x_miss = x_raw[:, finite_cols]
+    y_miss = y_raw[:, finite_cols]
+    pooled_miss = np.vstack([x_miss, y_miss])
+    med = np.nanmedian(pooled_miss, axis=0)
+    med = np.where(np.isfinite(med), med, 0.0)
+    x_imp = np.where(np.isfinite(x_miss), x_miss, med[None, :])
+    y_imp = np.where(np.isfinite(y_miss), y_miss, med[None, :])
+    if include_missing_indicators:
+        x_nan = (~np.isfinite(x_miss)).astype(float)
+        y_nan = (~np.isfinite(y_miss)).astype(float)
+        x_feat = np.hstack([x_imp, x_nan])
+        y_feat = np.hstack([y_imp, y_nan])
+    else:
+        x_feat = x_imp
+        y_feat = y_imp
+
+    pooled_feat = np.vstack([x_feat, y_feat])
+    var = np.var(pooled_feat, axis=0)
+    keep = var > 1e-12
+    if not np.any(keep):
+        detail["skipped"] = True
+        detail["reason"] = "all_features_constant_after_imputation"
+        return detail
+    x = x_feat[:, keep]
+    y = y_feat[:, keep]
+    detail["n_features_effective"] = int(x.shape[1])
+
+    x = _subsample_rows(x, int(max(32, max_points)), seed=random_state)
+    y = _subsample_rows(y, int(max(32, max_points)), seed=random_state + 1)
+    x, y = _robust_standardize_pair(x, y)
+    observed = compute_energy_distance_multivariate(x, y)
+    detail["n_old"] = int(x.shape[0])
+    detail["n_new"] = int(y.shape[0])
+    detail["energy_distance"] = float(observed)
+
+    combined = np.vstack([x, y])
+    n_old = int(x.shape[0])
+    rng = np.random.RandomState(random_state)
+    exceed = 0
+    n_perm = int(max(32, n_permutations))
+    for _ in range(n_perm):
+        perm = rng.permutation(combined.shape[0])
+        x_perm = combined[perm[:n_old], :]
+        y_perm = combined[perm[n_old:], :]
+        stat = compute_energy_distance_multivariate(x_perm, y_perm)
+        if stat >= observed - 1e-12:
+            exceed += 1
+    pvalue = (float(exceed) + 1.0) / (float(n_perm) + 1.0)
+    detail["pvalue"] = float(pvalue)
+    detail["alert"] = bool(
+        pvalue <= float(alpha) and observed >= float(effect_threshold)
+    )
+    return detail
 
 
 def compute_mean_shift_drift(
@@ -992,6 +1234,7 @@ def validate_dataset(
     units_spec: dict[str, dict[str, Any]] | None = None,
     baseline_property_summary: dict[str, dict[str, float]] | None = None,
     baseline_property_values: dict[str, list[float]] | None = None,
+    baseline_records: list[dict[str, Any]] | None = None,
     drift_alpha: float = 0.05,
     drift_effect_threshold: float = 0.1,
     drift_mmd_effect_threshold: float = 0.01,
@@ -999,6 +1242,11 @@ def validate_dataset(
     drift_ks_permutations: int = 256,
     drift_max_points: int = 512,
     drift_hard_gate: bool = False,
+    joint_drift_alpha: float = 0.05,
+    joint_drift_effect_threshold: float = 0.2,
+    joint_drift_permutations: int = 256,
+    joint_drift_max_points: int = 256,
+    joint_drift_hard_gate: bool = False,
     strict: bool = False,
 ) -> ValidationReport:
     """Run full validation pipeline on a list of sample records.
@@ -1018,6 +1266,8 @@ def validate_dataset(
     baseline_property_values : dict, optional
         Optional per-property baseline value lists for two-sample drift tests.
         If provided, KS/Wasserstein/MMD drift metrics are computed.
+    baseline_records : list[dict], optional
+        Optional baseline records for multivariate joint-drift testing.
     drift_alpha : float
         BH-FDR significance threshold used for drift alerts.
     drift_effect_threshold : float
@@ -1032,6 +1282,16 @@ def validate_dataset(
         Maximum sample size per split for MMD computation.
     drift_hard_gate : bool
         If True, non-zero drift alerts fail hard gates.
+    joint_drift_alpha : float
+        Significance threshold for permutation-calibrated joint-drift test.
+    joint_drift_effect_threshold : float
+        Minimum energy-distance effect size for a joint-drift alert.
+    joint_drift_permutations : int
+        Permutation count for joint-drift p-value estimation.
+    joint_drift_max_points : int
+        Maximum sample count per side for joint-drift computation.
+    joint_drift_hard_gate : bool
+        If True, non-zero joint drift alerts fail hard gates.
     strict : bool
         If True, warnings (duplicates, outliers) also cause gate failure.
     """
@@ -1103,6 +1363,19 @@ def validate_dataset(
         report.details["distribution_drift"] = drift_details
         report.details["distribution_drift_alerts"] = drift_alerts
         report.drift_alert_count = len(drift_alerts)
+    if baseline_records and properties:
+        joint_detail = compute_joint_distribution_drift(
+            baseline_records,
+            records,
+            properties=properties,
+            alpha=joint_drift_alpha,
+            effect_threshold=joint_drift_effect_threshold,
+            n_permutations=joint_drift_permutations,
+            max_points=joint_drift_max_points,
+            random_state=0,
+        )
+        report.details["joint_distribution_drift"] = joint_detail
+        report.joint_drift_alert_count = int(bool(joint_detail.get("alert", False)))
 
     # Trust scoring
     tier_counts: dict[str, int] = {"raw": 0, "curated": 0, "benchmark": 0}
@@ -1114,7 +1387,11 @@ def validate_dataset(
     report.trust_tier_counts = tier_counts
 
     report.duration_sec = time.time() - t0
-    report.apply_gates(strict=strict, drift_hard_gate=drift_hard_gate)
+    report.apply_gates(
+        strict=strict,
+        drift_hard_gate=drift_hard_gate,
+        joint_drift_hard_gate=joint_drift_hard_gate,
+    )
     return report
 
 
@@ -1232,6 +1509,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--drift-hard-gate",
         action="store_true",
         help="Fail validation if drift alerts are detected.",
+    )
+    parser.add_argument(
+        "--joint-drift-alpha",
+        type=float,
+        default=0.05,
+        help="Permutation-test alpha for multivariate joint drift alerts.",
+    )
+    parser.add_argument(
+        "--joint-drift-effect-threshold",
+        type=float,
+        default=0.2,
+        help="Minimum multivariate energy-distance effect size for joint drift alerts.",
+    )
+    parser.add_argument(
+        "--joint-drift-permutations",
+        type=int,
+        default=256,
+        help="Permutation count for multivariate joint drift test.",
+    )
+    parser.add_argument(
+        "--joint-drift-max-points",
+        type=int,
+        default=256,
+        help="Maximum sample count per side for multivariate joint drift test.",
+    )
+    parser.add_argument(
+        "--joint-drift-hard-gate",
+        action="store_true",
+        help="Fail validation if multivariate joint drift alert is detected.",
     )
     parser.add_argument(
         "--schema-version",
@@ -1500,6 +1806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     units_spec = _load_units_spec(args.units_spec)
     baseline_summary = _load_baseline_property_summary(args.baseline_report)
     baseline_property_values: dict[str, list[float]] | None = None
+    baseline_records: list[dict[str, Any]] | None = None
     if args.baseline_input is not None:
         baseline_records = _load_records_from_input(args.baseline_input)
         baseline_property_values = _collect_property_values_from_records(
@@ -1523,6 +1830,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         units_spec=units_spec,
         baseline_property_summary=baseline_summary,
         baseline_property_values=None if args.quick else baseline_property_values,
+        baseline_records=None if args.quick else baseline_records,
         drift_alpha=args.drift_alpha,
         drift_effect_threshold=args.drift_effect_threshold,
         drift_mmd_effect_threshold=args.drift_mmd_effect_threshold,
@@ -1530,6 +1838,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         drift_ks_permutations=max(32, int(args.drift_ks_permutations)),
         drift_max_points=max(32, int(args.drift_max_points)),
         drift_hard_gate=args.drift_hard_gate,
+        joint_drift_alpha=args.joint_drift_alpha,
+        joint_drift_effect_threshold=args.joint_drift_effect_threshold,
+        joint_drift_permutations=max(32, int(args.joint_drift_permutations)),
+        joint_drift_max_points=max(32, int(args.joint_drift_max_points)),
+        joint_drift_hard_gate=args.joint_drift_hard_gate,
         strict=args.strict,
     )
     report.schema_version = args.schema_version
@@ -1557,6 +1870,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  duplicates={report.duplicate_count}")
     print(f"  outliers={report.outlier_count}")
     print(f"  drift_alerts={report.drift_alert_count}")
+    print(f"  joint_drift_alerts={report.joint_drift_alert_count}")
     print(f"  trust tiers: {report.trust_tier_counts}")
 
     if not report.gate_pass:

@@ -15,6 +15,7 @@ from atlas.data.data_validation import (
     check_schema,
     compute_drift,
     compute_distribution_drift,
+    compute_joint_distribution_drift,
     compute_ks_2sample,
     compute_mmd_rbf,
     compute_trust_score,
@@ -245,6 +246,81 @@ class TestDistributionMetrics:
         out = collect_property_values(records, ["formation_energy"])
         assert out["formation_energy"] == [-1.23]
 
+    def test_joint_distribution_drift_alert(self):
+        baseline = [
+            {
+                "jid": f"B{i}",
+                "formation_energy": float(i),
+                "band_gap": float(i) * 0.1,
+            }
+            for i in range(120)
+        ]
+        current = [
+            {
+                "jid": f"C{i}",
+                "formation_energy": float(i + 40),
+                "band_gap": float(i + 40) * 0.1,
+            }
+            for i in range(120)
+        ]
+        detail = compute_joint_distribution_drift(
+            baseline,
+            current,
+            properties=["formation_energy", "band_gap"],
+            alpha=0.05,
+            effect_threshold=0.1,
+            n_permutations=96,
+            max_points=96,
+        )
+        assert detail["skipped"] is False
+        assert detail["alert"] is True
+        assert detail["energy_distance"] > 0
+
+    def test_joint_distribution_drift_skips_when_insufficient_complete_cases(self):
+        baseline = [{"jid": "B1", "formation_energy": 1.0, "band_gap": None}]
+        current = [{"jid": "C1", "formation_energy": 2.0, "band_gap": 0.2}]
+        detail = compute_joint_distribution_drift(
+            baseline,
+            current,
+            properties=["formation_energy", "band_gap"],
+            n_permutations=64,
+        )
+        assert detail["skipped"] is True
+        assert detail["alert"] is False
+
+    def test_joint_distribution_drift_handles_missing_without_complete_case_drop(self):
+        baseline = []
+        current = []
+        for i in range(120):
+            baseline.append(
+                {
+                    "jid": f"B{i}",
+                    "formation_energy": float(i),
+                    "band_gap": (float(i) * 0.1) if (i % 2 == 0) else None,
+                }
+            )
+            current.append(
+                {
+                    "jid": f"C{i}",
+                    "formation_energy": float(i + 30),
+                    "band_gap": (float(i + 30) * 0.1) if (i % 2 == 0) else None,
+                }
+            )
+        detail = compute_joint_distribution_drift(
+            baseline,
+            current,
+            properties=["formation_energy", "band_gap"],
+            alpha=0.05,
+            effect_threshold=0.1,
+            n_permutations=96,
+            max_points=96,
+            min_samples=24,
+        )
+        assert detail["skipped"] is False
+        assert detail["n_old_complete_case"] < detail["n_old_raw"]
+        assert detail["n_new_complete_case"] < detail["n_new_raw"]
+        assert detail["energy_distance"] > 0.0
+
 
 # ---------------------------------------------------------------------------
 # Trust scoring
@@ -343,6 +419,39 @@ class TestDeterministicSeeding:
         assert source == "train_split"
         assert [r["jid"] for r in selected] == ["A", "C"]
 
+    def test_validation_joint_drift_hard_gate(self):
+        baseline_records = [
+            {
+                "jid": f"B{i}",
+                "atoms": {},
+                "provenance_type": "dft_primary",
+                "formation_energy": float(i),
+                "band_gap": float(i) * 0.1,
+            }
+            for i in range(120)
+        ]
+        current_records = [
+            {
+                "jid": f"C{i}",
+                "atoms": {},
+                "provenance_type": "dft_primary",
+                "formation_energy": float(i + 30),
+                "band_gap": float(i + 30) * 0.1,
+            }
+            for i in range(120)
+        ]
+        report = validate_dataset(
+            current_records,
+            properties=["formation_energy", "band_gap"],
+            baseline_records=baseline_records,
+            joint_drift_effect_threshold=0.1,
+            joint_drift_permutations=96,
+            joint_drift_max_points=96,
+            joint_drift_hard_gate=True,
+        )
+        assert report.joint_drift_alert_count >= 1
+        assert report.gate_pass is False
+
 
 # ---------------------------------------------------------------------------
 # ValidationReport
@@ -379,6 +488,13 @@ class TestValidationReport:
         report.apply_gates(drift_hard_gate=False)
         assert report.gate_pass is True
         report.apply_gates(drift_hard_gate=True)
+        assert report.gate_pass is False
+
+    def test_gate_joint_drift_hard_gate(self):
+        report = ValidationReport(joint_drift_alert_count=1)
+        report.apply_gates(joint_drift_hard_gate=False)
+        assert report.gate_pass is True
+        report.apply_gates(joint_drift_hard_gate=True)
         assert report.gate_pass is False
 
     def test_to_dict(self):

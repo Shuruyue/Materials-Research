@@ -187,6 +187,7 @@ class TopoDB:
             "ml": ReliabilityState(alpha=2.0, beta=2.0),
         }
         self._channel_corr = np.eye(len(_EVIDENCE_CHANNELS), dtype=float)
+        self._last_inference_diagnostics: dict[str, Any] = {}
 
         if self.use_sql and self.sql_path.exists():
             self._df = self._load_from_sql()
@@ -389,6 +390,81 @@ class TopoDB:
         np.fill_diagonal(corr, 1.0)
         return 0.5 * (corr + corr.T)
 
+    @classmethod
+    def _calibration_metrics(
+        cls,
+        probs: np.ndarray,
+        labels: np.ndarray,
+        *,
+        n_bins: int = 10,
+    ) -> tuple[float, float, float]:
+        """
+        Binary calibration metrics: ECE, Brier score, and NLL.
+
+        Reference:
+        - Guo et al. (2017), temperature scaling for calibrated probabilities.
+        """
+        p = cls._clip_prob(np.asarray(probs, dtype=float), eps=1e-9)
+        y = np.asarray(labels, dtype=float)
+        if p.size == 0:
+            return 0.0, 0.0, 0.0
+        brier = float(np.mean((p - y) ** 2))
+        nll = float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
+
+        bins = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1)
+        ece = 0.0
+        n = float(p.size)
+        for i in range(len(bins) - 1):
+            lo = bins[i]
+            hi = bins[i + 1]
+            if i == len(bins) - 2:
+                mask = (p >= lo) & (p <= hi)
+            else:
+                mask = (p >= lo) & (p < hi)
+            if not np.any(mask):
+                continue
+            conf = float(np.mean(p[mask]))
+            acc = float(np.mean(y[mask]))
+            ece += abs(conf - acc) * (float(np.sum(mask)) / n)
+        return float(ece), brier, nll
+
+    @classmethod
+    def _fit_temperature(
+        cls,
+        probs: np.ndarray,
+        labels: np.ndarray,
+        *,
+        min_temp: float = 0.25,
+        max_temp: float = 8.0,
+        steps: int = 161,
+    ) -> float:
+        """
+        Fit scalar temperature by minimizing binary NLL in logit space.
+        """
+        p = cls._clip_prob(np.asarray(probs, dtype=float), eps=1e-9)
+        y = np.asarray(labels, dtype=float)
+        if p.size == 0:
+            return 1.0
+        lo = max(float(min_temp), 1e-3)
+        hi = max(float(max_temp), lo + 1e-6)
+        temps = np.exp(np.linspace(math.log(lo), math.log(hi), int(max(8, steps))))
+        logits = np.log(p) - np.log(1.0 - p)
+
+        best_t = 1.0
+        best_nll = float("inf")
+        for t in temps:
+            q = cls._sigmoid(logits / float(t))
+            q = cls._clip_prob(q, eps=1e-9)
+            nll = float(-np.mean(y * np.log(q) + (1.0 - y) * np.log(1.0 - q)))
+            if nll + 1e-12 < best_nll:
+                best_nll = nll
+                best_t = float(t)
+        return float(best_t)
+
+    def last_inference_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostics from the latest infer_topology_probabilities call."""
+        return dict(self._last_inference_diagnostics)
+
     @staticmethod
     def _truth_binary_from_series(series: pd.Series) -> np.ndarray:
         arr = np.full(len(series), np.nan, dtype=float)
@@ -585,6 +661,13 @@ class TopoDB:
         corr_shrinkage: float = 0.25,
         correlation_penalty: float = 1.0,
         weight_constraint: str = "nonnegative",
+        channel_reliability_override: dict[str, Any] | None = None,
+        score_calibration: str = "none",
+        calibration_scheme: str = "cross_fit",
+        calibration_min_samples: int = 12,
+        calibration_bins: int = 10,
+        calibration_folds: int = 3,
+        calibration_seed: int = 0,
         update_topo_class: bool = False,
         decision_threshold: float = 0.55,
         semimetal_gap_threshold: float = 0.05,
@@ -600,6 +683,8 @@ class TopoDB:
         2) Channel weights are reliability-tempered (Beta posterior means).
         3) Beta posterior interval via exact quantile inversion (or normal approx).
         4) OOD score from composition-space nearest-neighbor distance.
+        5) Optional post-hoc temperature scaling on labeled subset.
+        6) Cross-fit calibration diagnostics to reduce in-sample optimism.
 
         References:
         - Genest & Zidek (1986): pooling probability opinions.
@@ -642,6 +727,12 @@ class TopoDB:
         channel_weight = {ch: float(ws[i]) for i, ch in enumerate(_EVIDENCE_CHANNELS)}
         if weight_constraint not in {"nonnegative", "unconstrained"}:
             raise ValueError("weight_constraint must be one of {'nonnegative','unconstrained'}")
+        calibration_mode = str(score_calibration).strip().lower()
+        if calibration_mode not in {"none", "temperature"}:
+            raise ValueError("score_calibration must be one of {'none','temperature'}")
+        calibration_scheme_canon = str(calibration_scheme).strip().lower()
+        if calibration_scheme_canon not in {"in_sample", "cross_fit"}:
+            raise ValueError("calibration_scheme must be one of {'in_sample','cross_fit'}")
         mode = str(correlation_mode).strip().lower()
         if mode not in {"correlated", "independent"}:
             raise ValueError("correlation_mode must be one of {'correlated','independent'}")
@@ -651,11 +742,34 @@ class TopoDB:
             else np.eye(len(_EVIDENCE_CHANNELS), dtype=float)
         )
         corr_full = self._normalize_correlation_matrix(corr_full)
+        override_reliability: dict[str, float] = {}
+        if channel_reliability_override:
+            for ch, raw in channel_reliability_override.items():
+                ch_key = str(ch).strip().lower()
+                if ch_key not in _EVIDENCE_CHANNELS:
+                    continue
+                rel: float | None = None
+                if isinstance(raw, ReliabilityState):
+                    rel = float(raw.mean)
+                elif isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                    with np.errstate(invalid="ignore"):
+                        a = float(raw[0])
+                        b = float(raw[1])
+                    if np.isfinite(a) and np.isfinite(b) and (a + b) > 0:
+                        rel = float(a / (a + b))
+                else:
+                    with np.errstate(invalid="ignore"):
+                        rv = float(raw)
+                    if np.isfinite(rv):
+                        rel = rv
+                if rel is not None:
+                    override_reliability[ch_key] = float(np.clip(rel, 1e-6, 1.0))
 
         n = len(work)
         p_out = np.zeros(n, dtype=float)
         ci_lo = np.zeros(n, dtype=float)
         ci_hi = np.zeros(n, dtype=float)
+        n_eff_out = np.zeros(n, dtype=float)
         y_prior = self._truth_binary_from_series(work["topo_class"])
 
         for i in range(n):
@@ -666,7 +780,7 @@ class TopoDB:
                 p_ch = probs[ch][i]
                 if not np.isfinite(p_ch):
                     continue
-                rel = self._channel_reliability[ch].mean
+                rel = override_reliability.get(ch, self._channel_reliability[ch].mean)
                 conf = float(np.clip(confs[ch][i], 0.05, 1.0))
                 info = channel_weight[ch] * max(rel, 1e-6) * conf
                 p_terms.append(float(self._clip_prob(p_ch)))
@@ -732,6 +846,142 @@ class TopoDB:
             p_out[i] = p
             ci_lo[i] = lo
             ci_hi[i] = hi
+            n_eff_out[i] = float(n_eff)
+
+        labeled_mask = np.isfinite(y_prior)
+        labeled_idx = np.where(labeled_mask)[0]
+        n_labeled = int(labeled_idx.size)
+        p_base = p_out.copy()
+        temp = 1.0
+        ece_before = 0.0
+        brier_before = 0.0
+        nll_before = 0.0
+        ece_after = 0.0
+        brier_after = 0.0
+        nll_after = 0.0
+        eval_scheme = "none"
+        n_eval = 0
+        folds_used = 0
+        fold_temps: list[float] = []
+
+        if n_labeled > 0:
+            ece_before, brier_before, nll_before = self._calibration_metrics(
+                p_base[labeled_mask],
+                y_prior[labeled_mask],
+                n_bins=int(max(2, calibration_bins)),
+            )
+
+            p_cal = p_base.copy()
+            if (
+                calibration_mode == "temperature"
+                and n_labeled >= int(max(1, calibration_min_samples))
+            ):
+                temp = self._fit_temperature(
+                    p_base[labeled_mask],
+                    y_prior[labeled_mask],
+                )
+                logits_all = np.log(self._clip_prob(p_base, eps=1e-9)) - np.log(
+                    1.0 - self._clip_prob(p_base, eps=1e-9)
+                )
+                p_cal = self._sigmoid(logits_all / max(float(temp), 1e-9))
+                p_cal = self._clip_prob(p_cal, eps=1e-9)
+                for i in range(n):
+                    p_i = float(p_cal[i])
+                    n_eff = max(float(n_eff_out[i]), 1.0)
+                    alpha = float(prior_alpha) + p_i * n_eff
+                    beta = float(prior_beta) + (1.0 - p_i) * n_eff
+                    lo, hi = self._beta_interval(
+                        alpha,
+                        beta,
+                        z=float(ci_z),
+                        method=ci_method,
+                        level=ci_level,
+                    )
+                    ci_lo[i] = lo
+                    ci_hi[i] = hi
+                p_out = p_cal
+
+            # Calibration diagnostics: prefer cross-fit when requested and feasible.
+            use_cross_fit = (
+                calibration_mode == "temperature"
+                and calibration_scheme_canon == "cross_fit"
+                and n_labeled >= int(max(4, calibration_min_samples))
+            )
+            if use_cross_fit:
+                k = int(max(2, calibration_folds))
+                perm = labeled_idx.copy()
+                rng = np.random.RandomState(int(calibration_seed))
+                rng.shuffle(perm)
+                fold_ids = np.mod(np.arange(perm.size), k)
+                p_cv = np.full(n, np.nan, dtype=float)
+                for fold in range(k):
+                    val_mask_fold = fold_ids == fold
+                    if not np.any(val_mask_fold):
+                        continue
+                    train_idx = perm[~val_mask_fold]
+                    val_idx = perm[val_mask_fold]
+                    if train_idx.size < int(max(2, calibration_min_samples)):
+                        continue
+                    t_fold = self._fit_temperature(
+                        p_base[train_idx],
+                        y_prior[train_idx],
+                    )
+                    fold_temps.append(float(t_fold))
+                    logits_val = np.log(self._clip_prob(p_base[val_idx], eps=1e-9)) - np.log(
+                        1.0 - self._clip_prob(p_base[val_idx], eps=1e-9)
+                    )
+                    q_val = self._sigmoid(logits_val / max(float(t_fold), 1e-9))
+                    p_cv[val_idx] = self._clip_prob(q_val, eps=1e-9)
+                    folds_used += 1
+                cv_mask = np.isfinite(p_cv[labeled_idx])
+                if np.any(cv_mask):
+                    eval_scheme = "cross_fit"
+                    n_eval = int(np.sum(cv_mask))
+                    eval_probs = p_cv[labeled_idx][cv_mask]
+                    eval_labels = y_prior[labeled_idx][cv_mask]
+                    ece_after, brier_after, nll_after = self._calibration_metrics(
+                        eval_probs,
+                        eval_labels,
+                        n_bins=int(max(2, calibration_bins)),
+                    )
+                else:
+                    eval_scheme = "in_sample_fallback"
+                    n_eval = int(n_labeled)
+                    ece_after, brier_after, nll_after = self._calibration_metrics(
+                        p_out[labeled_mask],
+                        y_prior[labeled_mask],
+                        n_bins=int(max(2, calibration_bins)),
+                    )
+            else:
+                eval_scheme = "in_sample"
+                n_eval = int(n_labeled)
+                ece_after, brier_after, nll_after = self._calibration_metrics(
+                    p_out[labeled_mask],
+                    y_prior[labeled_mask],
+                    n_bins=int(max(2, calibration_bins)),
+                )
+
+        self._last_inference_diagnostics = {
+            "mode": calibration_mode,
+            "scheme": calibration_scheme_canon,
+            "eval_scheme": eval_scheme,
+            "temperature": float(temp),
+            "temperature_cv_mean": float(np.mean(fold_temps)) if fold_temps else float(temp),
+            "temperature_cv_std": float(np.std(fold_temps)) if fold_temps else 0.0,
+            "folds_used": int(folds_used),
+            "n_labeled": int(n_labeled),
+            "n_eval": int(n_eval),
+            "ece_before": float(ece_before),
+            "brier_before": float(brier_before),
+            "nll_before": float(nll_before),
+            "ece_after": float(ece_after),
+            "brier_after": float(brier_after),
+            "nll_after": float(nll_after),
+            "channel_reliability_used": {
+                ch: float(override_reliability.get(ch, self._channel_reliability[ch].mean))
+                for ch in _EVIDENCE_CHANNELS
+            },
+        }
 
         work["topological_probability"] = p_out
         work["topology_ci_low"] = ci_lo
@@ -945,4 +1195,5 @@ class TopoDB:
             "by_source": by_source,
             "channel_reliability": self.channel_reliability(),
             "channel_correlation": self.channel_correlation(),
+            "last_inference_diagnostics": self.last_inference_diagnostics(),
         }

@@ -365,3 +365,120 @@ def test_exact_and_normal_beta_interval_modes(topo_db):
     width_n = float(row_n["topology_ci_high"] - row_n["topology_ci_low"])
     assert 0.0 <= float(row_e["topology_ci_low"]) <= float(row_e["topology_ci_high"]) <= 1.0
     assert abs(width_e - width_n) > 1e-4
+
+
+def test_temperature_calibration_updates_inference_diagnostics(topo_db):
+    # Build intentionally miscalibrated labels vs evidence.
+    for i in range(12):
+        topo_db.add_material(
+            f"Bi{i}Se3",
+            "TI",
+            {
+                "jid": f"mis-ti-{i}",
+                "space_group": 166,
+                "spillage": 0.02,
+                "si_score": -1.0,
+                "ml_probability": 0.05,
+                "ml_uncertainty": 0.05,
+            },
+        )
+    for i in range(12):
+        topo_db.add_material(
+            f"Si{i}O2",
+            "TRIVIAL",
+            {
+                "jid": f"mis-tr-{i}",
+                "space_group": 227,
+                "spillage": 1.2,
+                "si_score": 1.2,
+                "ml_probability": 0.95,
+                "ml_uncertainty": 0.05,
+            },
+        )
+
+    topo_db.infer_topology_probabilities(
+        calibrate_reliability=False,
+        score_calibration="none",
+        persist=False,
+    )
+    diag_no = topo_db.last_inference_diagnostics()
+
+    topo_db.infer_topology_probabilities(
+        calibrate_reliability=False,
+        score_calibration="temperature",
+        calibration_scheme="cross_fit",
+        calibration_min_samples=8,
+        calibration_folds=3,
+        calibration_bins=8,
+        persist=False,
+    )
+    diag_cal = topo_db.last_inference_diagnostics()
+    assert diag_cal["mode"] == "temperature"
+    assert diag_cal["scheme"] == "cross_fit"
+    assert diag_cal["eval_scheme"] in {"cross_fit", "in_sample_fallback"}
+    assert int(diag_cal["n_labeled"]) >= 8
+    assert int(diag_cal["n_eval"]) > 0
+    assert float(diag_cal["temperature"]) > 1.0
+    assert float(diag_cal["ece_before"]) == float(diag_no["ece_before"])
+    assert float(diag_cal["nll_after"]) >= 0.0
+    assert "channel_reliability_used" in diag_cal
+
+
+def test_invalid_score_calibration_raises(topo_db):
+    topo_db.add_material(
+        "Bi2Se3",
+        "TI",
+        {"jid": "bad-calib", "space_group": 166, "spillage": 1.0, "si_score": 1.0},
+    )
+    with pytest.raises(ValueError, match="score_calibration"):
+        topo_db.infer_topology_probabilities(
+            calibrate_reliability=False,
+            score_calibration="isotonic",
+        )
+
+
+def test_invalid_calibration_scheme_raises(topo_db):
+    topo_db.add_material(
+        "Bi2Se3",
+        "TI",
+        {"jid": "bad-scheme", "space_group": 166, "spillage": 1.0, "si_score": 1.0},
+    )
+    with pytest.raises(ValueError, match="calibration_scheme"):
+        topo_db.infer_topology_probabilities(
+            calibrate_reliability=False,
+            score_calibration="temperature",
+            calibration_scheme="loo",
+        )
+
+
+def test_channel_reliability_override_changes_probability(topo_db):
+    topo_db.add_material(
+        "Bi2Se3",
+        "TI",
+        {
+            "jid": "override-1",
+            "space_group": 166,
+            "spillage": 1.2,
+            "si_score": -1.5,
+            "ml_probability": 0.50,
+            "ml_uncertainty": 0.1,
+        },
+    )
+    out_default = topo_db.infer_topology_probabilities(
+        calibrate_reliability=False,
+        score_calibration="none",
+        persist=False,
+    )
+    p_default = float(
+        out_default[out_default["jid"] == "override-1"]["topological_probability"].iloc[0]
+    )
+    out_override = topo_db.infer_topology_probabilities(
+        calibrate_reliability=False,
+        score_calibration="none",
+        channel_reliability_override={"si": 1.0, "spillage": 0.05, "ml": 0.5},
+        persist=False,
+    )
+    p_override = float(
+        out_override[out_override["jid"] == "override-1"]["topological_probability"].iloc[0]
+    )
+    assert abs(p_override - p_default) > 1e-6
