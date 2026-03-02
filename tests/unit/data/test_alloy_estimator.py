@@ -184,3 +184,130 @@ def test_print_report_with_experimental(sac305, capsys):
     sac305.print_report(experimental=exp)
     captured = capsys.readouterr()
     assert "%" in captured.out  # error percentages
+
+
+def test_thermal_wiener_bounds_contain_prediction(sac305):
+    """Thermal prediction should stay inside Wiener bounds."""
+    props = sac305.estimate_properties()
+    lo = props["thermal_conductivity_wiener_lower_W_mK"]
+    hi = props["thermal_conductivity_wiener_upper_W_mK"]
+    pred = props["thermal_conductivity_W_mK"]
+    assert lo <= pred <= hi
+
+
+def test_maxwell_thermal_model_within_wiener_bounds(sac305):
+    """Maxwell estimate should also stay inside Wiener bounds."""
+    props = sac305.estimate_properties(thermal_model="maxwell")
+    lo = props["thermal_conductivity_wiener_lower_W_mK"]
+    hi = props["thermal_conductivity_wiener_upper_W_mK"]
+    pred = props["thermal_conductivity_W_mK"]
+    assert lo <= pred <= hi
+    assert props["thermal_model_used"] == "maxwell"
+
+
+def test_unknown_thermal_model_raises(sac305):
+    """Unknown thermal model should raise ValueError."""
+    with pytest.raises(ValueError, match="Unknown thermal_model"):
+        sac305.estimate_properties(thermal_model="invalid")
+
+
+def test_mixing_entropy_pure_phase_is_zero():
+    """Pure element has zero ideal mixing entropy."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    est = AlloyEstimator.from_preset("pure_Sn")
+    props = est.estimate_properties()
+    assert abs(props["mixing_entropy_J_molK"]) < 1e-10
+    assert abs(props["mixing_entropy_over_R"]) < 1e-10
+
+
+def test_mixing_entropy_binary_is_positive():
+    """Binary alloy should have positive configurational entropy."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    est = AlloyEstimator.from_preset("SnPb63")
+    props = est.estimate_properties()
+    assert props["mixing_entropy_J_molK"] > 0
+    assert props["phase_entropy_volume_nat"] > 0
+
+
+def test_maxwell_model_is_order_invariant():
+    """Maxwell/Bruggeman thermal estimate should be invariant to phase order."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    phases = [
+        {
+            "name": "A",
+            "formula": "Cu",
+            "weight_fraction": 0.5,
+            "properties": {
+                "density_g_cm3": 8.0,
+                "bulk_modulus_GPa": 100,
+                "shear_modulus_GPa": 40,
+                "thermal_conductivity_W_mK": 200,
+                "thermal_expansion_1e6_K": 15,
+                "melting_point_K": 1200,
+            },
+        },
+        {
+            "name": "B",
+            "formula": "Sn",
+            "weight_fraction": 0.5,
+            "properties": {
+                "density_g_cm3": 8.0,
+                "bulk_modulus_GPa": 60,
+                "shear_modulus_GPa": 20,
+                "thermal_conductivity_W_mK": 20,
+                "thermal_expansion_1e6_K": 22,
+                "melting_point_K": 500,
+            },
+        },
+    ]
+
+    est_ab = AlloyEstimator.custom("ab", phases)
+    est_ba = AlloyEstimator.custom("ba", list(reversed(phases)))
+
+    k_ab = est_ab.estimate_properties(thermal_model="maxwell")["thermal_conductivity_W_mK"]
+    k_ba = est_ba.estimate_properties(thermal_model="maxwell")["thermal_conductivity_W_mK"]
+    assert abs(k_ab - k_ba) < 1e-10
+
+
+def test_mixing_entropy_uses_element_basis_for_intermetallic():
+    """Configurational entropy should use elemental fractions, not phase fractions."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    est = AlloyEstimator.custom(
+        "sn_imc",
+        [
+            {
+                "name": "Sn",
+                "formula": "Sn",
+                "weight_fraction": 0.7,
+                "properties": {
+                    "density_g_cm3": 7.29,
+                    "bulk_modulus_GPa": 56.3,
+                    "shear_modulus_GPa": 18.4,
+                    "thermal_conductivity_W_mK": 66.0,
+                    "thermal_expansion_1e6_K": 22.0,
+                    "melting_point_K": 505.0,
+                },
+            },
+            {
+                "name": "IMC",
+                "formula": "Cu6Sn5",
+                "weight_fraction": 0.3,
+                "properties": {
+                    "density_g_cm3": 8.28,
+                    "bulk_modulus_GPa": 120.0,
+                    "shear_modulus_GPa": 45.0,
+                    "thermal_conductivity_W_mK": 40.0,
+                    "thermal_expansion_1e6_K": 18.0,
+                    "melting_point_K": 688.0,
+                },
+            },
+        ],
+    )
+    props = est.estimate_properties()
+    assert props["mixing_entropy_basis"] == "element"
+    # Element-level entropy should be materially larger than phase-level 2-state entropy here.
+    assert props["mixing_entropy_over_R"] > 0.35
