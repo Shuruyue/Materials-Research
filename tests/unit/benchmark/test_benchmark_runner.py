@@ -44,6 +44,9 @@ class _FakeTask:
     def get_test_data(self, fold, include_target=True):  # noqa: ARG002
         return [1.0, 2.0, "bad"], pd.Series([1.0, 2.0, 3.0])
 
+    def get_train_and_val_data(self, fold, include_target=True):  # noqa: ARG002
+        return [1.0, 2.0, 3.0], pd.Series([1.0, 2.0, 3.0])
+
 
 def _fake_data(v: float) -> Data:
     return Data(
@@ -72,6 +75,9 @@ def test_compute_uncertainty_metrics():
     assert metrics["avg_std"] == pytest.approx(0.2)
     assert 0.0 <= metrics["pi95_coverage"] <= 1.0
     assert np.isfinite(metrics["gaussian_nll"])
+    assert np.isfinite(metrics["regression_ece"])
+    assert np.isfinite(metrics["interval_score_95"])
+    assert np.isfinite(metrics["crps_gaussian"])
 
 
 def test_aggregate_fold_results():
@@ -81,9 +87,12 @@ def test_aggregate_fold_results():
     ]
     agg = aggregate_fold_results(folds)
     assert agg["mae_mean"] == pytest.approx(0.3)
+    assert agg["mae_weighted_mean"] == pytest.approx((0.2 * 9.0 + 0.4 * 12.0) / (9.0 + 12.0))
     assert agg["coverage_mean"] == pytest.approx(0.95)
+    assert agg["coverage_weighted_mean"] == pytest.approx((0.9 * 10.0 + 1.0 * 12.0) / (10.0 + 12.0))
     assert agg["total_test_samples"] == pytest.approx(22.0)
     assert agg["n_successful_folds"] == pytest.approx(2.0)
+    assert agg["n_low_coverage_folds"] == pytest.approx(0.0)
 
 
 def test_runner_run_task_writes_report(tmp_path):
@@ -108,8 +117,11 @@ def test_runner_run_task_writes_report(tmp_path):
 
     assert out_path.exists()
     assert report["task_name"] == "fake_task"
+    assert report["report_path"] == str(out_path)
     assert report["aggregate_metrics"]["coverage_mean"] == pytest.approx(2.0 / 3.0)
     assert report["aggregate_metrics"]["global_mae"] == pytest.approx(0.0)
+    assert np.isfinite(report["aggregate_metrics"]["global_mae_ci95_lo"])
+    assert np.isfinite(report["aggregate_metrics"]["global_mae_ci95_hi"])
     assert report["fold_results"][0]["status"] == "ok"
 
 
@@ -134,6 +146,55 @@ def test_runner_uncertainty_outputs_are_reported(tmp_path):
     assert agg["pi95_coverage_mean"] == pytest.approx(1.0)
     assert np.isfinite(agg["gaussian_nll_mean"])
     assert agg["global_pi95_coverage"] == pytest.approx(1.0)
+    assert np.isfinite(agg["global_crps_gaussian"])
+
+
+def test_runner_conformal_metrics_are_reported(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+        use_conformal=True,
+        conformal_coverage=0.95,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    runner.structure_to_data = lambda structure: None if structure == "bad" else _fake_data(structure)
+
+    report = runner.run_task(
+        task_name="fake_task_conformal",
+        folds=[0],
+        show_progress=False,
+    )
+    agg = report["aggregate_metrics"]
+    assert np.isfinite(agg["conformal_qhat_mean"])
+    assert np.isfinite(agg["conformal_pi_coverage_mean"])
+    assert np.isfinite(agg["global_conformal_pi_coverage"])
+
+
+def test_runner_marks_low_coverage_when_below_threshold(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+        min_coverage_required=0.9,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    runner.structure_to_data = lambda structure: None if structure == "bad" else _fake_data(structure)
+
+    report = runner.run_task(
+        task_name="fake_task_gate",
+        folds=[0],
+        show_progress=False,
+    )
+    assert report["fold_results"][0]["status"] == "low_coverage"
+    assert report["aggregate_metrics"]["n_low_coverage_folds"] == pytest.approx(1.0)
+    assert report["aggregate_metrics"]["success_rate"] == pytest.approx(0.0)
 
 
 def test_benchmark_cli_list_tasks(capsys):

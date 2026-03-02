@@ -21,6 +21,7 @@ def _load_model(
     class_name: str,
     model_kwargs_json: str,
     checkpoint: str | None,
+    strict_checkpoint: bool = False,
 ):
     module = importlib.import_module(module_name)
     if not hasattr(module, class_name):
@@ -33,6 +34,12 @@ def _load_model(
 
     model = model_cls(**kwargs)
 
+    load_info = {
+        "checkpoint_path": str(checkpoint) if checkpoint else "",
+        "missing_keys": [],
+        "unexpected_keys": [],
+    }
+
     if checkpoint:
         ckpt_path = Path(checkpoint)
         payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -44,9 +51,13 @@ def _load_model(
             raise ValueError(
                 "Unsupported checkpoint format. Expected state_dict or dict with model_state_dict."
             )
-        model.load_state_dict(state_dict, strict=False)
+        incompatible = model.load_state_dict(state_dict, strict=bool(strict_checkpoint))
+        if hasattr(incompatible, "missing_keys"):
+            load_info["missing_keys"] = list(incompatible.missing_keys)
+        if hasattr(incompatible, "unexpected_keys"):
+            load_info["unexpected_keys"] = list(incompatible.unexpected_keys)
 
-    return model
+    return model, load_info
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,9 +69,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-class", type=str, default="", help="Model class name")
     parser.add_argument("--model-kwargs", type=str, default="{}", help="JSON kwargs for model constructor")
     parser.add_argument("--checkpoint", type=str, default="", help="Optional checkpoint path")
+    parser.add_argument(
+        "--strict-checkpoint",
+        action="store_true",
+        help="Require exact checkpoint key match (recommended for benchmark fairness).",
+    )
     parser.add_argument("--device", type=str, default="auto", help="cpu/cuda/auto")
     parser.add_argument("--batch-size", type=int, default=32, help="Inference batch size")
     parser.add_argument("--jobs", type=int, default=-1, help="Parallel structure conversion workers")
+    parser.add_argument("--bootstrap-samples", type=int, default=400, help="Bootstrap samples for global MAE CI")
+    parser.add_argument("--bootstrap-seed", type=int, default=42, help="Bootstrap RNG seed")
+    parser.add_argument(
+        "--min-coverage-required",
+        type=float,
+        default=0.0,
+        help="Mark fold as low_coverage when valid structure ratio is below this threshold.",
+    )
+    parser.add_argument(
+        "--use-conformal",
+        action="store_true",
+        help="Enable split-conformal diagnostics using fold train/val residuals.",
+    )
+    parser.add_argument(
+        "--conformal-coverage",
+        type=float,
+        default=0.95,
+        help="Target coverage for conformal intervals.",
+    )
+    parser.add_argument(
+        "--conformal-max-calibration-samples",
+        type=int,
+        default=0,
+        help="Cap calibration samples per fold (0 means full set).",
+    )
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--folds", type=int, nargs="*", default=None, help="Specific folds to run")
     parser.add_argument("--output", type=str, default="", help="Output JSON path")
     parser.add_argument("--output-dir", type=str, default="", help="Report directory if --output omitted")
@@ -113,12 +155,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not property_name:
         parser.error("--property is required when task has no default mapping")
 
-    model = _load_model(
+    model, load_info = _load_model(
         module_name=args.model_module,
         class_name=args.model_class,
         model_kwargs_json=args.model_kwargs,
         checkpoint=args.checkpoint or None,
+        strict_checkpoint=args.strict_checkpoint,
     )
+    if load_info["missing_keys"] or load_info["unexpected_keys"]:
+        print(
+            "[Benchmark] Checkpoint compatibility:",
+            f"missing={len(load_info['missing_keys'])}, unexpected={len(load_info['unexpected_keys'])}",
+        )
+        if args.strict_checkpoint:
+            print("[Benchmark] strict checkpoint mode enabled.")
 
     output_dir = Path(args.output_dir) if args.output_dir else None
     runner = MatbenchRunner(
@@ -128,6 +178,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=args.batch_size,
         n_jobs=args.jobs,
         output_dir=output_dir,
+        bootstrap_samples=args.bootstrap_samples,
+        bootstrap_seed=args.bootstrap_seed,
+        min_coverage_required=args.min_coverage_required,
+        use_conformal=args.use_conformal,
+        conformal_coverage=args.conformal_coverage,
+        conformal_max_calibration_samples=args.conformal_max_calibration_samples,
     )
 
     save_path = Path(args.output) if args.output else None
@@ -135,18 +191,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         task_name=args.task,
         folds=args.folds,
         save_path=save_path,
-        show_progress=True,
+        show_progress=not args.no_progress,
     )
 
+    aggregate = report["aggregate_metrics"]
     print("Task:", report["task_name"])
     print("Property:", report["property_name"])
     print("Model:", report["model_name"])
-    print("MAE (mean):", report["aggregate_metrics"].get("mae_mean"))
-    print("RMSE (mean):", report["aggregate_metrics"].get("rmse_mean"))
-    print("R2 (mean):", report["aggregate_metrics"].get("r2_mean"))
-    print("Coverage (mean):", report["aggregate_metrics"].get("coverage_mean"))
-    print("PI95 Coverage (mean):", report["aggregate_metrics"].get("pi95_coverage_mean"))
-    print("Gaussian NLL (mean):", report["aggregate_metrics"].get("gaussian_nll_mean"))
+    print("Global MAE:", aggregate.get("global_mae"))
+    print("Global MAE CI95:", (aggregate.get("global_mae_ci95_lo"), aggregate.get("global_mae_ci95_hi")))
+    print("Global RMSE:", aggregate.get("global_rmse"))
+    print("Global R2:", aggregate.get("global_r2"))
+    print("Success rate:", aggregate.get("success_rate"))
+    print("Fold MAE (weighted mean):", aggregate.get("mae_weighted_mean"))
+    print("Fold RMSE (weighted mean):", aggregate.get("rmse_weighted_mean"))
+    print("Fold Coverage (weighted mean):", aggregate.get("coverage_weighted_mean"))
+    print("PI95 Coverage (global):", aggregate.get("global_pi95_coverage"))
+    print("Gaussian NLL (global):", aggregate.get("global_gaussian_nll"))
+    print("CRPS (global):", aggregate.get("global_crps_gaussian"))
+    print("Regression ECE (global):", aggregate.get("global_regression_ece"))
+    print("Conformal PI coverage (weighted):", aggregate.get("conformal_pi_coverage_weighted_mean"))
     print("Report:", report.get("report_path"))
     return 0
 
