@@ -11,6 +11,9 @@ Optimization:
 """
 
 
+import math
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -28,6 +31,65 @@ EV_TO_J = 1.602176634e-19  # eV to Joules
 # SI Constants for internal calc
 HBAR_SI = 1.0545718e-34  # J·s
 KB_SI = 1.380649e-23     # J/K
+
+
+_FORMULA_TOKEN_RE = re.compile(r"([A-Z][a-z]?)(\d*\.?\d*)")
+_ATOMIC_MASS_FALLBACK = {
+    "H": 1.008,
+    "Li": 6.94,
+    "Be": 9.0122,
+    "B": 10.81,
+    "C": 12.011,
+    "N": 14.007,
+    "O": 15.999,
+    "F": 18.998,
+    "Na": 22.990,
+    "Mg": 24.305,
+    "Al": 26.982,
+    "Si": 28.085,
+    "P": 30.974,
+    "S": 32.06,
+    "Cl": 35.45,
+    "K": 39.098,
+    "Ca": 40.078,
+    "Ti": 47.867,
+    "V": 50.942,
+    "Cr": 51.996,
+    "Mn": 54.938,
+    "Fe": 55.845,
+    "Co": 58.933,
+    "Ni": 58.693,
+    "Cu": 63.546,
+    "Zn": 65.38,
+    "Ga": 69.723,
+    "Ge": 72.630,
+    "As": 74.922,
+    "Se": 78.971,
+    "Br": 79.904,
+    "Rb": 85.468,
+    "Sr": 87.62,
+    "Zr": 91.224,
+    "Nb": 92.906,
+    "Mo": 95.95,
+    "Ru": 101.07,
+    "Rh": 102.905,
+    "Pd": 106.42,
+    "Ag": 107.8682,
+    "Cd": 112.414,
+    "In": 114.818,
+    "Sn": 118.710,
+    "Sb": 121.760,
+    "Te": 127.60,
+    "I": 126.90447,
+    "Ba": 137.327,
+    "Hf": 178.49,
+    "Ta": 180.94788,
+    "W": 183.84,
+    "Pt": 195.084,
+    "Au": 196.96657,
+    "Pb": 207.2,
+    "Bi": 208.98040,
+}
 
 
 class PropertyEstimator:
@@ -55,11 +117,251 @@ class PropertyEstimator:
 
     def __init__(self):
         self.cfg = get_config()
+        self._formula_mass_cache: dict[str, tuple[float, float] | None] = {}
 
-    def extract_all_properties(self, df: pd.DataFrame) -> pd.DataFrame:
+    # ------------------------------------------------------------------
+    # Statistical / numerical helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normal_cdf(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x, dtype=float)
+        flat = arr.ravel()
+        out = np.asarray(
+            [0.5 * (1.0 + math.erf(float(v) / math.sqrt(2.0))) for v in flat],
+            dtype=float,
+        )
+        return out.reshape(arr.shape)
+
+    @classmethod
+    def _parse_formula_stoichiometry(cls, formula: str) -> dict[str, float] | None:
+        text = str(formula).strip()
+        if not text:
+            return None
+        try:
+            from pymatgen.core import Composition  # type: ignore
+
+            comp = Composition(text)
+            return {
+                str(el): float(amount)
+                for el, amount in comp.get_el_amt_dict().items()
+                if float(amount) > 0
+            }
+        except Exception:
+            pass
+
+        tokens = _FORMULA_TOKEN_RE.findall(text)
+        if not tokens:
+            return None
+        out: dict[str, float] = {}
+        for sym, raw_count in tokens:
+            count = float(raw_count) if raw_count else 1.0
+            if count <= 0:
+                continue
+            out[sym] = out.get(sym, 0.0) + count
+        return out or None
+
+    @classmethod
+    def _element_mass(cls, symbol: str) -> float | None:
+        try:
+            from pymatgen.core import Element  # type: ignore
+
+            e = Element(symbol)
+            if e.atomic_mass is None:
+                return None
+            return float(e.atomic_mass)
+        except Exception:
+            return _ATOMIC_MASS_FALLBACK.get(symbol)
+
+    def _formula_mass_tuple(self, formula: str) -> tuple[float, float] | None:
+        """Return (molar_mass_amu, n_atoms) for a formula."""
+        key = str(formula).strip()
+        if key in self._formula_mass_cache:
+            return self._formula_mass_cache[key]
+        stoich = self._parse_formula_stoichiometry(key)
+        if not stoich:
+            self._formula_mass_cache[key] = None
+            return None
+        total_atoms = float(sum(stoich.values()))
+        if total_atoms <= 0:
+            self._formula_mass_cache[key] = None
+            return None
+        mass = 0.0
+        for el, count in stoich.items():
+            m = self._element_mass(el)
+            if m is None:
+                self._formula_mass_cache[key] = None
+                return None
+            mass += float(count) * float(m)
+        result = (mass, total_atoms)
+        self._formula_mass_cache[key] = result
+        return result
+
+    def _estimate_avg_atomic_mass_amu(
+        self,
+        formulas: pd.Series | None,
+        *,
+        n_rows: int,
+        fallback_mass: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Estimate average atomic mass and formula atom-count vectors."""
+        n = int(n_rows)
+        avg_mass = np.full(n, float(fallback_mass), dtype=float)
+        n_atoms = np.ones(n, dtype=float)
+        if formulas is None:
+            return avg_mass, n_atoms
+        for i, f in enumerate(formulas.astype(str).tolist()):
+            if i >= n:
+                break
+            mt = self._formula_mass_tuple(f)
+            if mt is None:
+                continue
+            mass, atoms = mt
+            if atoms > 0 and mass > 0:
+                avg_mass[i] = mass / atoms
+                n_atoms[i] = atoms
+        return avg_mass, n_atoms
+
+    def _formula_complexity_score(
+        self,
+        formulas: pd.Series | None,
+        *,
+        n_rows: int,
+    ) -> np.ndarray:
+        """Compute normalized stoichiometric entropy in [0,1].
+
+        Higher value indicates more compositionally complex formulas.
+        """
+        n = int(n_rows)
+        complexity = np.zeros(n, dtype=float)
+        if formulas is None:
+            return complexity
+        for i, f in enumerate(formulas.astype(str).tolist()):
+            if i >= n:
+                break
+            stoich = self._parse_formula_stoichiometry(f)
+            if not stoich:
+                continue
+            counts = np.asarray(list(stoich.values()), dtype=float)
+            if counts.size <= 1:
+                complexity[i] = 0.0
+                continue
+            p = counts / np.maximum(counts.sum(), 1e-12)
+            ent = -np.sum(p * np.log(np.clip(p, 1e-12, 1.0)))
+            complexity[i] = float(ent / np.log(float(counts.size)))
+        return np.clip(complexity, 0.0, 1.0)
+
+    @staticmethod
+    def _precision_fusion(
+        values: np.ndarray,
+        sigmas: np.ndarray,
+        *,
+        correlation: float = 0.0,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precision-weighted Gaussian fusion with optional correlation.
+
+        Reference:
+        - BLUE / generalized least squares in Gaussian-noise setting.
+        """
+        vals = np.asarray(values, dtype=float)
+        s = np.asarray(sigmas, dtype=float)
+        if vals.ndim != 2 or s.shape != vals.shape:
+            raise ValueError("values/sigmas must be same-shape 2D arrays.")
+        valid = np.isfinite(vals)
+        method_count = valid.sum(axis=1).astype(float)
+
+        rho = float(np.clip(correlation, 0.0, 0.95))
+        if rho <= 1e-12:
+            inv_var = np.zeros_like(vals, dtype=float)
+            inv_var[valid] = 1.0 / np.maximum(s[valid], 1e-8) ** 2
+            denom = inv_var.sum(axis=1)
+            numer = (inv_var * np.where(valid, vals, 0.0)).sum(axis=1)
+            fused_mu = np.divide(
+                numer,
+                denom,
+                out=np.full(vals.shape[0], np.nan, dtype=float),
+                where=denom > 0,
+            )
+            fused_sigma = np.divide(
+                1.0,
+                np.sqrt(np.maximum(denom, 1e-16)),
+                out=np.full(vals.shape[0], np.nan, dtype=float),
+                where=denom > 0,
+            )
+            return fused_mu, fused_sigma, method_count
+
+        # Correlated-noise GLS fusion (small method count, robust per-row solve).
+        n_rows, _ = vals.shape
+        fused_mu = np.full(n_rows, np.nan, dtype=float)
+        fused_sigma = np.full(n_rows, np.nan, dtype=float)
+        for i in range(n_rows):
+            idx = np.where(valid[i])[0]
+            m = int(idx.size)
+            if m == 0:
+                continue
+            y = vals[i, idx]
+            sd = np.maximum(s[i, idx], 1e-8)
+            cov = np.outer(sd, sd) * rho
+            np.fill_diagonal(cov, sd**2)
+            try:
+                inv_cov = np.linalg.inv(cov)
+            except np.linalg.LinAlgError:
+                inv_cov = np.linalg.pinv(cov)
+            ones = np.ones(m, dtype=float)
+            denom = float(ones @ inv_cov @ ones)
+            if denom <= 0 or not np.isfinite(denom):
+                continue
+            mu = float((ones @ inv_cov @ y) / denom)
+            var = float(1.0 / denom)
+            fused_mu[i] = mu
+            fused_sigma[i] = math.sqrt(max(var, 0.0))
+        return fused_mu, fused_sigma, method_count
+
+    @staticmethod
+    def _fused_disagreement(
+        values: np.ndarray,
+        fused_mu: np.ndarray,
+    ) -> np.ndarray:
+        vals = np.asarray(values, dtype=float)
+        mu = np.asarray(fused_mu, dtype=float)
+        valid = np.isfinite(vals)
+        centered = np.where(valid, vals - mu[:, None], 0.0)
+        count = valid.sum(axis=1)
+        var = np.divide(
+            (centered**2).sum(axis=1),
+            np.maximum(count, 1),
+            out=np.zeros(vals.shape[0], dtype=float),
+            where=count > 0,
+        )
+        std = np.sqrt(np.maximum(var, 0.0))
+        std[count == 0] = np.nan
+        return std
+
+    def extract_all_properties(
+        self,
+        df: pd.DataFrame,
+        *,
+        bandgap_sigma_hse: float = 0.12,
+        bandgap_sigma_mbj: float = 0.20,
+        bandgap_sigma_opt: float = 0.35,
+        bandgap_sigma_floor: float = 0.05,
+        bandgap_sigma_mode: str = "adaptive",
+        bandgap_sigma_adaptive_slope: float = 0.35,
+        bandgap_fusion_correlation: float = 0.25,
+        conductivity_temperature: float = 1.0,
+        avg_atomic_mass_fallback_amu: float = 30.0,
+    ) -> pd.DataFrame:
         """
         Extract and clean all properties from a JARVIS DataFrame.
         Adds derived property columns using vectorized operations.
+
+        Algorithmic upgrades:
+        - Multi-fidelity Gaussian fusion for band gap (precision weighting).
+        - Correlation-aware GLS fusion for multi-fidelity gap methods.
+        - Heteroscedastic sigma scaling by formula complexity.
+        - Probabilistic conductivity classification with entropy/confidence.
+        - Formula-aware average atomic mass for Debye estimation.
+        - Mixture-based melting estimate using class probability.
         """
         result = df.copy()
 
@@ -79,17 +381,104 @@ class PropertyEstimator:
         best_gap[best_gap < 0] = np.nan # Filter negative gaps
         result["bandgap_best"] = best_gap
 
-        # ─── Vectorized: Conductivity Class ───
-        cond_class = pd.Series("insulator", index=result.index)
-        cond_class[best_gap < 3.0] = "semiconductor"
-        cond_class[best_gap < 0.5] = "semimetal"
-        cond_class[(best_gap < 0.01) | (best_gap.isna())] = "metal" # Assume metal if no gap data (often true in DFT DBs)
-        # Fix: if specifically NaN, keep as NaN or decide?
-        # Usually 0 gap means metal. NaN gap means unknown calculation.
-        # strict check:
-        cond_class[best_gap.isna()] = "unknown"
-        # If gap is 0, it's metal
-        cond_class[best_gap == 0] = "metal"
+        # ─── Probabilistic Multi-fidelity Gap Fusion ───
+        # Treat each gap method as an observation with method-specific noise.
+        # Reference idea: precision-weighted fusion / GLS with correlated noise.
+        gaps = np.vstack(
+            [
+                gap_hse.to_numpy(dtype=float),
+                gap_mbj.to_numpy(dtype=float),
+                gap_opt.to_numpy(dtype=float),
+            ]
+        ).T
+        n_rows = len(result)
+        formulas = result["formula"] if "formula" in result.columns else None
+        sigma_mode = str(bandgap_sigma_mode).strip().lower()
+        if sigma_mode not in {"constant", "adaptive"}:
+            raise ValueError(
+                f"Unknown bandgap_sigma_mode: {bandgap_sigma_mode}. "
+                "Expected constant/adaptive."
+            )
+        complexity = np.ones(n_rows, dtype=float)
+        if sigma_mode == "adaptive":
+            complexity = 1.0 + max(0.0, float(bandgap_sigma_adaptive_slope)) * self._formula_complexity_score(
+                formulas,
+                n_rows=n_rows,
+            )
+        sigmas = np.vstack(
+            [
+                np.full(n_rows, max(float(bandgap_sigma_hse), bandgap_sigma_floor)),
+                np.full(n_rows, max(float(bandgap_sigma_mbj), bandgap_sigma_floor)),
+                np.full(n_rows, max(float(bandgap_sigma_opt), bandgap_sigma_floor)),
+            ]
+        ).T * complexity[:, None]
+        gap_mu, gap_sigma, gap_n = self._precision_fusion(
+            gaps,
+            sigmas,
+            correlation=float(bandgap_fusion_correlation),
+        )
+        gap_disagreement = self._fused_disagreement(gaps, gap_mu)
+        # Inflate posterior sigma with inter-method disagreement (conservative UQ).
+        gap_sigma_eff = np.sqrt(np.maximum(gap_sigma**2 + gap_disagreement**2, 0.0))
+        result["bandgap_fused"] = gap_mu
+        result["bandgap_fused_std"] = gap_sigma_eff
+        result["bandgap_method_count"] = gap_n
+
+        # ─── Probabilistic Conductivity Class ───
+        # P(class) under Gaussian uncertainty on fused band gap.
+        # This avoids brittle thresholding at 0.01/0.5/3.0 eV.
+        temp = max(float(conductivity_temperature), 1e-6)
+        mu = np.where(np.isfinite(gap_mu), gap_mu, best_gap.to_numpy(dtype=float))
+        sigma = np.where(
+            np.isfinite(gap_sigma_eff),
+            gap_sigma_eff * temp,
+            max(float(bandgap_sigma_opt), bandgap_sigma_floor) * temp,
+        )
+        sigma = np.maximum(sigma, 1e-8)
+
+        z_metal = (0.01 - mu) / sigma
+        z_semimetal = (0.50 - mu) / sigma
+        z_semic = (3.00 - mu) / sigma
+        cdf_metal = self._normal_cdf(z_metal)
+        cdf_semimetal = self._normal_cdf(z_semimetal)
+        cdf_semic = self._normal_cdf(z_semic)
+
+        p_metal = np.clip(cdf_metal, 0.0, 1.0)
+        p_semimetal = np.clip(cdf_semimetal - cdf_metal, 0.0, 1.0)
+        p_semiconductor = np.clip(cdf_semic - cdf_semimetal, 0.0, 1.0)
+        p_insulator = np.clip(1.0 - cdf_semic, 0.0, 1.0)
+        p_stack = np.vstack([p_metal, p_semimetal, p_semiconductor, p_insulator]).T
+        p_norm = p_stack.sum(axis=1)
+        p_stack = np.divide(
+            p_stack,
+            p_norm[:, None],
+            out=np.zeros_like(p_stack),
+            where=p_norm[:, None] > 0,
+        )
+        unknown_mask = ~np.isfinite(mu)
+        p_stack[unknown_mask, :] = np.nan
+
+        result["p_metal"] = p_stack[:, 0]
+        result["p_semimetal"] = p_stack[:, 1]
+        result["p_semiconductor"] = p_stack[:, 2]
+        result["p_insulator"] = p_stack[:, 3]
+        confidence = np.full(n_rows, np.nan, dtype=float)
+        known_mask = ~unknown_mask
+        if np.any(known_mask):
+            confidence[known_mask] = np.max(p_stack[known_mask], axis=1)
+        result["conductivity_confidence"] = confidence
+        entropy = -np.sum(
+            np.where(p_stack > 0, p_stack * np.log(np.clip(p_stack, 1e-12, 1.0)), 0.0),
+            axis=1,
+        )
+        # Normalize by log(4) so entropy is in [0,1].
+        entropy[unknown_mask] = np.nan
+        result["conductivity_entropy"] = entropy / np.log(4.0)
+        labels = np.array(["metal", "semimetal", "semiconductor", "insulator"])
+        safe_p = np.where(np.isfinite(p_stack), p_stack, -1.0)
+        cls_idx = np.argmax(safe_p, axis=1)
+        cond_class = pd.Series(labels[cls_idx], index=result.index, dtype=object)
+        cond_class[unknown_mask] = "unknown"
         result["conductivity_class"] = cond_class
 
         # ─── Vectorized: Dielectric Avg ───
@@ -134,31 +523,85 @@ class PropertyEstimator:
         G_pa = G * 1e9
         rho_kg = rho * 1000.0
 
-        v_t = np.sqrt(G_pa / rho_kg)
-        v_l = np.sqrt((K_pa + 4*G_pa/3.0) / rho_kg)
+        valid_elastic = (
+            np.isfinite(K_pa)
+            & np.isfinite(G_pa)
+            & np.isfinite(rho_kg)
+            & (G_pa > 0)
+            & (rho_kg > 0)
+            & (K_pa + 4 * G_pa / 3.0 > 0)
+        )
+        v_t = np.full(len(result), np.nan, dtype=float)
+        v_l = np.full(len(result), np.nan, dtype=float)
+        v_t[valid_elastic] = np.sqrt((G_pa / rho_kg)[valid_elastic])
+        v_l[valid_elastic] = np.sqrt(((K_pa + 4 * G_pa / 3.0) / rho_kg)[valid_elastic])
 
         # Average sound velocity v_m
         # v_m = [1/3 * (2/v_t^3 + 1/v_l^3)]^(-1/3)
-        inv_v3 = (2.0 / v_t**3) + (1.0 / v_l**3)
-        v_m = ( (1.0/3.0) * inv_v3 ) ** (-1/3.0)
+        inv_v3 = np.full(len(result), np.nan, dtype=float)
+        valid_v = np.isfinite(v_t) & np.isfinite(v_l) & (v_t > 0) & (v_l > 0)
+        inv_v3[valid_v] = (2.0 / v_t[valid_v] ** 3) + (1.0 / v_l[valid_v] ** 3)
+        v_m = np.full(len(result), np.nan, dtype=float)
+        valid_inv = np.isfinite(inv_v3) & (inv_v3 > 0)
+        v_m[valid_inv] = ((1.0 / 3.0) * inv_v3[valid_inv]) ** (-1 / 3.0)
 
         # Number density estimation
-        # Approximation: avg atomic mass ~ 30 amu
-        avg_mass_kg = 30.0 * AMU
-        n_density = rho_kg / avg_mass_kg
+        # Use formula-aware average atomic mass when available.
+        # Reference (Debye from elastic constants): Anderson, 1963.
+        avg_mass_amu_est, n_atoms_formula = self._estimate_avg_atomic_mass_amu(
+            formulas,
+            n_rows=n_rows,
+            fallback_mass=float(avg_atomic_mass_fallback_amu),
+        )
+        result["avg_atomic_mass_amu_est"] = avg_mass_amu_est
+        result["n_atoms_formula_est"] = n_atoms_formula
+        avg_mass_kg = avg_mass_amu_est * AMU
+        n_density = np.divide(
+            rho_kg.to_numpy(dtype=float),
+            np.maximum(avg_mass_kg, 1e-30),
+            out=np.full(len(result), np.nan, dtype=float),
+            where=np.isfinite(rho_kg.to_numpy(dtype=float)) & (rho_kg.to_numpy(dtype=float) > 0),
+        )
 
         # Debye T
-        theta_D = (HBAR_SI / KB_SI) * (6 * np.pi**2 * n_density)**(1/3.0) * v_m
+        theta_D = np.full(len(result), np.nan, dtype=float)
+        valid_debye = np.isfinite(n_density) & (n_density > 0) & np.isfinite(v_m) & (v_m > 0)
+        theta_D[valid_debye] = (
+            (HBAR_SI / KB_SI)
+            * (6 * np.pi**2 * n_density[valid_debye]) ** (1.0 / 3.0)
+            * v_m[valid_debye]
+        )
         result["debye_temperature"] = theta_D.round(1)
 
         # ─── Vectorized: Melting Point ───
         # Grimvall: Tm = 607 + 9.3 * theta_D (Metals)
         # Others: Tm = 400 + 7.0 * theta_D
-        # Vectorized choice
-        Tm = np.where(result["conductivity_class"] == "metal",
-                      607 + 9.3 * theta_D,
-                      400 + 7.0 * theta_D)
-        result["melting_point_est"] = Tm # Rough estimate
+        # Use probability mixture for smoother transitions near class boundaries.
+        tm_metal = 607.0 + 9.3 * theta_D
+        tm_nonmetal = 400.0 + 7.0 * theta_D
+        p_m = result["p_metal"].to_numpy(dtype=float)
+        Tm = p_m * tm_metal + (1.0 - p_m) * tm_nonmetal
+        tm_var = p_m * (1.0 - p_m) * (tm_metal - tm_nonmetal) ** 2
+        result["melting_point_est"] = Tm
+        result["melting_point_est_std"] = np.sqrt(np.maximum(tm_var, 0.0))
+
+        # ─── Vectorized: Slack-like Lattice Conductivity Index ───
+        # A dimensionless proxy for lattice thermal conductivity trend:
+        # kappa_index ~ theta_D^3 / (gamma^2 * M_avg)
+        # with gamma approximated from Poisson ratio.
+        # Reference idea: Slack lattice conductivity scaling.
+        nu = result.get("poisson", pd.Series(np.nan, index=result.index)).to_numpy(
+            dtype=float
+        )
+        gamma = 1.5 * (1.0 + nu) / np.maximum(2.0 - 3.0 * nu, 1e-8)
+        gamma = np.clip(gamma, 0.5, 4.0)
+        kappa_idx = np.divide(
+            np.maximum(theta_D, 0.0) ** 3,
+            np.maximum(gamma, 1e-8) ** 2 * np.maximum(avg_mass_amu_est, 1e-8),
+            out=np.full(len(result), np.nan, dtype=float),
+            where=np.isfinite(theta_D) & np.isfinite(gamma) & np.isfinite(avg_mass_amu_est),
+        )
+        result["slack_kappa_index"] = kappa_idx
 
         # ─── Vectorized: Slack Thermal Conductivity ───
         # kappa = A * M_avg * theta_D^3 * V^(1/3) / (gamma^2 * n^(2/3) * T)
