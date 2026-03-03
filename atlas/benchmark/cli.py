@@ -102,6 +102,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Cap calibration samples per fold (0 means full set).",
     )
+    parser.add_argument(
+        "--no-structure-cache",
+        action="store_true",
+        help="Disable structure-to-graph conversion cache during this run.",
+    )
+    parser.add_argument(
+        "--fail-on-fallback-signature",
+        action="store_true",
+        help="Fail when model forward requires fallback call signature.",
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--folds", type=int, nargs="*", default=None, help="Specific folds to run")
     parser.add_argument("--output", type=str, default="", help="Output JSON path")
@@ -184,6 +194,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         use_conformal=args.use_conformal,
         conformal_coverage=args.conformal_coverage,
         conformal_max_calibration_samples=args.conformal_max_calibration_samples,
+        structure_cache=not args.no_structure_cache,
+        fail_on_fallback_signature=args.fail_on_fallback_signature,
     )
 
     save_path = Path(args.output) if args.output else None
