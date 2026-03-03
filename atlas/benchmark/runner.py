@@ -4,6 +4,7 @@ Matbench benchmark runner with reproducible fold-level reports.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Iterable, Sequence
@@ -82,6 +83,40 @@ def _bootstrap_ci(
     means = np.mean(arr[idx], axis=1)
     lo = float(np.quantile(means, alpha))
     hi = float(np.quantile(means, 1.0 - alpha))
+    return lo, hi
+
+
+def _bootstrap_metric_ci_from_indices(
+    n_samples: int,
+    metric_fn,
+    *,
+    confidence: float = 0.95,
+    n_bootstrap: int = 400,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """
+    Bootstrap CI for a scalar metric defined on index resamples.
+
+    `metric_fn` receives a 1D integer index array and returns a scalar.
+    """
+    n = int(n_samples)
+    if n <= 0:
+        return np.nan, np.nan
+    if n == 1:
+        v = float(metric_fn(np.array([0], dtype=np.int64)))
+        return v, v
+
+    b = max(64, int(n_bootstrap))
+    conf = min(max(float(confidence), 0.5), 0.999)
+    alpha = 0.5 * (1.0 - conf)
+    rng = np.random.RandomState(int(seed))
+    idx = rng.randint(0, n, size=(b, n))
+    stats = np.asarray([float(metric_fn(row)) for row in idx], dtype=np.float64)
+    stats = stats[np.isfinite(stats)]
+    if stats.size == 0:
+        return np.nan, np.nan
+    lo = float(np.quantile(stats, alpha))
+    hi = float(np.quantile(stats, 1.0 - alpha))
     return lo, hi
 
 
@@ -346,6 +381,12 @@ class MatbenchRunner:
         "matbench_jdft2d": "exfoliation_energy",
         "matbench_steels": "yield_strength",
     }
+    CALL_VARIANT_NAMES = (
+        "x_edge_attr_batch",
+        "x_edge_vec_batch",
+        "x_edge_attr_edge_vec_batch",
+        "batch_object",
+    )
 
     def __init__(
         self,
@@ -361,6 +402,8 @@ class MatbenchRunner:
         use_conformal: bool = False,
         conformal_coverage: float = 0.95,
         conformal_max_calibration_samples: int = 0,
+        structure_cache: bool = True,
+        fail_on_fallback_signature: bool = False,
     ):
         self.model = model
         self.property_name = property_name
@@ -374,6 +417,12 @@ class MatbenchRunner:
         self.use_conformal = bool(use_conformal)
         self.conformal_coverage = min(max(float(conformal_coverage), 1e-6), 1.0 - 1e-6)
         self.conformal_max_calibration_samples = max(0, int(conformal_max_calibration_samples))
+        self.structure_cache = bool(structure_cache)
+        self.fail_on_fallback_signature = bool(fail_on_fallback_signature)
+        self._structure_data_cache: dict[str, Any] = {}
+        self._structure_cache_hits = 0
+        self._structure_cache_misses = 0
+        self._call_variant_counts = [0, 0, 0, 0]
 
         if device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -385,6 +434,24 @@ class MatbenchRunner:
 
         self.output_dir = output_dir or (self.cfg.paths.artifacts_dir / "benchmarks")
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _structure_cache_key(structure: Any) -> str | None:
+        if structure is None:
+            return None
+        try:
+            if hasattr(structure, "as_dict"):
+                payload = structure.as_dict()
+            elif isinstance(structure, dict):
+                payload = structure
+            elif isinstance(structure, (str, int, float, bool)):
+                payload = structure
+            else:
+                payload = str(structure)
+            raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+            return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        except Exception:
+            return None
 
     def load_task(self, task_name: str):
         """Lazy-load a Matbench task."""
@@ -419,9 +486,11 @@ class MatbenchRunner:
 
         output = None
         last_error: Exception | None = None
-        for call in call_variants:
+        chosen_variant = -1
+        for variant_idx, call in enumerate(call_variants):
             try:
                 output = call()
+                chosen_variant = int(variant_idx)
                 break
             except Exception as exc:  # pragma: no cover - only used for fallback probing
                 last_error = exc
@@ -429,6 +498,14 @@ class MatbenchRunner:
 
         if output is None:
             raise RuntimeError(f"Model forward failed for all call variants: {last_error}")
+        if chosen_variant > 0 and bool(self.fail_on_fallback_signature):
+            name = self.CALL_VARIANT_NAMES[chosen_variant]
+            raise RuntimeError(
+                "Model forward required fallback signature "
+                f"'{name}' (index={chosen_variant}) while fail_on_fallback_signature=True."
+            )
+        if 0 <= chosen_variant < len(self._call_variant_counts):
+            self._call_variant_counts[chosen_variant] += 1
 
         if isinstance(output, dict):
             if self.property_name in output:
@@ -447,12 +524,49 @@ class MatbenchRunner:
         return means, stds
 
     def _convert_structures(self, structures: Sequence[Any], show_progress: bool) -> list[Any]:
-        iterable: Iterable[Any] = tqdm(structures, leave=False, disable=not show_progress)
-        if self.n_jobs == 1:
-            return [self.structure_to_data(s) for s in iterable]
-        return Parallel(n_jobs=self.n_jobs, backend="loky")(
-            delayed(self.structure_to_data)(s) for s in iterable
+        items = list(structures)
+        if not items:
+            return []
+        if not bool(self.structure_cache):
+            iterable: Iterable[Any] = tqdm(items, leave=False, disable=not show_progress)
+            if self.n_jobs == 1:
+                return [self.structure_to_data(s) for s in iterable]
+            return Parallel(n_jobs=self.n_jobs, backend="loky")(
+                delayed(self.structure_to_data)(s) for s in iterable
+            )
+
+        results: list[Any] = [None] * len(items)
+        missing: list[tuple[int, Any, str | None]] = []
+        for idx, structure in enumerate(items):
+            key = self._structure_cache_key(structure)
+            if key is not None and key in self._structure_data_cache:
+                results[idx] = self._structure_data_cache[key]
+                self._structure_cache_hits += 1
+            else:
+                missing.append((idx, structure, key))
+                self._structure_cache_misses += 1
+
+        if not missing:
+            return results
+
+        miss_structures = [s for _, s, _ in missing]
+        iterable_missing: Iterable[Any] = tqdm(
+            miss_structures,
+            leave=False,
+            disable=not show_progress,
         )
+        if self.n_jobs == 1:
+            converted = [self.structure_to_data(s) for s in iterable_missing]
+        else:
+            converted = Parallel(n_jobs=self.n_jobs, backend="loky")(
+                delayed(self.structure_to_data)(s) for s in iterable_missing
+            )
+
+        for (idx, _structure, key), data in zip(missing, converted, strict=False):
+            results[idx] = data
+            if key is not None:
+                self._structure_data_cache[key] = data
+        return results
 
     def _predict_on_inputs(
         self,
@@ -727,6 +841,9 @@ class MatbenchRunner:
         Run selected folds for one Matbench task and persist a JSON report.
         """
         task = self.load_task(task_name)
+        call_counts_before = np.asarray(self._call_variant_counts, dtype=np.int64)
+        cache_hits_before = int(self._structure_cache_hits)
+        cache_misses_before = int(self._structure_cache_misses)
         fold_ids = list(folds) if folds is not None else list(getattr(task, "folds", []))
         fold_ids = sorted({int(f) for f in fold_ids})
         if not fold_ids:
@@ -752,7 +869,9 @@ class MatbenchRunner:
             for key, value in global_metrics.items():
                 aggregate[f"global_{key}"] = value
             finite_global = np.isfinite(merged_targets) & np.isfinite(merged_preds)
-            err = np.abs(merged_targets[finite_global] - merged_preds[finite_global])
+            y_global = merged_targets[finite_global]
+            yhat_global = merged_preds[finite_global]
+            err = np.abs(y_global - yhat_global)
             lo, hi = _bootstrap_ci(
                 err,
                 confidence=0.95,
@@ -761,12 +880,106 @@ class MatbenchRunner:
             )
             aggregate["global_mae_ci95_lo"] = lo
             aggregate["global_mae_ci95_hi"] = hi
+            if y_global.size > 0:
+                rmse_lo, rmse_hi = _bootstrap_metric_ci_from_indices(
+                    y_global.size,
+                    lambda idx: float(np.sqrt(np.mean((y_global[idx] - yhat_global[idx]) ** 2))),
+                    confidence=0.95,
+                    n_bootstrap=self.bootstrap_samples,
+                    seed=self.bootstrap_seed + 11,
+                )
+                aggregate["global_rmse_ci95_lo"] = rmse_lo
+                aggregate["global_rmse_ci95_hi"] = rmse_hi
+                r2_lo, r2_hi = _bootstrap_metric_ci_from_indices(
+                    y_global.size,
+                    lambda idx: (
+                        np.nan
+                        if idx.size < 2
+                        else (
+                            np.nan
+                            if float(np.sum((y_global[idx] - np.mean(y_global[idx])) ** 2)) <= 1e-12
+                            else float(
+                                1.0
+                                - (
+                                    float(np.sum((y_global[idx] - yhat_global[idx]) ** 2))
+                                    / float(np.sum((y_global[idx] - np.mean(y_global[idx])) ** 2))
+                                )
+                            )
+                        )
+                    ),
+                    confidence=0.95,
+                    n_bootstrap=self.bootstrap_samples,
+                    seed=self.bootstrap_seed + 23,
+                )
+                aggregate["global_r2_ci95_lo"] = r2_lo
+                aggregate["global_r2_ci95_hi"] = r2_hi
 
             if all_stds:
                 merged_stds = np.concatenate(all_stds)
                 global_uq = compute_uncertainty_metrics(merged_targets, merged_preds, merged_stds)
                 for key, value in global_uq.items():
                     aggregate[f"global_{key}"] = value
+                uq_mask = (
+                    np.isfinite(merged_targets)
+                    & np.isfinite(merged_preds)
+                    & np.isfinite(merged_stds)
+                )
+                if int(np.sum(uq_mask)) > 0:
+                    y_uq = merged_targets[uq_mask].astype(np.float64)
+                    yhat_uq = merged_preds[uq_mask].astype(np.float64)
+                    sigma_uq = np.clip(
+                        merged_stds[uq_mask].astype(np.float64),
+                        1e-12,
+                        None,
+                    )
+                    err_uq = y_uq - yhat_uq
+                    z95 = 1.959963984540054
+                    pi95_hit = (np.abs(err_uq) <= z95 * sigma_uq).astype(np.float64)
+                    pi95_lo, pi95_hi = _bootstrap_ci(
+                        pi95_hit,
+                        confidence=0.95,
+                        n_bootstrap=self.bootstrap_samples,
+                        seed=self.bootstrap_seed + 31,
+                    )
+                    aggregate["global_pi95_coverage_ci95_lo"] = pi95_lo
+                    aggregate["global_pi95_coverage_ci95_hi"] = pi95_hi
+
+                    nll_i = 0.5 * np.log(2.0 * np.pi * sigma_uq * sigma_uq) + 0.5 * (
+                        (err_uq * err_uq) / (sigma_uq * sigma_uq)
+                    )
+                    nll_lo, nll_hi = _bootstrap_ci(
+                        nll_i,
+                        confidence=0.95,
+                        n_bootstrap=self.bootstrap_samples,
+                        seed=self.bootstrap_seed + 37,
+                    )
+                    aggregate["global_gaussian_nll_ci95_lo"] = nll_lo
+                    aggregate["global_gaussian_nll_ci95_hi"] = nll_hi
+
+                    z = err_uq / sigma_uq
+                    phi = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
+                    Phi = _normal_cdf(z)
+                    crps_i = sigma_uq * (
+                        z * (2.0 * Phi - 1.0) + 2.0 * phi - (1.0 / np.sqrt(np.pi))
+                    )
+                    crps_lo, crps_hi = _bootstrap_ci(
+                        crps_i,
+                        confidence=0.95,
+                        n_bootstrap=self.bootstrap_samples,
+                        seed=self.bootstrap_seed + 41,
+                    )
+                    aggregate["global_crps_gaussian_ci95_lo"] = crps_lo
+                    aggregate["global_crps_gaussian_ci95_hi"] = crps_hi
+
+        call_counts_after = np.asarray(self._call_variant_counts, dtype=np.int64)
+        call_counts_run = (call_counts_after - call_counts_before).astype(int)
+        call_counts_dict = {
+            name: int(call_counts_run[i])
+            for i, name in enumerate(self.CALL_VARIANT_NAMES)
+        }
+        fallback_calls = int(np.sum(call_counts_run[1:])) if call_counts_run.size >= 2 else 0
+        cache_hits_run = int(self._structure_cache_hits - cache_hits_before)
+        cache_misses_run = int(self._structure_cache_misses - cache_misses_before)
 
         report = TaskReport(
             task_name=task_name,
@@ -785,6 +998,13 @@ class MatbenchRunner:
                 "use_conformal": self.use_conformal,
                 "conformal_coverage": self.conformal_coverage,
                 "conformal_max_calibration_samples": self.conformal_max_calibration_samples,
+                "structure_cache": self.structure_cache,
+                "structure_cache_hits": cache_hits_run,
+                "structure_cache_misses": cache_misses_run,
+                "structure_cache_size": int(len(self._structure_data_cache)),
+                "fail_on_fallback_signature": self.fail_on_fallback_signature,
+                "model_call_variant_counts": call_counts_dict,
+                "model_call_fallback_count": fallback_calls,
                 "seed": self.cfg.train.seed,
                 "deterministic": self.cfg.train.deterministic,
                 "method_key": self.cfg.profile.method_key,
