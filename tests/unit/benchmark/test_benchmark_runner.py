@@ -16,7 +16,6 @@ from atlas.benchmark import (
     compute_regression_metrics,
     compute_uncertainty_metrics,
 )
-from atlas.benchmark.cli import main as benchmark_cli_main
 
 
 class _DummyModel(nn.Module):
@@ -36,6 +35,17 @@ class _DummyUncertainModel(nn.Module):
             out[idx, 0] = x[batch == idx, 0].mean()
         std = torch.full_like(out, 0.1)
         return {"formation_energy": {"mean": out, "std": std}}
+
+
+class _BatchOnlyModel(nn.Module):
+    def forward(self, batch):
+        x = batch.x
+        b = batch.batch
+        n_graphs = int(b.max().item()) + 1 if b.numel() > 0 else 1
+        out = torch.zeros((n_graphs, 1), dtype=x.dtype, device=x.device)
+        for idx in range(n_graphs):
+            out[idx, 0] = x[b == idx, 0].mean()
+        return out
 
 
 class _FakeTask:
@@ -122,6 +132,10 @@ def test_runner_run_task_writes_report(tmp_path):
     assert report["aggregate_metrics"]["global_mae"] == pytest.approx(0.0)
     assert np.isfinite(report["aggregate_metrics"]["global_mae_ci95_lo"])
     assert np.isfinite(report["aggregate_metrics"]["global_mae_ci95_hi"])
+    assert np.isfinite(report["aggregate_metrics"]["global_rmse_ci95_lo"])
+    assert np.isfinite(report["aggregate_metrics"]["global_rmse_ci95_hi"])
+    assert np.isfinite(report["aggregate_metrics"]["global_r2_ci95_lo"])
+    assert np.isfinite(report["aggregate_metrics"]["global_r2_ci95_hi"])
     assert report["fold_results"][0]["status"] == "ok"
 
 
@@ -147,6 +161,12 @@ def test_runner_uncertainty_outputs_are_reported(tmp_path):
     assert np.isfinite(agg["gaussian_nll_mean"])
     assert agg["global_pi95_coverage"] == pytest.approx(1.0)
     assert np.isfinite(agg["global_crps_gaussian"])
+    assert np.isfinite(agg["global_pi95_coverage_ci95_lo"])
+    assert np.isfinite(agg["global_pi95_coverage_ci95_hi"])
+    assert np.isfinite(agg["global_gaussian_nll_ci95_lo"])
+    assert np.isfinite(agg["global_gaussian_nll_ci95_hi"])
+    assert np.isfinite(agg["global_crps_gaussian_ci95_lo"])
+    assert np.isfinite(agg["global_crps_gaussian_ci95_hi"])
 
 
 def test_runner_conformal_metrics_are_reported(tmp_path):
@@ -172,6 +192,10 @@ def test_runner_conformal_metrics_are_reported(tmp_path):
     assert np.isfinite(agg["conformal_qhat_mean"])
     assert np.isfinite(agg["conformal_pi_coverage_mean"])
     assert np.isfinite(agg["global_conformal_pi_coverage"])
+    settings = report["settings"]
+    assert settings["structure_cache"] is True
+    assert int(settings["structure_cache_hits"]) >= 1
+    assert "model_call_variant_counts" in settings
 
 
 def test_runner_marks_low_coverage_when_below_threshold(tmp_path):
@@ -197,7 +221,33 @@ def test_runner_marks_low_coverage_when_below_threshold(tmp_path):
     assert report["aggregate_metrics"]["success_rate"] == pytest.approx(0.0)
 
 
+def test_runner_fail_on_fallback_signature(tmp_path):
+    runner = MatbenchRunner(
+        model=_BatchOnlyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+        fail_on_fallback_signature=True,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    runner.structure_to_data = lambda structure: None if structure == "bad" else _fake_data(structure)
+
+    report = runner.run_task(
+        task_name="fake_task_signature",
+        folds=[0],
+        show_progress=False,
+    )
+    assert report["fold_results"][0]["status"] == "failed"
+    assert "fallback signature" in str(report["fold_results"][0]["error"]).lower()
+
+
 def test_benchmark_cli_list_tasks(capsys):
+    try:
+        from atlas.benchmark.cli import main as benchmark_cli_main
+    except Exception as exc:  # pragma: no cover - environment-dependent optional import path
+        pytest.skip(f"benchmark CLI import unavailable in this env: {exc}")
     rc = benchmark_cli_main(["--list-tasks"])
     out = capsys.readouterr().out
     assert rc == 0
