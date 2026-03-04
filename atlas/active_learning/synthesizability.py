@@ -606,9 +606,7 @@ class SynthesisPathfinder:
             return False
         if total_delta_g > self.max_total_delta_g:
             return False
-        if num_steps > float(self.max_steps):
-            return False
-        return True
+        return not num_steps > float(self.max_steps)
 
     @staticmethod
     def _dominates(a: tuple[float, ...], b: tuple[float, ...], eps: float = 1e-12) -> bool:

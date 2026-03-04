@@ -442,9 +442,7 @@ class MatbenchRunner:
         try:
             if hasattr(structure, "as_dict"):
                 payload = structure.as_dict()
-            elif isinstance(structure, dict):
-                payload = structure
-            elif isinstance(structure, (str, int, float, bool)):
+            elif isinstance(structure, (dict, str, int, float, bool)):
                 payload = structure
             else:
                 payload = str(structure)

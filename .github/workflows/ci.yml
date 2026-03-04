@@ -5,21 +5,45 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-      - run: pip install ruff
-      - run: ruff check atlas/ tests/ scripts/
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            setup.py
+            requirements*.txt
+      - name: Install linter
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff
+      - name: Run Ruff
+        run: python -m ruff check atlas/ tests/ scripts/ --output-format=github
 
   test-unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
@@ -27,26 +51,37 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            setup.py
+            requirements*.txt
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e ".[test]"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e ".[test]"
       - name: Run unit tests
-        run: pytest tests/unit/ -v --tb=short
+        run: python -m pytest tests/unit/ -v --tb=short
 
   test-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            setup.py
+            requirements*.txt
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements-full.txt
-          pip install -e ".[test]"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-full.txt
+          python -m pip install -e ".[test]"
       - name: Run integration tests (allowed-fail)
-        run: pytest -m integration -v --tb=short
+        run: python -m pytest -m integration -v --tb=short

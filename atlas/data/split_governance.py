@@ -325,7 +325,7 @@ def _prototype_similarity_matrix(groups: list[str]) -> np.ndarray:
     return sim
 
 
-def _balanced_group_split(
+def _balanced_group_split(  # noqa: C901
     group_to_ids: dict[str, list[str]],
     *,
     seed: int,
@@ -470,7 +470,7 @@ def _balanced_group_split(
             delta += sim[group_idx, h] * (wmat[dst_idx, sh] - wmat[src_idx, sh])
         return delta
 
-    def build_with_rng(rng: np.random.RandomState) -> tuple[dict[str, int], float]:
+    def build_with_rng(rng: np.random.RandomState) -> tuple[dict[str, int], float]:  # noqa: C901
         assignment: dict[str, int] = {}
         assignment_idx = np.full(n_groups, -1, dtype=int)
         assigned_indices: list[int] = []

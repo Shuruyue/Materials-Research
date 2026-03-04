@@ -1,6 +1,7 @@
 """Unit tests for atlas.data.split_governance."""
 
 import itertools
+
 import pytest
 
 from atlas.data.split_governance import (

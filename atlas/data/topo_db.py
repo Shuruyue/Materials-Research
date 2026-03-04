@@ -640,7 +640,7 @@ class TopoDB:
         self._channel_corr = self._normalize_correlation_matrix(corr)
         return self.channel_reliability()
 
-    def infer_topology_probabilities(
+    def infer_topology_probabilities(  # noqa: C901
         self,
         *,
         base_weights: tuple[float, float, float] = (0.45, 0.35, 0.20),

@@ -148,6 +148,7 @@ def test_substitution_stats_updates_after_generation(generator):
 
 def test_structure_fingerprint_distinguishes_polymorph_like_variants():
     from pymatgen.core import Lattice, Structure
+
     from atlas.active_learning.generator import _structure_fingerprint
 
     cubic = Structure(Lattice.cubic(6.32), ["Sn", "Te"], [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])

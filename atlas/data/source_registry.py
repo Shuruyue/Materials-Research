@@ -13,10 +13,10 @@ only on NumPy. They implement:
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-import math
-from typing import Iterable
 
 import numpy as np
 

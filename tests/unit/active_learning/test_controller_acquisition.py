@@ -1,9 +1,10 @@
 """Focused tests for DiscoveryController acquisition strategy behavior."""
 
 from collections import OrderedDict
+from unittest.mock import patch
+
 import numpy as np
 import torch
-from unittest.mock import patch
 
 from atlas.active_learning.controller import Candidate, DiscoveryController
 

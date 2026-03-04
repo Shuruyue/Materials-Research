@@ -20,7 +20,6 @@ import re
 import sys
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any
 
 import numpy as np
 
@@ -245,7 +244,7 @@ class NativeReactionNetworkEvaluator:
         if pathways is None:
             return []
         if hasattr(pathways, "paths"):
-            return list(getattr(pathways, "paths"))
+            return list(pathways.paths)
         if isinstance(pathways, list):
             return pathways
         try:
@@ -266,7 +265,7 @@ class NativeReactionNetworkEvaluator:
             return ""
         if hasattr(value, "reduced_formula"):
             try:
-                return str(getattr(value, "reduced_formula"))
+                return str(value.reduced_formula)
             except Exception:
                 pass
         text = str(value)
