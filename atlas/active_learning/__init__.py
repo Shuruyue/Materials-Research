@@ -24,6 +24,9 @@ _EXPORTS = {
     "DISCOVERY_ACQUISITION_STRATEGIES": ("atlas.active_learning.acquisition", "DISCOVERY_ACQUISITION_STRATEGIES"),
     "GPSurrogateAcquirer": ("atlas.active_learning.gp_surrogate", "GPSurrogateAcquirer"),
     "GPSurrogateConfig": ("atlas.active_learning.gp_surrogate", "GPSurrogateConfig"),
+    "ActiveLearningPolicyConfig": ("atlas.active_learning.policy_state", "ActiveLearningPolicyConfig"),
+    "PolicyState": ("atlas.active_learning.policy_state", "PolicyState"),
+    "PolicyEngine": ("atlas.active_learning.policy_engine", "PolicyEngine"),
 }
 
 __all__ = list(_EXPORTS.keys())

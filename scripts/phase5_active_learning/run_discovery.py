@@ -147,6 +147,31 @@ def main():
         default=0.01,
         help="Jitter used in EI/PI stability acquisition",
     )
+    parser.add_argument(
+        "--policy",
+        type=str,
+        choices=["legacy", "cmoeic"],
+        default="legacy",
+        help="Decision policy engine",
+    )
+    parser.add_argument(
+        "--risk-mode",
+        type=str,
+        choices=["soft", "hard", "hybrid"],
+        default="soft",
+        help="Risk handling mode for policy decisions",
+    )
+    parser.add_argument(
+        "--cost-aware",
+        action="store_true",
+        help="Enable explicit cost-aware utility adjustment in policy scoring",
+    )
+    parser.add_argument(
+        "--calibration-window",
+        type=int,
+        default=128,
+        help="History window size for calibration updates in policy engine",
+    )
     args = parser.parse_args()
 
     from atlas.config import get_config
@@ -249,6 +274,10 @@ def main():
         acquisition_kappa=args.acq_kappa,
         acquisition_best_f=args.acq_best_f,
         acquisition_jitter=args.acq_jitter,
+        policy_name=args.policy,
+        risk_mode=args.risk_mode,
+        cost_aware=args.cost_aware,
+        calibration_window=args.calibration_window,
         results_dir=results_dir,
     )
     print(
@@ -256,7 +285,11 @@ def main():
         f"strategy={args.acq_strategy}, "
         f"kappa={args.acq_kappa}, "
         f"best_f={args.acq_best_f}, "
-        f"jitter={args.acq_jitter}"
+        f"jitter={args.acq_jitter}, "
+        f"policy={args.policy}, "
+        f"risk_mode={args.risk_mode}, "
+        f"cost_aware={args.cost_aware}, "
+        f"calibration_window={args.calibration_window}"
     )
 
     # ─── Step 6: RUN DISCOVERY ───

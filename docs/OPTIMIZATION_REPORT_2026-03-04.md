@@ -60,6 +60,41 @@ This report summarizes the requested 3-round optimization loop plus final consol
   - `tests/unit/active_learning/test_pareto_utils.py`
   - validates rank correctness (vs brute force), exact 2D HV behavior, and shared-HV feasibility gating.
 
+## Round 5 - Policy Engine + Runtime Hardening (博士級路線第一批落地)
+
+- Added typed policy config/state:
+  - `atlas/active_learning/policy_state.py`
+  - `ActiveLearningPolicyConfig` replaces ad-hoc policy parameter reads.
+  - `PolicyState` persists calibration scale factors and relaxer circuit-breaker state.
+- Added decision-only strategy engine:
+  - `atlas/active_learning/policy_engine.py`
+  - Supports `legacy` and `cmoeic` policy routing.
+  - `cmoeic` computes utility with objective/feasibility/risk/cost terms and writes per-candidate decision artifacts.
+- Refactored controller integration:
+  - `DiscoveryController` now accepts policy options and optional injected `policy_engine`.
+  - `_score_and_select` delegates to policy engine; legacy behavior preserved in `_score_and_select_legacy`.
+  - Added `_finalize_ranked_candidates` to unify winner registration/history updates.
+- Added runtime robustness for relaxation:
+  - timeout wrapper via `ThreadPoolExecutor` (`relax_timeout_sec`)
+  - retry cap (`relax_max_retries`)
+  - circuit breaker (`relax_circuit_breaker_failures`, `relax_circuit_breaker_cooldown_iters`)
+  - per-iteration failure buckets persisted in workflow notes.
+- Extended candidate artifact schema:
+  - `calibrated_mean`, `calibrated_std`, `conformal_radius`, `risk_score`,
+    `estimated_cost`, `gain_per_cost`, `reject_reason`
+  - backward compatible (additive fields only).
+- Added Phase5 CLI flags:
+  - `--policy {legacy,cmoeic}`
+  - `--risk-mode {soft,hard,hybrid}`
+  - `--cost-aware`
+  - `--calibration-window`
+  - wired through both `run_phase5.py` and `run_discovery.py`.
+- Added tests:
+  - `tests/unit/active_learning/test_policy_state.py`
+  - `tests/unit/active_learning/test_policy_engine.py`
+  - `tests/unit/active_learning/test_phase5_cli.py`
+  - `tests/unit/active_learning/test_controller_runtime_stability.py`
+
 ## Validation
 
 - `ruff check atlas/active_learning/controller.py atlas/active_learning/objective_space.py atlas/active_learning/gp_surrogate.py atlas/training/trainer.py`

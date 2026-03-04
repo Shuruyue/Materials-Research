@@ -21,8 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from atlas.console_style import install_console_style
 from atlas.active_learning.acquisition import DISCOVERY_ACQUISITION_STRATEGIES
+from atlas.console_style import install_console_style
 from atlas.training.preflight import run_preflight
 
 install_console_style()
@@ -87,6 +87,14 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--acq-best-f", str(args.acq_best_f)])
     if args.acq_jitter is not None:
         cmd.extend(["--acq-jitter", str(args.acq_jitter)])
+    if args.policy:
+        cmd.extend(["--policy", args.policy])
+    if args.risk_mode:
+        cmd.extend(["--risk-mode", args.risk_mode])
+    if args.cost_aware:
+        cmd.append("--cost-aware")
+    if args.calibration_window is not None:
+        cmd.extend(["--calibration-window", str(args.calibration_window)])
 
     return cmd
 
@@ -122,6 +130,10 @@ def main() -> int:
     parser.add_argument("--acq-kappa", type=float, default=None)
     parser.add_argument("--acq-best-f", type=float, default=None)
     parser.add_argument("--acq-jitter", type=float, default=None)
+    parser.add_argument("--policy", choices=["legacy", "cmoeic"], default="legacy")
+    parser.add_argument("--risk-mode", choices=["soft", "hard", "hybrid"], default="soft")
+    parser.add_argument("--cost-aware", action="store_true")
+    parser.add_argument("--calibration-window", type=int, default=128)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--preflight-property-group", type=str, default="priority7")

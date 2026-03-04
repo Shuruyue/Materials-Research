@@ -16,6 +16,8 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -52,6 +54,8 @@ from atlas.active_learning.pareto_utils import (
     pareto_front,
     pareto_rank_score,
 )
+from atlas.active_learning.policy_engine import PolicyEngine
+from atlas.active_learning.policy_state import ActiveLearningPolicyConfig, PolicyState
 from atlas.config import get_config
 from atlas.models.prediction_utils import extract_mean_and_std
 from atlas.research.workflow_reproducible_graph import IterationSnapshot, WorkflowReproducibleGraph
@@ -97,6 +101,13 @@ class Candidate:
     energy_per_atom: float | None = None
     energy_mean: float | None = None
     energy_std: float | None = None
+    calibrated_mean: float | None = None
+    calibrated_std: float | None = None
+    conformal_radius: float = 0.0
+    risk_score: float = 0.0
+    estimated_cost: float = 0.0
+    gain_per_cost: float = 0.0
+    reject_reason: str = ""
     relaxed_structure: object = None
     converged: bool = False
 
@@ -144,6 +155,11 @@ class DiscoveryController:
         acquisition_kappa: float = 2.0,
         acquisition_best_f: float = -0.5,
         acquisition_jitter: float = 0.01,
+        policy_name: str = "legacy",
+        risk_mode: str = "soft",
+        cost_aware: bool = False,
+        calibration_window: int = 128,
+        policy_engine: PolicyEngine | None = None,
         results_dir: str | Path | None = None,
     ):
         self.generator = generator
@@ -154,6 +170,15 @@ class DiscoveryController:
 
         self.cfg = get_config()
         self.profile = self.cfg.profile
+        self.policy_config = ActiveLearningPolicyConfig.from_profile(
+            self.profile,
+            policy_name=policy_name,
+            risk_mode=risk_mode,
+            cost_aware=cost_aware,
+            calibration_window=calibration_window,
+        )
+        self.policy_state = PolicyState()
+        self.policy_engine = policy_engine
 
         logger.info(f"Initializing DiscoveryController with profile: {self.profile}")
 
@@ -254,6 +279,10 @@ class DiscoveryController:
         self.ood_space = str(getattr(self.profile, "ood_space", "chemistry"))
         self.max_pathway_annotations_per_iter = int(getattr(self.profile, "max_pathway_annotations_per_iter", 8))
         self.enable_structure_dedup = bool(getattr(self.profile, "enable_structure_dedup", True))
+        self.relax_timeout_sec = float(self.policy_config.relax_timeout_sec)
+        self.relax_max_retries = int(self.policy_config.relax_max_retries)
+        self.relax_circuit_breaker_failures = int(self.policy_config.relax_circuit_breaker_failures)
+        self.relax_circuit_breaker_cooldown_iters = int(self.policy_config.relax_circuit_breaker_cooldown_iters)
         if not self.experimental_algorithms_enabled:
             # Conservative mode for production reliability.
             # 生产保守模式：关闭实验性策略，保留确定性核心流程。
@@ -305,6 +334,13 @@ class DiscoveryController:
             self.use_ood_penalty,
             self.enable_structure_dedup,
         )
+        logger.info(
+            "Policy engine: name=%s risk_mode=%s cost_aware=%s calibration_window=%s",
+            self.policy_config.policy_name,
+            self.policy_config.risk_mode,
+            self.policy_config.cost_aware,
+            self.policy_config.calibration_window,
+        )
 
         if results_dir is not None:
             self.results_dir = Path(results_dir)
@@ -323,6 +359,16 @@ class DiscoveryController:
         self.all_candidates: list[Candidate] = []
         self.top_candidates: list[Candidate] = []
         self._synthesis_cache: OrderedDict[tuple[str, float], dict] = OrderedDict()
+        self._last_relax_stats: dict[str, object] = {"total": 0, "success": 0, "failures": 0, "buckets": {}}
+
+        self._policy_state_path = self.results_dir / "policy_state.json"
+        self._load_policy_state()
+        if self.policy_engine is None:
+            self.policy_engine = PolicyEngine(config=self.policy_config, state=self.policy_state)
+        else:
+            # Keep caller-provided engine state/config synchronized with runtime config.
+            self.policy_engine.config = self.policy_config
+            self.policy_engine.state = self.policy_state
 
         # Auto-load previous state
         self._load_checkpoint()
@@ -407,6 +453,34 @@ class DiscoveryController:
         if q <= 0.0:
             return float(torch.min(observed_mean).item())
         return float(torch.quantile(observed_mean, q).item())
+
+    def _load_policy_state(self) -> None:
+        if not self._policy_state_path.exists():
+            return
+        try:
+            with open(self._policy_state_path, encoding="utf-8") as fp:
+                payload = json.load(fp)
+            state_payload = payload.get("state") if isinstance(payload, dict) else payload
+            self.policy_state = PolicyState.from_dict(state_payload if isinstance(state_payload, dict) else {})
+            logger.info(
+                "Loaded policy state: iter=%s, calibration_points=%s",
+                self.policy_state.iteration,
+                self.policy_state.calibration_points,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load policy state: %s", exc)
+
+    def _save_policy_state(self) -> None:
+        payload = {
+            "updated_at": time.time(),
+            "config": self.policy_config.to_dict(),
+            "state": self.policy_state.to_dict(),
+        }
+        try:
+            with open(self._policy_state_path, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, indent=2, default=str)
+        except Exception as exc:
+            logger.warning("Failed to persist policy state: %s", exc)
 
     def _load_checkpoint(self):
         """Scan results directory and restore state."""
@@ -537,6 +611,14 @@ class DiscoveryController:
                     "ood_space": self.ood_space,
                     "max_pathway_annotations_per_iter": self.max_pathway_annotations_per_iter,
                     "enable_structure_dedup": self.enable_structure_dedup,
+                    "policy_name": self.policy_config.policy_name,
+                    "policy_risk_mode": self.policy_config.risk_mode,
+                    "policy_cost_aware": self.policy_config.cost_aware,
+                    "policy_calibration_window": self.policy_config.calibration_window,
+                    "relax_timeout_sec": self.relax_timeout_sec,
+                    "relax_max_retries": self.relax_max_retries,
+                    "relax_circuit_breaker_failures": self.relax_circuit_breaker_failures,
+                    "relax_circuit_breaker_cooldown_iters": self.relax_circuit_breaker_cooldown_iters,
                 }
             )
 
@@ -629,8 +711,14 @@ class DiscoveryController:
 
             dt = time.time() - t0
             self._print_iteration_summary(selected, dt)
+            self.policy_state.iteration = int(self.iteration)
+            self._save_policy_state()
 
             if self.workflow is not None:
+                relax_buckets = self._last_relax_stats.get("buckets", {})
+                notes = ""
+                if isinstance(relax_buckets, dict) and relax_buckets:
+                    notes = f"relax_failures={relax_buckets}"
                 self.workflow.record_iteration(
                     IterationSnapshot(
                         iteration=it,
@@ -641,6 +729,7 @@ class DiscoveryController:
                         duration_sec=dt,
                         stage_timings_sec=stage_timings,
                         seed_pool_size=len(self.generator.seeds),
+                        notes=notes,
                     )
                 )
 
@@ -656,8 +745,36 @@ class DiscoveryController:
 
         return self.top_candidates
 
+    def _call_relax_with_timeout(self, structure: object, *, steps: int = 100) -> dict:
+        timeout_sec = max(0.0, float(getattr(self, "relax_timeout_sec", 0.0)))
+        if self.relaxer is None:
+            return {}
+        if timeout_sec <= 0.0:
+            return self.relaxer.relax_structure(structure, steps=steps)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.relaxer.relax_structure, structure, steps)
+            try:
+                return future.result(timeout=timeout_sec)
+            except FutureTimeoutError as exc:
+                future.cancel()
+                raise TimeoutError(f"relaxation timed out after {timeout_sec:.2f}s") from exc
+
+    @staticmethod
+    def _bucket_error(exc: Exception) -> str:
+        if isinstance(exc, TimeoutError):
+            return "timeout"
+        msg = str(exc).strip().lower()
+        if "cuda out of memory" in msg or "out of memory" in msg:
+            return "oom"
+        if "keyboardinterrupt" in msg:
+            return "interrupt"
+        return "exception"
+
     def _relax_candidates(self, raw_candidates: list[dict]) -> list[Candidate]:
         candidates = []
+        buckets: dict[str, int] = {}
+        success_count = 0
+        fail_count = 0
         for rc in raw_candidates:
             struct = rc["structure"]
             formula = struct.composition.reduced_formula
@@ -669,16 +786,45 @@ class DiscoveryController:
             stability = 0.5
 
             if self.relaxer:
-                try:
-                    # TODO: Add explicit timeout here if feasible
-                    res = self.relaxer.relax_structure(struct, steps=100) # steps limit acts as timeout
-                    relaxed = res.get("relaxed_structure", struct)
-                    energy = res.get("energy_per_atom")
-                    converged = res.get("converged", False)
-                    stability = self.relaxer.score_stability(relaxed)
-                except Exception as e:
-                    logger.debug(f"Relaxation error for {formula}: {e}")
-                    stability = 0.0 # Penalize failed relaxation
+                if int(getattr(self.policy_state, "relax_circuit_open_until_iter", 0)) >= int(self.iteration):
+                    fail_count += 1
+                    buckets["circuit_open"] = buckets.get("circuit_open", 0) + 1
+                    stability = 0.0
+                else:
+                    retries = max(0, int(getattr(self, "relax_max_retries", 0)))
+                    relax_ok = False
+                    last_exc: Exception | None = None
+                    for _attempt in range(retries + 1):
+                        try:
+                            res = self._call_relax_with_timeout(struct, steps=100)
+                            relaxed = res.get("relaxed_structure", struct)
+                            energy = res.get("energy_per_atom")
+                            converged = res.get("converged", False)
+                            stability = self.relaxer.score_stability(relaxed)
+                            relax_ok = True
+                            success_count += 1
+                            self.policy_state.relax_consecutive_failures = 0
+                            break
+                        except Exception as exc:
+                            last_exc = exc
+                            code = self._bucket_error(exc)
+                            buckets[code] = buckets.get(code, 0) + 1
+                    if not relax_ok:
+                        fail_count += 1
+                        stability = 0.0
+                        self.policy_state.relax_consecutive_failures += 1
+                        if self.policy_state.relax_consecutive_failures >= int(
+                            getattr(self, "relax_circuit_breaker_failures", 8)
+                        ):
+                            cooldown = int(getattr(self, "relax_circuit_breaker_cooldown_iters", 2))
+                            self.policy_state.relax_circuit_open_until_iter = int(self.iteration) + cooldown
+                            logger.warning(
+                                "Relaxation circuit breaker opened until iteration %s",
+                                self.policy_state.relax_circuit_open_until_iter,
+                            )
+                            self.policy_state.relax_consecutive_failures = 0
+                        if last_exc is not None:
+                            logger.debug("Relaxation error for %s: %s", formula, last_exc)
 
             cand = Candidate(
                 structure=struct,
@@ -695,6 +841,12 @@ class DiscoveryController:
                 timestamp=time.time(),
             )
             candidates.append(cand)
+        self._last_relax_stats = {
+            "total": len(raw_candidates),
+            "success": success_count,
+            "failures": fail_count,
+            "buckets": buckets,
+        }
         return candidates
 
     def _classify_candidates(self, candidates):
@@ -1639,6 +1791,12 @@ class DiscoveryController:
         return [candidates[i] for i in selected_idx]
 
     def _score_and_select(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
+        engine = getattr(self, "policy_engine", None)
+        if engine is not None:
+            return engine.score_and_select(self, candidates, n_top)
+        return self._score_and_select_legacy(candidates, n_top)
+
+    def _score_and_select_legacy(self, candidates: list[Candidate], n_top: int) -> list[Candidate]:
         topo_terms: list[float] = []
         stability_terms: list[float] = []
         synthesis_terms: list[float] = []
@@ -1717,7 +1875,13 @@ class DiscoveryController:
         self._apply_ood_penalty(candidates)
         candidates.sort(key=lambda x: x.acquisition_value, reverse=True)
         top = self._select_top_diverse(candidates, n_top, objective_map=objective_map)
+        return self._finalize_ranked_candidates(candidates, top)
 
+    def _finalize_ranked_candidates(
+        self,
+        candidates: list[Candidate],
+        top: list[Candidate],
+    ) -> list[Candidate]:
         selected_ids = {id(c) for c in top}
         remaining = [c for c in candidates if id(c) not in selected_ids]
         ranked = top + remaining
@@ -1813,6 +1977,29 @@ class DiscoveryController:
             "weights": self.weights,
             "method_key": self.method_key,
             "fallback_methods": list(self.fallback_methods),
+            "policy": {
+                "name": self.policy_config.policy_name,
+                "risk_mode": self.policy_config.risk_mode,
+                "cost_aware": self.policy_config.cost_aware,
+                "calibration_window": self.policy_config.calibration_window,
+                "ood_combination": self.policy_config.ood_combination,
+                "ood_gate_threshold": self.policy_config.ood_gate_threshold,
+                "conformal_gate_threshold": self.policy_config.conformal_gate_threshold,
+                "conformal_alpha": self.policy_config.conformal_alpha,
+                "conformal_penalty_weight": self.policy_config.conformal_penalty_weight,
+                "policy_ood_penalty_weight": self.policy_config.ood_penalty_weight,
+                "max_conformal_radius": self.policy_config.max_conformal_radius,
+                "diversity_novelty_boost": self.policy_config.diversity_novelty_boost,
+                "cost_eps": self.policy_config.cost_eps,
+                "relax_cost_base": self.policy_config.relax_cost_base,
+                "classify_cost_base": self.policy_config.classify_cost_base,
+                "calibration_min_points": self.policy_config.calibration_min_points,
+                "relax_timeout_sec": self.policy_config.relax_timeout_sec,
+                "relax_max_retries": self.policy_config.relax_max_retries,
+                "relax_circuit_breaker_failures": self.policy_config.relax_circuit_breaker_failures,
+                "relax_circuit_breaker_cooldown_iters": self.policy_config.relax_circuit_breaker_cooldown_iters,
+            },
+            "policy_state": self.policy_state.to_dict(),
             "acquisition": {
                 "strategy": self.acquisition_strategy,
                 "kappa": self.acquisition_kappa,
