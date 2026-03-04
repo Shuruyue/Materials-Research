@@ -49,6 +49,7 @@ class Trainer:
         device: str | torch.device | None = None,
         save_dir: Path | None = None,
         use_amp: bool = True,
+        grad_clip_norm: float = 1.0,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,6 +61,8 @@ class Trainer:
         self.scheduler = scheduler
         self.use_amp = use_amp and (self.device_type == "cuda")
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.grad_clip_norm = max(0.0, float(grad_clip_norm))
+        self._forward_params = set(signature(self.model.forward).parameters.keys())
 
         self.save_dir = save_dir or get_config().paths.models_dir / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -83,10 +86,8 @@ class Trainer:
         if not hasattr(batch, "x") or not hasattr(batch, "edge_index"):
             return self.model(batch)
 
-        params = signature(self.model.forward).parameters
-
         def has(name: str) -> bool:
-            return name in params
+            return name in self._forward_params
 
         edge_attr = getattr(batch, "edge_attr", None)
         edge_vec = getattr(batch, "edge_vec", None)
@@ -124,6 +125,9 @@ class Trainer:
             if edge_vec is not None:
                 return self.model(batch.x, batch.edge_index, edge_vec, batch_index)
             return self.model(batch)
+
+    def _autocast(self):
+        return torch.amp.autocast(self.device_type, enabled=self.use_amp)
 
     def _resolve_targets(self, pred, batch):
         """
@@ -204,9 +208,9 @@ class Trainer:
 
         for batch in loader:
             batch = batch.to(self.device)
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with self._autocast():
                 pred = self._forward_batch(batch)
                 loss = self._compute_loss(pred, batch)
 
@@ -214,8 +218,9 @@ class Trainer:
             self.scaler.scale(loss).backward()
 
             # Gradient clipping (unscale first)
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            if self.grad_clip_norm > 0.0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -235,7 +240,7 @@ class Trainer:
         for batch in loader:
             batch = batch.to(self.device)
 
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with self._autocast():
                 pred = self._forward_batch(batch)
                 loss = self._compute_loss(pred, batch)
 
@@ -317,12 +322,18 @@ class Trainer:
     def _save_checkpoint(self, filename: str, epoch: int, val_loss: float):
         """Save model checkpoint."""
         path = self.save_dir / filename
+        cfg = get_config()
         torch.save({
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "val_loss": val_loss,
-            "config": get_config() # Save config just in case
+            "config": {
+                "summary": cfg.summary(),
+                "device": str(self.device),
+                "use_amp": bool(self.use_amp),
+                "grad_clip_norm": float(self.grad_clip_norm),
+            },
         }, path)
 
     def load_checkpoint(self, filename: str = "model_best.pt"):
@@ -331,6 +342,8 @@ class Trainer:
         if not path.exists():
             # Try looking in parent if simple name given
             path = self.save_dir.parent / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {filename}")
 
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])

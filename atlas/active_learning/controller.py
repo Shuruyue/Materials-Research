@@ -30,6 +30,19 @@ from atlas.active_learning.acquisition import (
 )
 from atlas.active_learning.generator import StructureGenerator
 from atlas.active_learning.gp_surrogate import GPSurrogateAcquirer
+from atlas.active_learning.objective_space import (
+    clip01 as clip01_value,
+)
+from atlas.active_learning.objective_space import (
+    collect_history_objective_points,
+    feasibility_mask_from_points,
+    infer_objective_dimension,
+    objective_points_from_map,
+    objective_points_from_terms,
+)
+from atlas.active_learning.objective_space import (
+    safe_float as safe_float_value,
+)
 from atlas.config import get_config
 from atlas.models.prediction_utils import extract_mean_and_std
 from atlas.research.workflow_reproducible_graph import IterationSnapshot, WorkflowReproducibleGraph
@@ -865,17 +878,11 @@ class DiscoveryController:
 
     @staticmethod
     def _safe_float(value: object, default: float = 0.0) -> float:
-        try:
-            out = float(value)
-            if np.isfinite(out):
-                return out
-        except Exception:
-            pass
-        return float(default)
+        return safe_float_value(value, default=default)
 
     @staticmethod
     def _clip01(x: float) -> float:
-        return float(max(0.0, min(1.0, x)))
+        return clip01_value(x)
 
     def _candidate_energy_value(self, candidate: Candidate) -> float:
         if candidate.energy_mean is not None:
@@ -1239,19 +1246,14 @@ class DiscoveryController:
     def _pareto_front(points: np.ndarray) -> np.ndarray:
         if points.size == 0:
             return points.reshape(0, 2)
-        n = points.shape[0]
-        keep = np.ones(n, dtype=bool)
-        for i in range(n):
-            if not keep[i]:
-                continue
-            for j in range(n):
-                if i == j:
-                    continue
-                dominates = np.all(points[j] >= points[i]) and np.any(points[j] > points[i])
-                if dominates:
-                    keep[i] = False
-                    break
-        return points[keep]
+        arr = np.asarray(points, dtype=float)
+        # dominates[i, j] == True means point i dominates point j (maximization).
+        ge = np.all(arr[:, None, :] >= arr[None, :, :], axis=2)
+        gt = np.any(arr[:, None, :] > arr[None, :, :], axis=2)
+        dominates = ge & gt
+        np.fill_diagonal(dominates, False)
+        dominated = np.any(dominates, axis=0)
+        return arr[~dominated]
 
     @staticmethod
     def _non_dominated_sort(points: np.ndarray) -> list[np.ndarray]:
@@ -1368,22 +1370,7 @@ class DiscoveryController:
         if rank_weight <= 0.0:
             return
 
-        if synthesis_terms is None:
-            points = np.asarray(
-                [
-                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
-                    for t, s in zip(topo_terms, stability_terms, strict=False)
-                ],
-                dtype=float,
-            )
-        else:
-            points = np.asarray(
-                [
-                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s)), max(0.0, min(1.0, sy))]
-                    for t, s, sy in zip(topo_terms, stability_terms, synthesis_terms, strict=False)
-                ],
-                dtype=float,
-            )
+        points = objective_points_from_terms(topo_terms, stability_terms, synthesis_terms)
         if points.size == 0:
             return
 
@@ -1511,25 +1498,18 @@ class DiscoveryController:
             return np.zeros(0, dtype=float)
         if cand_points.shape[1] <= 2:
             # 2D path is exact and already cheap.
-            return np.asarray(
-                [
-                    max(
-                        0.0,
-                        self._hypervolume(
-                            (
-                                p.reshape(1, cand_points.shape[1])
-                                if hist_arr.size == 0
-                                else np.vstack([hist_arr, p.reshape(1, cand_points.shape[1])])
-                            ),
-                            ref,
-                        ) - self._hypervolume(hist_arr, ref),
-                    )
-                    if p[0] >= feas_threshold
-                    else 0.0
-                    for p in cand_points
-                ],
-                dtype=float,
-            )
+            baseline = self._hypervolume(hist_arr, ref)
+            improvements = np.zeros(cand_points.shape[0], dtype=float)
+            for idx, p in enumerate(cand_points):
+                if p[0] < feas_threshold:
+                    continue
+                augmented = (
+                    p.reshape(1, cand_points.shape[1])
+                    if hist_arr.size == 0
+                    else np.vstack([hist_arr, p.reshape(1, cand_points.shape[1])])
+                )
+                improvements[idx] = max(0.0, self._hypervolume(augmented, ref) - baseline)
+            return improvements
 
         valid_hist = hist_arr[np.all(hist_arr > ref.reshape(1, -1), axis=1)] if hist_arr.size else np.zeros((0, cand_points.shape[1]), dtype=float)
         valid_cands = cand_points[np.all(cand_points > ref.reshape(1, -1), axis=1)]
@@ -1595,51 +1575,27 @@ class DiscoveryController:
         syn_feas_threshold = float(getattr(self, "pareto_synthesis_feasibility_threshold", 0.10))
 
         use_synthesis = synthesis_terms is not None
-        hist_points: list[tuple[float, ...]] = []
-        for c in self.all_candidates:
-            topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
-            stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
-            if topo < feas_threshold:
-                continue
-            if use_synthesis:
-                syn = max(0.0, min(1.0, float(getattr(c, "synthesis_score", 0.0))))
-                if use_joint_feas and syn < syn_feas_threshold:
-                    continue
-                hist_points.append((topo, stab, syn))
-            else:
-                hist_points.append((topo, stab))
-
-        if use_synthesis:
-            cand_points = np.asarray(
-                [
-                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s)), max(0.0, min(1.0, sy))]
-                    for t, s, sy in zip(topo_terms, stability_terms, synthesis_terms, strict=False)
-                ],
-                dtype=float,
-            )
-        else:
-            cand_points = np.asarray(
-                [
-                    [max(0.0, min(1.0, t)), max(0.0, min(1.0, s))]
-                    for t, s in zip(topo_terms, stability_terms, strict=False)
-                ],
-                dtype=float,
-            )
+        obj_dim = 3 if use_synthesis else 2
+        hist_arr = collect_history_objective_points(
+            self.all_candidates,
+            obj_dim=obj_dim,
+            topo_threshold=feas_threshold,
+            use_joint_synthesis=use_joint_feas and use_synthesis,
+            synthesis_threshold=syn_feas_threshold,
+        )
+        cand_points = objective_points_from_terms(topo_terms, stability_terms, synthesis_terms)
         if cand_points.size == 0:
             return
 
-        if hist_points:
-            hist_arr = np.asarray(hist_points, dtype=float)
-            merged = np.vstack([hist_arr, cand_points])
-        else:
-            hist_arr = np.zeros((0, cand_points.shape[1]), dtype=float)
-            merged = cand_points
+        merged = np.vstack([hist_arr, cand_points]) if hist_arr.size else cand_points
 
         ref = np.min(merged, axis=0) - 1e-3
-        if use_joint_feas and use_synthesis:
-            candidate_feas_mask = (cand_points[:, 0] >= feas_threshold) & (cand_points[:, 2] >= syn_feas_threshold)
-        else:
-            candidate_feas_mask = cand_points[:, 0] >= feas_threshold
+        candidate_feas_mask = feasibility_mask_from_points(
+            cand_points,
+            topo_threshold=feas_threshold,
+            use_joint_synthesis=use_joint_feas and use_synthesis,
+            synthesis_threshold=syn_feas_threshold,
+        )
 
         pool_limit = max(8, int(getattr(self, "hv_candidate_pool_limit", 96)))
         base_vals = np.asarray([float(c.acquisition_value) for c in candidates], dtype=float)
@@ -1732,37 +1688,16 @@ class DiscoveryController:
         hist_arr = np.zeros((0, 2), dtype=float)
         ref = None
         feas_threshold = float(getattr(self, "pareto_feasibility_threshold", 0.0))
+        candidate_obj = None
+        obj_dim = 2
         if use_hv:
-            obj_dim = 2
-            if objective_map:
-                try:
-                    first_obj = next(iter(objective_map.values()))
-                    obj_dim = int(np.asarray(first_obj, dtype=float).reshape(-1).shape[0])
-                except Exception:
-                    obj_dim = 2
-
-            hist_points: list[tuple[float, ...]] = []
-            for c in self.all_candidates:
-                topo = max(0.0, min(1.0, float(getattr(c, "topo_probability", 0.0))))
-                stab = max(0.0, min(1.0, float(getattr(c, "stability_score", 0.0))))
-                if topo < feas_threshold:
-                    continue
-                if obj_dim >= 3:
-                    syn = max(0.0, min(1.0, float(getattr(c, "synthesis_score", 0.0))))
-                    hist_points.append((topo, stab, syn))
-                else:
-                    hist_points.append((topo, stab))
-            if hist_points:
-                hist_arr = np.asarray(hist_points, dtype=float)
-            else:
-                hist_arr = np.zeros((0, obj_dim), dtype=float)
-
-            candidate_obj = np.vstack(
-                [
-                    np.asarray(objective_map.get(id(c), np.zeros(obj_dim, dtype=float)), dtype=float).reshape(obj_dim)
-                    for c in candidates
-                ]
+            obj_dim = infer_objective_dimension(objective_map, default=2)
+            hist_arr = collect_history_objective_points(
+                self.all_candidates,
+                obj_dim=obj_dim,
+                topo_threshold=feas_threshold,
             )
+            candidate_obj = objective_points_from_map(candidates, objective_map, obj_dim=obj_dim)
             merged = candidate_obj if hist_arr.size == 0 else np.vstack([hist_arr, candidate_obj])
             ref = np.min(merged, axis=0) - 1e-3
 
@@ -1772,53 +1707,62 @@ class DiscoveryController:
             chosen_features = features[selected_idx] if features is not None else None
             current_hv = 0.0
             selected_obj: list[np.ndarray] = []
+            current_arr = hist_arr
             use_joint_feas = bool(getattr(self, "pareto_joint_feasibility", False))
             syn_feas_threshold = float(getattr(self, "pareto_synthesis_feasibility_threshold", 0.10))
             if use_hv and ref is not None:
                 obj_dim = int(ref.shape[0])
                 selected_obj = [
-                    np.asarray(
-                        objective_map.get(id(candidates[idx]), np.zeros(obj_dim, dtype=float)),
-                        dtype=float,
+                    (
+                        candidate_obj[idx]
+                        if candidate_obj is not None
+                        else np.zeros(obj_dim, dtype=float)
                     ).reshape(obj_dim)
                     for idx in selected_idx
                 ]
-                current_arr = hist_arr
                 if selected_obj:
                     selected_stack = np.vstack(selected_obj)
                     current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
                 current_hv = self._hypervolume(current_arr, ref)
 
             hv_gain_cache: dict[int, float] = {}
+            hv_gain_array = np.zeros(len(candidates), dtype=float)
+            used_shared_hv_gains = False
             max_hv_gain = 0.0
-            if use_hv and ref is not None:
+            if use_hv and ref is not None and candidate_obj is not None:
                 obj_dim = int(ref.shape[0])
-                for i in range(len(candidates)):
-                    if selected_mask[i]:
-                        continue
-                    p = np.asarray(
-                        objective_map.get(id(candidates[i]), np.zeros(obj_dim, dtype=float)),
-                        dtype=float,
-                    ).reshape(obj_dim)
-                    if p[0] < feas_threshold:
-                        hv_gain_cache[i] = 0.0
-                        continue
-                    if use_joint_feas and obj_dim >= 3 and p[2] < syn_feas_threshold:
-                        hv_gain_cache[i] = 0.0
-                        continue
-                    current_arr = hist_arr
-                    if selected_obj:
-                        selected_stack = np.vstack(selected_obj)
-                        current_arr = selected_stack if current_arr.size == 0 else np.vstack([current_arr, selected_stack])
-                    augmented = (
-                        p.reshape(1, obj_dim)
-                        if current_arr.size == 0
-                        else np.vstack([current_arr, p.reshape(1, obj_dim)])
+                if bool(getattr(self, "hv_use_shared_samples", True)):
+                    hv_gain_array = self._mc_hv_improvements_shared(
+                        current_arr,
+                        candidate_obj,
+                        ref,
+                        feas_threshold,
                     )
-                    gain = max(0.0, self._hypervolume(augmented, ref) - current_hv)
-                    hv_gain_cache[i] = gain
-                    if gain > max_hv_gain:
-                        max_hv_gain = gain
+                    if use_joint_feas and obj_dim >= 3:
+                        hv_gain_array[candidate_obj[:, 2] < syn_feas_threshold] = 0.0
+                    hv_gain_array[selected_mask] = 0.0
+                    used_shared_hv_gains = True
+                    max_hv_gain = float(np.max(hv_gain_array))
+                else:
+                    for i in range(len(candidates)):
+                        if selected_mask[i]:
+                            continue
+                        p = candidate_obj[i].reshape(obj_dim)
+                        if p[0] < feas_threshold:
+                            hv_gain_cache[i] = 0.0
+                            continue
+                        if use_joint_feas and obj_dim >= 3 and p[2] < syn_feas_threshold:
+                            hv_gain_cache[i] = 0.0
+                            continue
+                        augmented = (
+                            p.reshape(1, obj_dim)
+                            if current_arr.size == 0
+                            else np.vstack([current_arr, p.reshape(1, obj_dim)])
+                        )
+                        gain = max(0.0, self._hypervolume(augmented, ref) - current_hv)
+                        hv_gain_cache[i] = gain
+                        if gain > max_hv_gain:
+                            max_hv_gain = gain
 
             for i in range(len(candidates)):
                 if selected_mask[i]:
@@ -1829,7 +1773,7 @@ class DiscoveryController:
                     penalty = float(np.exp(-d2 / (2.0 * sigma * sigma)).max())
                 hv_bonus = 0.0
                 if use_hv and hv_weight > 0.0:
-                    gain = hv_gain_cache.get(i, 0.0)
+                    gain = float(hv_gain_array[i]) if used_shared_hv_gains else hv_gain_cache.get(i, 0.0)
                     if max_hv_gain > 0.0:
                         hv_bonus = hv_weight * (gain / max_hv_gain)
                 adjusted = float(base[i] - penalty_weight * penalty + hv_bonus)

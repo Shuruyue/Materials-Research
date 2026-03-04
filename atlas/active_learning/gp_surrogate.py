@@ -22,6 +22,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from atlas.active_learning.acquisition import schedule_ucb_kappa
+
 try:
     from scipy.special import log_ndtr as _scipy_log_ndtr
     from scipy.special import ndtr as _scipy_ndtr
@@ -202,22 +204,15 @@ class GPSurrogateAcquirer:
         kappa_min: float,
         decay: float,
     ) -> float:
-        mode_key = str(mode).strip().lower()
-        if t <= 1:
-            return float(base_kappa)
-        if mode_key == "fixed":
-            return float(base_kappa)
-        if mode_key == "anneal":
-            k0 = max(float(base_kappa), float(kappa_min))
-            return float(kappa_min + (k0 - kappa_min) * math.exp(-float(decay) * (t - 1)))
-        if mode_key == "gp_ucb":
-            # GP-UCB beta_t schedule (Srinivas et al., 2010).
-            # GP-UCB 理論探索係數 beta_t。
-            d = max(1, int(dimension))
-            safe_delta = min(max(float(delta), 1e-9), 0.999999)
-            beta_t = 2.0 * math.log((t ** (d / 2.0 + 2.0)) * (math.pi ** 2) / (3.0 * safe_delta))
-            return float(max(float(kappa_min), math.sqrt(max(beta_t, 1e-12))))
-        return float(base_kappa)
+        return schedule_ucb_kappa(
+            iteration=max(1, int(t)),
+            base_kappa=base_kappa,
+            mode=mode,
+            dimension=dimension,
+            delta=delta,
+            kappa_min=kappa_min,
+            decay=decay,
+        )
 
     def _current_kappa(self) -> float:
         t = max(1, len(self._y_obj_hist))
