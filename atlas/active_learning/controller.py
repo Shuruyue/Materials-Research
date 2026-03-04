@@ -43,6 +43,15 @@ from atlas.active_learning.objective_space import (
 from atlas.active_learning.objective_space import (
     safe_float as safe_float_value,
 )
+from atlas.active_learning.pareto_utils import (
+    crowding_distance,
+    hypervolume,
+    hypervolume_2d,
+    mc_hv_improvements_shared,
+    non_dominated_sort,
+    pareto_front,
+    pareto_rank_score,
+)
 from atlas.config import get_config
 from atlas.models.prediction_utils import extract_mean_and_std
 from atlas.research.workflow_reproducible_graph import IterationSnapshot, WorkflowReproducibleGraph
@@ -1244,16 +1253,7 @@ class DiscoveryController:
 
     @staticmethod
     def _pareto_front(points: np.ndarray) -> np.ndarray:
-        if points.size == 0:
-            return points.reshape(0, 2)
-        arr = np.asarray(points, dtype=float)
-        # dominates[i, j] == True means point i dominates point j (maximization).
-        ge = np.all(arr[:, None, :] >= arr[None, :, :], axis=2)
-        gt = np.any(arr[:, None, :] > arr[None, :, :], axis=2)
-        dominates = ge & gt
-        np.fill_diagonal(dominates, False)
-        dominated = np.any(dominates, axis=0)
-        return arr[~dominated]
+        return pareto_front(points)
 
     @staticmethod
     def _non_dominated_sort(points: np.ndarray) -> list[np.ndarray]:
@@ -1264,26 +1264,7 @@ class DiscoveryController:
         - Deb et al. (2002), NSGA-II:
           https://doi.org/10.1109/4235.996017
         """
-        if points.size == 0:
-            return []
-
-        remaining = np.arange(points.shape[0], dtype=int)
-        fronts: list[np.ndarray] = []
-        while remaining.size > 0:
-            mask = np.ones(remaining.size, dtype=bool)
-            rem_points = points[remaining]
-            for i in range(remaining.size):
-                if not mask[i]:
-                    continue
-                p = rem_points[i]
-                dominates = np.all(rem_points >= p, axis=1) & np.any(rem_points > p, axis=1)
-                dominates[i] = False
-                if np.any(dominates):
-                    mask[i] = False
-            front = remaining[mask]
-            fronts.append(front)
-            remaining = remaining[~mask]
-        return fronts
+        return non_dominated_sort(points)
 
     @staticmethod
     def _crowding_distance(points: np.ndarray) -> np.ndarray:
@@ -1294,62 +1275,14 @@ class DiscoveryController:
         - Deb et al. (2002), NSGA-II:
           https://doi.org/10.1109/4235.996017
         """
-        n, m = points.shape
-        if n == 0:
-            return np.zeros(0, dtype=float)
-        if n <= 2:
-            return np.full(n, np.inf, dtype=float)
-
-        dist = np.zeros(n, dtype=float)
-        for dim in range(m):
-            order = np.argsort(points[:, dim])
-            dist[order[0]] = np.inf
-            dist[order[-1]] = np.inf
-            lo = float(points[order[0], dim])
-            hi = float(points[order[-1], dim])
-            denom = max(1e-12, hi - lo)
-            for idx in range(1, n - 1):
-                c = order[idx]
-                if np.isinf(dist[c]):
-                    continue
-                prev_v = float(points[order[idx - 1], dim])
-                next_v = float(points[order[idx + 1], dim])
-                dist[c] += (next_v - prev_v) / denom
-        return dist
+        return crowding_distance(points)
 
     @classmethod
     def _pareto_rank_score(cls, points: np.ndarray) -> np.ndarray:
         """
         Convert Pareto fronts + crowding into normalized ranking score [0, 1].
         """
-        if points.size == 0:
-            return np.zeros(0, dtype=float)
-
-        scores = np.zeros(points.shape[0], dtype=float)
-        fronts = cls._non_dominated_sort(points)
-        if not fronts:
-            return scores
-
-        for rank, front_idx in enumerate(fronts):
-            front_points = points[front_idx]
-            crowd = cls._crowding_distance(front_points)
-            finite = crowd[np.isfinite(crowd)]
-            if finite.size > 0:
-                cmin = float(np.min(finite))
-                cmax = float(np.max(finite))
-                denom = max(1e-12, cmax - cmin)
-                crowd_norm = np.ones_like(crowd, dtype=float)
-                finite_mask = np.isfinite(crowd)
-                crowd_norm[finite_mask] = (crowd[finite_mask] - cmin) / denom
-            else:
-                crowd_norm = np.ones_like(crowd, dtype=float)
-            rank_term = 1.0 / (1.0 + float(rank))
-            scores[front_idx] = rank_term * (0.75 + 0.25 * crowd_norm)
-
-        max_score = float(np.max(scores))
-        if max_score > 0.0:
-            scores /= max_score
-        return scores
+        return pareto_rank_score(points)
 
     def _apply_pareto_rank_bonus(
         self,
@@ -1395,31 +1328,7 @@ class DiscoveryController:
         - Daulton et al. (2020), differentiable EHVI:
           https://arxiv.org/abs/2006.05078
         """
-        if points.size == 0:
-            return 0.0
-
-        pts = cls._pareto_front(points)
-        rx, ry = float(reference[0]), float(reference[1])
-        valid = pts[(pts[:, 0] > rx) & (pts[:, 1] > ry)]
-        if valid.size == 0:
-            return 0.0
-
-        x_coords = sorted({rx, *[float(x) for x in valid[:, 0]]})
-        if len(x_coords) <= 1:
-            return 0.0
-
-        hv = 0.0
-        for idx in range(len(x_coords) - 1):
-            left = x_coords[idx]
-            right = x_coords[idx + 1]
-            if right <= left:
-                continue
-            active = valid[valid[:, 0] >= right]
-            if active.size == 0:
-                continue
-            max_y = float(np.max(active[:, 1]))
-            hv += (right - left) * max(0.0, max_y - ry)
-        return float(max(0.0, hv))
+        return hypervolume_2d(points, reference)
 
     def _hypervolume(self, points: np.ndarray, reference: np.ndarray) -> float:
         """
@@ -1428,45 +1337,14 @@ class DiscoveryController:
         - Exact in 2D via geometric sweep.
         - Monte Carlo approximation in >=3D (qEHVI/qNEHVI-style integration bridge).
         """
-        if points.size == 0:
-            return 0.0
-        arr = np.asarray(points, dtype=float)
-        ref = np.asarray(reference, dtype=float).reshape(-1)
-        if arr.ndim != 2:
-            return 0.0
-        dim = int(arr.shape[1])
-        if dim <= 0 or ref.size != dim:
-            return 0.0
-
-        valid = arr[np.all(arr > ref.reshape(1, -1), axis=1)]
-        if valid.size == 0:
-            return 0.0
-        if dim == 1:
-            return float(max(0.0, np.max(valid[:, 0]) - ref[0]))
-        if dim == 2:
-            return self._hypervolume_2d(valid, ref)
-
-        upper = np.max(valid, axis=0)
-        side = upper - ref
-        if np.any(side <= 1e-12):
-            return 0.0
-        box_volume = float(np.prod(side))
-        if box_volume <= 0.0:
-            return 0.0
-
-        samples = max(256, int(getattr(self, "hv_mc_samples", 4096)))
-        seed = int(getattr(self, "hv_mc_seed", 12345)) + int(getattr(self, "iteration", 1))
-        rng = np.random.RandomState(seed)
-        u = rng.rand(samples, dim)
-        probes = ref.reshape(1, -1) + u * side.reshape(1, -1)
-
-        chunk = max(64, int(getattr(self, "hv_chunk_size", 512)))
-        dominated_count = 0
-        for start in range(0, samples, chunk):
-            batch = probes[start : start + chunk]
-            dominates = np.all(valid[None, :, :] >= batch[:, None, :], axis=2)
-            dominated_count += int(np.any(dominates, axis=1).sum())
-        return float(box_volume * (dominated_count / float(samples)))
+        return hypervolume(
+            points,
+            reference,
+            hv_mc_samples=int(getattr(self, "hv_mc_samples", 4096)),
+            hv_mc_seed=int(getattr(self, "hv_mc_seed", 12345)),
+            iteration=int(getattr(self, "iteration", 1)),
+            hv_chunk_size=int(getattr(self, "hv_chunk_size", 512)),
+        )
 
     def _sample_hv_probes(
         self,
@@ -1475,10 +1353,11 @@ class DiscoveryController:
         *,
         dim: int,
     ) -> np.ndarray:
+        # Kept for backward compatibility with internal callers.
         samples = max(256, int(getattr(self, "hv_mc_samples", 4096)))
         seed = int(getattr(self, "hv_mc_seed", 12345)) + int(getattr(self, "iteration", 1))
-        rng = np.random.RandomState(seed)
-        u = rng.rand(samples, dim)
+        rng = np.random.default_rng(seed)
+        u = rng.random((samples, dim))
         side = (upper - reference).reshape(1, -1)
         return reference.reshape(1, -1) + u * side
 
@@ -1494,56 +1373,16 @@ class DiscoveryController:
 
         Uses one probe set for all candidates to reduce repeated MC variance and cost.
         """
-        if cand_points.size == 0:
-            return np.zeros(0, dtype=float)
-        if cand_points.shape[1] <= 2:
-            # 2D path is exact and already cheap.
-            baseline = self._hypervolume(hist_arr, ref)
-            improvements = np.zeros(cand_points.shape[0], dtype=float)
-            for idx, p in enumerate(cand_points):
-                if p[0] < feas_threshold:
-                    continue
-                augmented = (
-                    p.reshape(1, cand_points.shape[1])
-                    if hist_arr.size == 0
-                    else np.vstack([hist_arr, p.reshape(1, cand_points.shape[1])])
-                )
-                improvements[idx] = max(0.0, self._hypervolume(augmented, ref) - baseline)
-            return improvements
-
-        valid_hist = hist_arr[np.all(hist_arr > ref.reshape(1, -1), axis=1)] if hist_arr.size else np.zeros((0, cand_points.shape[1]), dtype=float)
-        valid_cands = cand_points[np.all(cand_points > ref.reshape(1, -1), axis=1)]
-        if valid_hist.size == 0 and valid_cands.size == 0:
-            return np.zeros(cand_points.shape[0], dtype=float)
-
-        merged = valid_cands if valid_hist.size == 0 else np.vstack([valid_hist, valid_cands])
-        upper = np.max(merged, axis=0)
-        side = upper - ref
-        if np.any(side <= 1e-12):
-            return np.zeros(cand_points.shape[0], dtype=float)
-
-        probes = self._sample_hv_probes(ref, upper, dim=cand_points.shape[1])
-        box_volume = float(np.prod(side))
-        if box_volume <= 0.0:
-            return np.zeros(cand_points.shape[0], dtype=float)
-
-        if valid_hist.size == 0:
-            dominated_hist = np.zeros(probes.shape[0], dtype=bool)
-        else:
-            dominates_hist = np.all(valid_hist[None, :, :] >= probes[:, None, :], axis=2)
-            dominated_hist = np.any(dominates_hist, axis=1)
-
-        improvements = np.zeros(cand_points.shape[0], dtype=float)
-        for idx, p in enumerate(cand_points):
-            if p[0] < feas_threshold:
-                continue
-            if not np.all(p > ref):
-                continue
-            dominates_p = np.all(p.reshape(1, -1) >= probes, axis=1)
-            dominated_after = dominated_hist | dominates_p
-            gain_ratio = max(0.0, float(dominated_after.mean() - dominated_hist.mean()))
-            improvements[idx] = box_volume * gain_ratio
-        return improvements
+        return mc_hv_improvements_shared(
+            hist_arr,
+            cand_points,
+            ref,
+            feas_threshold=feas_threshold,
+            hv_mc_samples=int(getattr(self, "hv_mc_samples", 4096)),
+            hv_mc_seed=int(getattr(self, "hv_mc_seed", 12345)),
+            iteration=int(getattr(self, "iteration", 1)),
+            hv_chunk_size=int(getattr(self, "hv_chunk_size", 512)),
+        )
 
     def _apply_pareto_hv_bonus(
         self,
@@ -1665,6 +1504,8 @@ class DiscoveryController:
 
         sigma = max(1e-6, float(getattr(self, "batch_diversity_sigma", 1.0)))
         base = np.asarray([float(c.acquisition_value) for c in candidates], dtype=float)
+        similarity_matrix = None
+        max_similarity = None
         if lam > 0.0:
             diversity_space = str(getattr(self, "batch_diversity_space", "chemistry")).strip().lower()
             if diversity_space == "performance":
@@ -1674,6 +1515,11 @@ class DiscoveryController:
             feat_std = features.std(axis=0, keepdims=True)
             feat_std[feat_std < 1e-8] = 1.0
             features = (features - features.mean(axis=0, keepdims=True)) / feat_std
+            if features.shape[0] > 0:
+                # Precompute Gaussian similarity once; later rounds only do max-updates.
+                sq_norm = np.sum(features * features, axis=1, keepdims=True)
+                d2 = np.maximum(0.0, sq_norm + sq_norm.T - 2.0 * (features @ features.T))
+                similarity_matrix = np.exp(-d2 / (2.0 * sigma * sigma))
         else:
             features = None
 
@@ -1684,6 +1530,8 @@ class DiscoveryController:
         selected_idx: list[int] = [int(np.argmax(base))]
         selected_mask = np.zeros(len(candidates), dtype=bool)
         selected_mask[selected_idx[0]] = True
+        if similarity_matrix is not None:
+            max_similarity = similarity_matrix[selected_idx[0]].copy()
 
         hist_arr = np.zeros((0, 2), dtype=float)
         ref = None
@@ -1703,8 +1551,6 @@ class DiscoveryController:
 
         while len(selected_idx) < n_top:
             best_i = -1
-            best_adj = -float("inf")
-            chosen_features = features[selected_idx] if features is not None else None
             current_hv = 0.0
             selected_obj: list[np.ndarray] = []
             current_arr = hist_arr
@@ -1764,26 +1610,31 @@ class DiscoveryController:
                         if gain > max_hv_gain:
                             max_hv_gain = gain
 
-            for i in range(len(candidates)):
-                if selected_mask[i]:
-                    continue
-                penalty = 0.0
-                if chosen_features is not None and features is not None and penalty_weight > 0.0:
-                    d2 = np.sum((chosen_features - features[i]) ** 2, axis=1)
-                    penalty = float(np.exp(-d2 / (2.0 * sigma * sigma)).max())
-                hv_bonus = 0.0
-                if use_hv and hv_weight > 0.0:
-                    gain = float(hv_gain_array[i]) if used_shared_hv_gains else hv_gain_cache.get(i, 0.0)
-                    if max_hv_gain > 0.0:
-                        hv_bonus = hv_weight * (gain / max_hv_gain)
-                adjusted = float(base[i] - penalty_weight * penalty + hv_bonus)
-                if adjusted > best_adj:
-                    best_adj = adjusted
-                    best_i = i
+            candidate_indices = np.flatnonzero(~selected_mask)
+            if candidate_indices.size == 0:
+                break
+
+            penalties = np.zeros(candidate_indices.shape[0], dtype=float)
+            if max_similarity is not None and penalty_weight > 0.0:
+                penalties = max_similarity[candidate_indices]
+
+            hv_bonus = np.zeros(candidate_indices.shape[0], dtype=float)
+            if use_hv and hv_weight > 0.0 and max_hv_gain > 0.0:
+                if used_shared_hv_gains:
+                    gains = hv_gain_array[candidate_indices]
+                else:
+                    gains = np.asarray([hv_gain_cache.get(int(i), 0.0) for i in candidate_indices], dtype=float)
+                hv_bonus = hv_weight * (gains / max_hv_gain)
+
+            adjusted = base[candidate_indices] - penalty_weight * penalties + hv_bonus
+            best_pos = int(np.argmax(adjusted))
+            best_i = int(candidate_indices[best_pos])
             if best_i < 0:
                 break
             selected_idx.append(best_i)
             selected_mask[best_i] = True
+            if max_similarity is not None and similarity_matrix is not None:
+                max_similarity = np.maximum(max_similarity, similarity_matrix[best_i])
 
         return [candidates[i] for i in selected_idx]
 

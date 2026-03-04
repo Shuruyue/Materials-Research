@@ -38,12 +38,39 @@ This report summarizes the requested 3-round optimization loop plus final consol
   - `atlas/active_learning/gp_surrogate.py` now uses `schedule_ucb_kappa` from `atlas/active_learning/acquisition.py`
   - avoids drift from maintaining duplicate schedule formulas.
 
+## Round 4 - Architecture + Core Algorithm Refactor
+
+- Added `atlas/active_learning/pareto_utils.py` and moved Pareto/HV math out of `DiscoveryController`:
+  - Pareto front extraction
+  - non-dominated sorting
+  - crowding distance
+  - Pareto rank scoring
+  - 2D exact hypervolume + generic hypervolume
+  - shared-sample HV-improvement estimation
+- Updated `atlas/active_learning/controller.py` to call the new pure-function module, reducing controller method bloat and isolating numerical logic.
+- Optimized non-dominated sorting path:
+  - replaced repeated front-wise point elimination loop with dominance-matrix based front peeling (near O(n^2) behavior for fixed objective dimension).
+- Optimized shared HV-improvement path:
+  - vectorized candidate-vs-probe dominance checks in chunks for >=3 objectives.
+  - keeps deterministic seed semantics while lowering Python-loop overhead.
+- Optimized diversity-aware greedy selection:
+  - precomputed pairwise Gaussian similarity matrix once per batch.
+  - switched to incremental max-similarity updates and vectorized candidate scoring in each greedy step.
+- Added dedicated unit tests:
+  - `tests/unit/active_learning/test_pareto_utils.py`
+  - validates rank correctness (vs brute force), exact 2D HV behavior, and shared-HV feasibility gating.
+
 ## Validation
 
 - `ruff check atlas/active_learning/controller.py atlas/active_learning/objective_space.py atlas/active_learning/gp_surrogate.py atlas/training/trainer.py`
 - `pytest tests/unit/active_learning/test_acquisition.py tests/unit/active_learning/test_controller_acquisition.py tests/unit/active_learning/test_gp_surrogate.py tests/unit/training/test_trainer.py -q`
 
 All above checks passed.
+
+Additional checks for this round:
+
+- `python -m ruff check atlas/active_learning/controller.py atlas/active_learning/pareto_utils.py tests/unit/active_learning/test_pareto_utils.py`
+- `python -m pytest tests/unit/active_learning/test_acquisition.py tests/unit/active_learning/test_controller_acquisition.py tests/unit/active_learning/test_gp_surrogate.py tests/unit/active_learning/test_pareto_utils.py -q`
 
 ## External References Reviewed (for architecture/algorithm direction)
 
@@ -53,4 +80,5 @@ All above checks passed.
 - Batch BO via local penalization: Gonzalez et al. (2016), https://proceedings.mlr.press/v51/gonzalez16a.html
 - Constrained BO: Gardner et al. (2014), https://proceedings.mlr.press/v32/gardner14.html
 - NSGA-II: Deb et al. (2002), https://doi.org/10.1109/4235.996017
+- Fast non-dominated sorting complexity reduction: Jensen (2003), https://doi.org/10.1109/TEVC.2003.817234
 - Materials Project reaction-network repository: https://github.com/materialsproject/reaction-network
