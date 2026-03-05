@@ -1,5 +1,6 @@
 """Tests for atlas.active_learning.generator module."""
 
+import numpy as np
 import pytest
 
 
@@ -166,3 +167,64 @@ def test_no_seeds_raises():
     gen = StructureGenerator(seed_structures=[], rng_seed=42)
     with pytest.raises(ValueError, match="No seed"):
         gen.generate_batch(n_candidates=5)
+
+
+def test_softmax_handles_nonfinite_logits():
+    from atlas.active_learning.generator import _softmax
+
+    probs = _softmax(np.asarray([0.0, np.nan, np.inf, -np.inf], dtype=float))
+    assert np.isfinite(probs).all()
+    assert probs.shape == (4,)
+    assert probs.sum() == pytest.approx(1.0, abs=1e-12)
+    assert (probs >= 0.0).all()
+
+
+def test_charge_neutrality_score_is_stable_under_monte_carlo_fallback():
+    from pymatgen.core import Lattice, Structure
+
+    from atlas.active_learning.generator import _charge_neutrality_score
+
+    struct = Structure(
+        Lattice.cubic(4.2),
+        ["Fe", "O", "O"],
+        [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]],
+    )
+    s1 = _charge_neutrality_score(struct, max_combinations=1)
+    s2 = _charge_neutrality_score(struct, max_combinations=1)
+    assert s1 == pytest.approx(s2, abs=1e-12)
+    assert 0.0 <= s1 <= 1.0
+
+
+def test_generate_batch_single_worker_fallback(generator):
+    generator.n_workers = 1
+    cands = generator.generate_batch(n_candidates=8, methods=["substitute", "strain"])
+    assert 0 < len(cands) <= 8
+
+
+def test_generator_init_sanitizes_nonfinite_hyperparameters(seed_structures):
+    from atlas.active_learning.generator import StructureGenerator
+
+    gen = StructureGenerator(
+        seed_structures=seed_structures,
+        rng_seed=7.9,  # type: ignore[arg-type]
+        w_topo=float("nan"),
+        w_novelty=float("inf"),
+        w_feasibility=float("-inf"),
+        w_strain=float("nan"),
+        archive_limit=float("nan"),  # type: ignore[arg-type]
+        substitution_stat_decay=float("nan"),
+    )
+    assert gen.rng_seed == 42
+    assert gen.archive_limit >= 32
+    assert np.isfinite(gen.substitution_stat_decay)
+    assert 0.90 <= gen.substitution_stat_decay <= 1.0
+    weights = gen._normalize_weights(gen.weights)
+    assert np.isfinite(np.asarray(list(weights.values()), dtype=float)).all()
+    assert pytest.approx(sum(weights.values()), abs=1e-12) == 1.0
+
+
+def test_normalize_weights_handles_nonfinite_entries(generator):
+    weights = generator._normalize_weights({"topo": float("nan"), "novelty": float("inf"), "x": -5.0})
+    assert np.isfinite(np.asarray(list(weights.values()), dtype=float)).all()
+    assert pytest.approx(sum(weights.values()), abs=1e-12) == 1.0
+    assert all(v >= 0.0 for v in weights.values())

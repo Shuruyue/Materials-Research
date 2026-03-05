@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - `setup.py` — Replaced 48-line duplicate dependency list with 2-line shim delegating to `pyproject.toml`.
+- `requirements*.txt` — Switched to pyproject-driven editable installs (`-e .[...]`) to remove dependency drift between requirement files and package metadata.
+- `README.md` / `CONTRIBUTING.md` — Updated install commands to align with profile-based requirements entry points.
+- `pyproject.toml` / `requirements-full.txt` — Resolved optional-profile solver conflicts (`matbench`↔`matminer`) and limited `requirements-full` to the stable optional set.
 - `atlas/topology/classifier.py` — Removed duplicate `CrystalGraphBuilder` (~100 lines), now imports from `atlas.models.graph_builder`. Renamed local `MessagePassingLayer` to `_TopoMessagePassingLayer` with documentation. Updated `TopoGNN` default `node_dim` from 69 to 91.
 - `atlas/models/layers.py` — Added exception chaining (`from e`) to `ImportError` raise.
 - `atlas/data/crystal_dataset.py` — Replaced `try/except/pass` with `contextlib.suppress`.

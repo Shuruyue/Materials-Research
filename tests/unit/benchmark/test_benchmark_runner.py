@@ -16,6 +16,7 @@ from atlas.benchmark import (
     compute_regression_metrics,
     compute_uncertainty_metrics,
 )
+from atlas.benchmark import runner as runner_mod
 
 
 class _DummyModel(nn.Module):
@@ -90,6 +91,18 @@ def test_compute_uncertainty_metrics():
     assert np.isfinite(metrics["crps_gaussian"])
 
 
+def test_bootstrap_ci_sanitizes_invalid_parameters():
+    lo, hi = runner_mod._bootstrap_ci(  # noqa: SLF001
+        np.asarray([1.0, 2.0, 3.0], dtype=np.float64),
+        confidence=float("nan"),
+        n_bootstrap=-5,
+        seed=float("nan"),
+    )
+    assert np.isfinite(lo)
+    assert np.isfinite(hi)
+    assert hi >= lo
+
+
 def test_aggregate_fold_results():
     folds = [
         FoldResult(fold=0, n_test=10, n_valid=9, coverage=0.9, mae=0.2, rmse=0.3, r2=0.8),
@@ -137,6 +150,59 @@ def test_runner_run_task_writes_report(tmp_path):
     assert np.isfinite(report["aggregate_metrics"]["global_r2_ci95_lo"])
     assert np.isfinite(report["aggregate_metrics"]["global_r2_ci95_hi"])
     assert report["fold_results"][0]["status"] == "ok"
+
+
+def test_runner_init_sanitizes_invalid_runtime_parameters(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=0,
+        n_jobs=0,
+        output_dir=tmp_path,
+        bootstrap_samples=float("nan"),
+        bootstrap_seed=float("nan"),
+        min_coverage_required=float("nan"),
+        conformal_coverage=float("nan"),
+        conformal_max_calibration_samples=-9,
+    )
+    assert runner.batch_size == 1
+    assert runner.n_jobs == -1
+    assert runner.bootstrap_samples >= 64
+    assert runner.bootstrap_seed == 42
+    assert runner.min_coverage_required == pytest.approx(0.0)
+    assert 0.0 < runner.conformal_coverage < 1.0
+    assert runner.conformal_max_calibration_samples == 0
+
+
+def test_runner_init_avoids_silent_truncation_for_non_integral_inputs(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=3.7,
+        n_jobs=True,
+        output_dir=tmp_path,
+        bootstrap_samples=99.9,
+        bootstrap_seed=7.5,
+    )
+    assert runner.batch_size == 32
+    assert runner.n_jobs == -1
+    assert runner.bootstrap_samples == 400
+    assert runner.bootstrap_seed == 42
+
+
+def test_runner_init_probability_controls_reject_bool_semantics(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        output_dir=tmp_path,
+        min_coverage_required=True,
+        conformal_coverage=True,
+    )
+    assert runner.min_coverage_required == pytest.approx(0.0)
+    assert runner.conformal_coverage == pytest.approx(0.95)
 
 
 def test_runner_uncertainty_outputs_are_reported(tmp_path):
@@ -241,6 +307,42 @@ def test_runner_fail_on_fallback_signature(tmp_path):
     )
     assert report["fold_results"][0]["status"] == "failed"
     assert "fallback signature" in str(report["fold_results"][0]["error"]).lower()
+
+
+def test_runner_run_task_rejects_non_integral_fold_indices(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    with pytest.raises(ValueError, match="non-negative integers"):
+        runner.run_task(
+            task_name="fake_task_invalid_fold",
+            folds=[0.5],
+            show_progress=False,
+        )
+
+
+def test_runner_run_task_rejects_negative_fold_indices(tmp_path):
+    runner = MatbenchRunner(
+        model=_DummyModel(),
+        property_name="formation_energy",
+        device="cpu",
+        batch_size=2,
+        n_jobs=1,
+        output_dir=tmp_path,
+    )
+    runner.load_task = lambda _: _FakeTask()
+    with pytest.raises(ValueError, match="non-negative integers"):
+        runner.run_task(
+            task_name="fake_task_negative_fold",
+            folds=[-1],
+            show_progress=False,
+        )
 
 
 def test_benchmark_cli_list_tasks(capsys):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 
 import torch
 import torch.nn as nn
@@ -98,25 +99,27 @@ class NativeCrabnetScreener(nn.Module):
             raise ValueError(f"Unknown simplex_transform: {simplex_transform!r}. Supported: {supported}")
 
         self.simplex_transform = simplex_key
-        self.simplex_blend = float(min(max(simplex_blend, 0.0), 1.0))
-        self.escort_power = float(max(escort_power, 1e-6))
-        self.clr_temperature = float(max(clr_temperature, 1e-6))
-        self.uncertainty_min_std = float(max(uncertainty_min_std, 0.0))
+        blend_raw = self._coerce_nonnegative_finite(simplex_blend, default=0.0)
+        self.simplex_blend = float(min(blend_raw, 1.0))
+        self.escort_power = self._coerce_positive_finite(escort_power, default=0.85)
+        self.clr_temperature = self._coerce_positive_finite(clr_temperature, default=1.0)
+        self.uncertainty_min_std = self._coerce_nonnegative_finite(uncertainty_min_std, default=0.0)
         head_mode = str(uncertainty_head_mode).strip().lower()
         if head_mode not in _UQ_HEAD_MODES:
             supported = ", ".join(sorted(_UQ_HEAD_MODES))
             raise ValueError(f"Unknown uncertainty_head_mode: {uncertainty_head_mode!r}. Supported: {supported}")
         self.uncertainty_head_mode = head_mode
-        self.mean_dims = int(max(mean_dims, 1))
+        self.mean_dims = self._coerce_int(mean_dims, default=1, min_value=1)
+        base_temperature = self._coerce_positive_finite(uncertainty_temperature, default=1.0)
         self.register_buffer(
             "uncertainty_temperature",
-            torch.tensor(float(max(uncertainty_temperature, 1e-6)), dtype=torch.float32),
+            torch.tensor(base_temperature, dtype=torch.float32),
         )
         self.return_distribution = bool(return_distribution)
-        self.ensemble_size = int(max(ensemble_size, 1))
-        self.mc_dropout_samples = int(max(mc_dropout_samples, 0))
+        self.ensemble_size = self._coerce_int(ensemble_size, default=1, min_value=1)
+        self.mc_dropout_samples = self._coerce_int(mc_dropout_samples, default=0, min_value=0)
         self.grouped_calibration = bool(grouped_calibration)
-        self.grouped_calibration_default = float(max(grouped_calibration_default, 1e-6))
+        self.grouped_calibration_default = self._coerce_positive_finite(grouped_calibration_default, default=1.0)
         self.group_temperature_table: dict[int, float] = {}
         self._member_init_kwargs = dict(
             compute_device=compute_device,
@@ -158,8 +161,67 @@ class NativeCrabnetScreener(nn.Module):
         return self._ensemble_members
 
     @staticmethod
+    def _coerce_nonnegative_finite(value: object, default: float) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out):
+            return float(default)
+        return float(max(out, 0.0))
+
+    @staticmethod
+    def _coerce_positive_finite(value: object, default: float) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out) or out <= 0.0:
+            return float(default)
+        return out
+
+    @staticmethod
+    def _coerce_int(value: object, default: int, *, min_value: int = 0) -> int:
+        fallback = int(default)
+        if isinstance(value, bool):
+            out = fallback
+        else:
+            try:
+                numeric = float(value)
+            except Exception:
+                out = fallback
+            else:
+                if not math.isfinite(numeric) or not numeric.is_integer():
+                    out = fallback
+                else:
+                    out = int(numeric)
+        return max(int(min_value), int(out))
+
+    @staticmethod
     def _is_integer_tensor(x: torch.Tensor) -> bool:
         return x.dtype in _INT_DTYPES
+
+    @staticmethod
+    def _max_finite_value(x: torch.Tensor, default: float = 0.0) -> float:
+        values = x.to(dtype=torch.float32).reshape(-1)
+        finite = values[torch.isfinite(values)]
+        if finite.numel() == 0:
+            return float(default)
+        return float(torch.max(finite).item())
+
+    @staticmethod
+    def _fraction_likelihood_score(x: torch.Tensor) -> float:
+        """
+        Heuristic score for "fraction-like" tensors (mostly finite in [0, 1]).
+        """
+        values = x.to(dtype=torch.float32).reshape(-1)
+        finite_mask = torch.isfinite(values)
+        if not bool(finite_mask.any()):
+            return -1.0
+        finite = values[finite_mask]
+        in_unit = ((finite >= -1e-6) & (finite <= 1.0 + 1e-6)).to(dtype=torch.float32).mean().item()
+        nonnegative = (finite >= -1e-6).to(dtype=torch.float32).mean().item()
+        return float((2.0 * in_unit) + nonnegative)
 
     def _normalize_input_order(
         self,
@@ -182,10 +244,21 @@ class NativeCrabnetScreener(nn.Module):
             frac = a.to(dtype=torch.float32)
             return src, frac
 
-        # Heuristic fallback for ambiguous dtypes.
-        if torch.max(a).item() > 1.5 and torch.max(b).item() <= 1.5:
+        # Fraction-likelihood heuristic for ambiguous floating-point inputs.
+        # This is more robust than raw max-threshold checks under NaN/Inf noise.
+        a_frac_score = self._fraction_likelihood_score(a)
+        b_frac_score = self._fraction_likelihood_score(b)
+        if a_frac_score > b_frac_score + 1e-6:
+            return b.to(dtype=torch.long), a.to(dtype=torch.float32)
+        if b_frac_score > a_frac_score + 1e-6:
             return a.to(dtype=torch.long), b.to(dtype=torch.float32)
-        if torch.max(b).item() > 1.5 and torch.max(a).item() <= 1.5:
+
+        # Heuristic fallback for ambiguous dtypes.
+        a_max = self._max_finite_value(a, default=0.0)
+        b_max = self._max_finite_value(b, default=0.0)
+        if a_max > 1.5 and b_max <= 1.5:
+            return a.to(dtype=torch.long), b.to(dtype=torch.float32)
+        if b_max > 1.5 and a_max <= 1.5:
             return b.to(dtype=torch.long), a.to(dtype=torch.float32)
         return a.to(dtype=torch.long), b.to(dtype=torch.float32)
 
@@ -256,7 +329,7 @@ class NativeCrabnetScreener(nn.Module):
         target = float(min(max(target_entropy_ratio, 1e-3), 0.999))
         q_lo = float(max(q_min, 1e-3))
         q_hi = float(max(q_max, q_lo + 1e-3))
-        steps = int(max(q_steps, 3))
+        steps = self._coerce_int(q_steps, default=25, min_value=3)
 
         if src is None:
             mask = frac > 0
@@ -320,11 +393,36 @@ class NativeCrabnetScreener(nn.Module):
     def _group_ids_from_src(self, src: torch.Tensor) -> torch.Tensor:
         return (src != 0).sum(dim=1).to(dtype=torch.long)
 
+    @staticmethod
+    def _coerce_group_id(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(numeric) or not numeric.is_integer() or numeric < 0.0:
+            return None
+        return int(numeric)
+
+    def _sanitize_group_temperature_table(self) -> dict[int, float]:
+        out: dict[int, float] = {}
+        for raw_group_id, raw_scale in self.group_temperature_table.items():
+            group_id = self._coerce_group_id(raw_group_id)
+            if group_id is None:
+                continue
+            out[group_id] = self._coerce_positive_finite(raw_scale, default=self.grouped_calibration_default)
+        return out
+
     def _apply_uncertainty_calibration(self, std: torch.Tensor, src: torch.Tensor | None = None) -> torch.Tensor:
         temp = self.uncertainty_temperature.to(device=std.device, dtype=std.dtype)
         out = std * temp
         if src is None or not self.grouped_calibration:
             return out
+
+        table = self._sanitize_group_temperature_table()
+        if table != self.group_temperature_table:
+            self.group_temperature_table = table
 
         group_ids = self._group_ids_from_src(src)
         group_scale = torch.full(
@@ -333,9 +431,38 @@ class NativeCrabnetScreener(nn.Module):
             dtype=std.dtype,
             device=std.device,
         )
-        for g, scale in self.group_temperature_table.items():
-            group_scale[group_ids == int(g)] = float(scale)
+        for group_id, scale in table.items():
+            group_scale[group_ids == group_id] = float(scale)
         return out * group_scale
+
+    @torch.no_grad()
+    def _calibration_scores(
+        self,
+        y_true: torch.Tensor,
+        y_pred_mean: torch.Tensor,
+        y_pred_std: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        y_true = y_true.reshape(-1).to(dtype=torch.float32)
+        y_pred_mean = y_pred_mean.reshape(-1).to(dtype=torch.float32)
+        y_pred_std = y_pred_std.reshape(-1).to(dtype=torch.float32)
+
+        valid = (
+            torch.isfinite(y_true)
+            & torch.isfinite(y_pred_mean)
+            & torch.isfinite(y_pred_std)
+            & (y_pred_std > 0.0)
+        )
+        if not bool(valid.any()):
+            empty = torch.empty(0, dtype=torch.float32, device=y_true.device)
+            empty_index = torch.empty(0, dtype=torch.long, device=y_true.device)
+            return empty, empty_index
+
+        selected_idx = torch.where(valid)[0]
+        resid = torch.abs(y_true[selected_idx] - y_pred_mean[selected_idx])
+        denom = torch.clamp(y_pred_std[selected_idx], min=1e-9)
+        score = resid / denom
+        finite_score = torch.isfinite(score)
+        return score[finite_score], selected_idx[finite_score]
 
     @staticmethod
     def _set_dropout_train(module: nn.Module) -> None:
@@ -467,13 +594,16 @@ class NativeCrabnetScreener(nn.Module):
         sigma_cal = t * sigma
         """
         q = float(min(max(quantile, 1e-3), 0.999))
-        y_true = y_true.reshape(-1).to(dtype=torch.float32)
-        y_pred_mean = y_pred_mean.reshape(-1).to(dtype=torch.float32)
-        y_pred_std = torch.clamp(y_pred_std.reshape(-1).to(dtype=torch.float32), min=1e-9)
-        score = torch.abs(y_true - y_pred_mean) / y_pred_std
-        t = float(torch.quantile(score, q).item())
-        t = max(t, 1e-6)
-        self.uncertainty_temperature.data = torch.tensor(t, dtype=self.uncertainty_temperature.dtype)
+        score, _ = self._calibration_scores(y_true, y_pred_mean, y_pred_std)
+        current = self._coerce_positive_finite(float(self.uncertainty_temperature.item()), default=1.0)
+        if score.numel() == 0:
+            return current
+
+        t_tensor = torch.quantile(score, q)
+        if not bool(torch.isfinite(t_tensor)):
+            return current
+        t = self._coerce_positive_finite(float(t_tensor.item()), default=current)
+        self.uncertainty_temperature.data.fill_(t)
         return t
 
     @torch.no_grad()
@@ -491,20 +621,24 @@ class NativeCrabnetScreener(nn.Module):
         Grouped conformal calibration by composition complexity (number of elements).
         """
         q = float(min(max(quantile, 1e-3), 0.999))
+        min_size = self._coerce_int(min_group_size, default=16, min_value=1)
         group_ids = self._group_ids_from_src(src).reshape(-1)
-        y_true = y_true.reshape(-1).to(dtype=torch.float32)
-        y_pred_mean = y_pred_mean.reshape(-1).to(dtype=torch.float32)
-        y_pred_std = torch.clamp(y_pred_std.reshape(-1).to(dtype=torch.float32), min=1e-9)
-        score = torch.abs(y_true - y_pred_mean) / y_pred_std
+        score, selected_idx = self._calibration_scores(y_true, y_pred_mean, y_pred_std)
+        if score.numel() == 0:
+            return dict(self.group_temperature_table)
+        group_ids = group_ids[selected_idx]
 
         table: dict[int, float] = {}
         unique_groups = torch.unique(group_ids)
         for g in unique_groups:
             mask = group_ids == g
-            if int(mask.sum().item()) < int(min_group_size):
+            if int(mask.sum().item()) < min_size:
                 continue
-            t = float(torch.quantile(score[mask], q).item())
-            table[int(g.item())] = max(t, 1e-6)
+            t_tensor = torch.quantile(score[mask], q)
+            if not bool(torch.isfinite(t_tensor)):
+                continue
+            t = self._coerce_positive_finite(float(t_tensor.item()), default=self.grouped_calibration_default)
+            table[int(g.item())] = t
 
         if table:
             self.group_temperature_table = table
@@ -522,7 +656,10 @@ class NativeCrabnetScreener(nn.Module):
         src, frac = self._sanitize_fractions(src, frac)
         mask = src != 0
         frac = self._apply_simplex_transform(frac, mask)
-        samples = self.mc_dropout_samples if mc_samples is None else int(max(mc_samples, 0))
+        if mc_samples is None:
+            samples = self.mc_dropout_samples
+        else:
+            samples = self._coerce_int(mc_samples, default=self.mc_dropout_samples, min_value=0)
         return self._forward_distribution(src, frac, samples)
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):

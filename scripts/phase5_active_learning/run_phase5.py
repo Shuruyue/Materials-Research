@@ -12,9 +12,12 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import re
 import subprocess
 import sys
+from numbers import Integral, Real
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,21 +58,143 @@ PHASE5_COMPETITION = {
     "default_no_mace": False,
 }
 
+_SAFE_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_PROPERTY_GROUP = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _is_safe_run_id(run_id: str | None) -> bool:
+    if not run_id:
+        return True
+    if run_id in {".", ".."}:
+        return False
+    if "/" in run_id or "\\" in run_id:
+        return False
+    return bool(_SAFE_RUN_ID_PATTERN.fullmatch(run_id))
+
+
+def _is_finite_non_negative(value: float | None) -> bool:
+    if value is None:
+        return True
+    numeric = float(value)
+    return math.isfinite(numeric) and numeric >= 0.0
+
+
+def _coerce_int_with_bounds(
+    value: object,
+    *,
+    arg_name: str,
+    min_value: int | None = None,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{arg_name} must be an integer")
+    if isinstance(value, Integral):
+        number = int(value)
+    elif isinstance(value, Real):
+        number_f = float(value)
+        if not math.isfinite(number_f) or not number_f.is_integer():
+            raise ValueError(f"{arg_name} must be an integer")
+        number = int(number_f)
+    else:
+        try:
+            number = int(value)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ValueError(f"{arg_name} must be an integer") from exc
+
+    if min_value is not None and number < min_value:
+        comparator = "> 0" if min_value == 1 else f">= {min_value}"
+        raise ValueError(f"{arg_name} must be {comparator}")
+    return number
+
+
+def _set_or_replace_flag(cmd: list[str], flag: str, value: int | float | str) -> None:
+    """Replace an existing CLI flag value or append a new flag/value pair."""
+    sval = str(value)
+    for idx in range(len(cmd) - 1):
+        if cmd[idx] == flag:
+            cmd[idx + 1] = sval
+            return
+    cmd.extend([flag, sval])
+
+
+def _validate_args(args: argparse.Namespace) -> tuple[bool, str]:
+    positive_int_fields = ("iterations", "candidates", "top", "seeds", "calibration_window")
+    for field in positive_int_fields:
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        try:
+            normalized = _coerce_int_with_bounds(value, arg_name=f"--{field.replace('_', '-')}", min_value=1)
+        except ValueError as exc:
+            return False, str(exc)
+        setattr(args, field, normalized)
+
+    if args.preflight_max_samples is not None:
+        try:
+            args.preflight_max_samples = _coerce_int_with_bounds(
+                args.preflight_max_samples,
+                arg_name="--preflight-max-samples",
+                min_value=0,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+    property_group = str(args.preflight_property_group or "").strip()
+    if not property_group:
+        return False, "--preflight-property-group must not be empty"
+    if not _SAFE_PROPERTY_GROUP.fullmatch(property_group):
+        return False, "--preflight-property-group contains unsupported characters"
+    if not _is_finite_non_negative(args.acq_kappa):
+        return False, "--acq-kappa must be finite and >= 0"
+    if not _is_finite_non_negative(args.acq_jitter):
+        return False, "--acq-jitter must be finite and >= 0"
+    if args.acq_best_f is not None and not math.isfinite(float(args.acq_best_f)):
+        return False, "--acq-best-f must be finite"
+    if args.preflight_split_seed is not None:
+        try:
+            args.preflight_split_seed = _coerce_int_with_bounds(
+                args.preflight_split_seed,
+                arg_name="--preflight-split-seed",
+                min_value=0,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+    if args.preflight_timeout_sec is not None:
+        try:
+            args.preflight_timeout_sec = _coerce_int_with_bounds(
+                args.preflight_timeout_sec,
+                arg_name="--preflight-timeout-sec",
+                min_value=1,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+    if bool(args.run_id) and bool(args.results_dir):
+        return False, "--run-id and --results-dir cannot be used together"
+    if bool(args.resume) and bool(args.results_dir):
+        return False, "--resume and --results-dir cannot be used together"
+    if bool(args.preflight_only) and bool(args.skip_preflight):
+        return False, "--preflight-only cannot be used with --skip-preflight"
+    if not _is_safe_run_id(args.run_id):
+        return False, "--run-id contains unsafe characters"
+    if args.results_dir is not None and not str(args.results_dir).strip():
+        return False, "--results-dir must not be empty"
+    if args.candidates is not None and args.top is not None and int(args.top) > int(args.candidates):
+        return False, "--top cannot be greater than --candidates"
+    return True, ""
+
 
 def build_command(args: argparse.Namespace) -> list[str]:
     profile = PHASE5_COMPETITION if args.competition else PHASE5_PROFILES[args.level]
     cmd = [sys.executable, str(PROJECT_ROOT / "scripts/phase5_active_learning/run_discovery.py")]
     cmd.extend(profile["args"])
 
-    overrides = {
-        "--iterations": args.iterations,
-        "--candidates": args.candidates,
-        "--top": args.top,
-        "--seeds": args.seeds,
-    }
-    for key, value in overrides.items():
+    overrides = (
+        ("--iterations", args.iterations),
+        ("--candidates", args.candidates),
+        ("--top", args.top),
+        ("--seeds", args.seeds),
+    )
+    for key, value in overrides:
         if value is not None:
-            cmd.extend([key, str(value)])
+            _set_or_replace_flag(cmd, key, value)
 
     if args.no_mace or profile["default_no_mace"]:
         cmd.append("--no-mace")
@@ -99,7 +224,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified Phase 5 active-learning launcher")
     parser.add_argument(
         "--level",
@@ -139,12 +264,23 @@ def main() -> int:
     parser.add_argument("--preflight-property-group", type=str, default="priority7")
     parser.add_argument("--preflight-max-samples", type=int, default=0)
     parser.add_argument("--preflight-split-seed", type=int, default=42)
+    parser.add_argument("--preflight-timeout-sec", type=int, default=1800)
     parser.add_argument("--manifest-visibility", choices=["internal", "public"], default="internal")
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    ok, message = _validate_args(args)
+    if not ok:
+        print(f"[ERROR] {message}", file=sys.stderr)
+        return 2
 
     if args.skip_preflight and not args.dry_run:
-        print("[ERROR] --skip-preflight is only allowed together with --dry-run.")
+        print("[ERROR] --skip-preflight is only allowed together with --dry-run.", file=sys.stderr)
         return 2
 
     if not args.skip_preflight:
@@ -154,9 +290,11 @@ def main() -> int:
             max_samples=args.preflight_max_samples,
             split_seed=args.preflight_split_seed,
             dry_run=args.dry_run,
+            timeout_sec=args.preflight_timeout_sec,
         )
         if result.return_code != 0:
-            print(f"[ERROR] Preflight failed with return code {result.return_code}")
+            detail = f" ({result.error_message})" if result.error_message else ""
+            print(f"[ERROR] Preflight failed with return code {result.return_code}{detail}", file=sys.stderr)
             return result.return_code
 
     if args.preflight_only:

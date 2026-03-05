@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from atlas.active_learning.rxn_network_native import NativeReactionNetworkEvaluator
 
 
@@ -49,6 +51,37 @@ def test_fallback_conservative_without_context():
 def test_alias_soft_mish_maps_to_softplus():
     ev = NativeReactionNetworkEvaluator(cost_function="soft_mish")
     assert ev.cost_function == "softplus"
+
+
+def test_safe_float_rejects_non_finite_values():
+    assert NativeReactionNetworkEvaluator._safe_float(float("nan"), default=0.7) == 0.7
+    assert NativeReactionNetworkEvaluator._safe_float(float("inf"), default=1.2) == 1.2
+
+
+def test_normalize_weights_ignores_unknown_and_non_finite_values():
+    weights = NativeReactionNetworkEvaluator._normalize_weights(
+        {
+            "average_cost": float("nan"),
+            "driving_force": 0.5,
+            "unknown_metric": 10.0,
+        }
+    )
+    assert set(weights) == {
+        "average_cost",
+        "driving_force",
+        "num_steps",
+        "uncertainty",
+        "intermediate_complexity",
+        "entropic_risk",
+    }
+    assert abs(sum(weights.values()) - 1.0) < 1e-12
+    assert "unknown_metric" not in weights
+
+
+def test_entropic_risk_is_finite_under_extreme_scales():
+    score = NativeReactionNetworkEvaluator._entropic_risk(np.asarray([0.0, 1.0e6], dtype=float), risk_aversion=500.0)
+    assert np.isfinite(score)
+    assert score >= 0.0
 
 
 def test_pareto_ranking_prefers_better_cost_and_driving_force():
@@ -129,3 +162,49 @@ def test_target_validation_rejects_pathways_without_target_product():
     out = ev.evaluate("T", -0.3, pathways=[wrong], precursors=["A"])
     assert out["synthesizable"] is False
     assert out["pathway_count"] == 0
+
+
+def test_path_step_costs_falls_back_to_reaction_energies_when_costs_invalid():
+    ev = NativeReactionNetworkEvaluator()
+    path = _FakePath(
+        reactions=[
+            _FakeReaction("R1", -0.30, products=("I",)),
+            _FakeReaction("R2", -0.20, products=("T",)),
+        ],
+        costs=[float("nan"), float("inf")],
+        intermediates={"I"},
+    )
+    out = ev.evaluate("T", -0.5, pathways=[path], precursors=["A"])
+    assert out["synthesizable"] is True
+    assert np.isfinite(out["metrics"]["entropic_risk"])
+
+
+def test_integer_and_bool_controls_are_sanitized():
+    ev = NativeReactionNetworkEvaluator(
+        max_num_pathways=False,  # type: ignore[arg-type]
+        k_shortest_paths=3.7,  # type: ignore[arg-type]
+        max_num_combos="2.5",  # type: ignore[arg-type]
+        chunk_size=float("nan"),
+        use_balanced_solver="false",  # type: ignore[arg-type]
+        find_intermediate_rxns="no",  # type: ignore[arg-type]
+        use_basic_enumerator="0",  # type: ignore[arg-type]
+        use_minimize_enumerator="yes",  # type: ignore[arg-type]
+        filter_interdependent="off",  # type: ignore[arg-type]
+        fallback_mode="unknown",
+    )
+    assert ev.max_num_pathways == 5
+    assert ev.k_shortest_paths == 25
+    assert ev.max_num_combos == 4
+    assert ev.chunk_size == 100000
+    assert ev.use_balanced_solver is False
+    assert ev.find_intermediate_rxns is False
+    assert ev.use_basic_enumerator is False
+    assert ev.use_minimize_enumerator is True
+    assert ev.filter_interdependent is False
+    assert ev.fallback_mode == "conservative"
+
+
+def test_integer_like_string_controls_are_accepted():
+    ev = NativeReactionNetworkEvaluator(max_num_pathways="3", k_shortest_paths="8")
+    assert ev.max_num_pathways == 3
+    assert ev.k_shortest_paths == 8

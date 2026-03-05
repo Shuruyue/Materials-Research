@@ -16,12 +16,30 @@ class PolicyEngine:
     config: ActiveLearningPolicyConfig
     state: PolicyState
 
+    @staticmethod
+    def _coerce_positive_int(value: object, default: int = 1) -> int:
+        if isinstance(value, bool):
+            return max(1, int(default))
+        if isinstance(value, (int, np.integer)):
+            return max(1, int(value))
+        if isinstance(value, (float, np.floating)):
+            out_f = float(value)
+            if not np.isfinite(out_f) or not out_f.is_integer():
+                return max(1, int(default))
+            return max(1, int(out_f))
+        try:
+            out = int(value)
+        except Exception:
+            return max(1, int(default))
+        return max(1, out)
+
     def score_and_select(self, controller, candidates: list[object], n_top: int):
+        n_top_i = self._coerce_positive_int(n_top, default=1)
         policy_name = str(getattr(self.config, "policy_name", "legacy")).strip().lower()
         if policy_name == "legacy":
-            return controller._score_and_select_legacy(candidates, n_top)
+            return controller._score_and_select_legacy(candidates, n_top_i)
         if policy_name == "cmoeic":
-            return self._score_and_select_cmoeic(controller, candidates, n_top)
+            return self._score_and_select_cmoeic(controller, candidates, n_top_i)
         raise ValueError(f"Unsupported policy: {policy_name}")
 
     @staticmethod
@@ -33,6 +51,33 @@ class PolicyEngine:
         except Exception:
             pass
         return float(default)
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _calibrated_energy_stats(self, candidate: object) -> tuple[float, float, float]:
+        raw_mean = self._safe_num(
+            getattr(candidate, "energy_mean", None),
+            self._safe_num(getattr(candidate, "energy_per_atom", 0.0), 0.0),
+        )
+        raw_std = abs(self._safe_num(getattr(candidate, "energy_std", 0.0), 0.0))
+        calibrated_std = raw_std * float(self.state.std_scale)
+        conformal_radius = calibrated_std * float(self.state.conformal_scale)
+        return float(raw_mean), float(calibrated_std), float(conformal_radius)
+
+    def _base_utility(
+        self,
+        *,
+        topo_prob: float,
+        stability_term: float,
+        novelty_score: float,
+        estimated_cost: float,
+    ) -> float:
+        objective = max(0.0, stability_term)
+        diversity = 1.0 + float(self.config.diversity_novelty_boost) * novelty_score
+        denom = max(estimated_cost + float(self.config.cost_eps), float(self.config.cost_eps))
+        return float((objective * diversity) / denom)
 
     def _estimate_cost(self, candidate: object, controller) -> float:
         struct = getattr(candidate, "relaxed_structure", None) or getattr(candidate, "structure", None)
@@ -74,15 +119,9 @@ class PolicyEngine:
             cand.novelty_score = 1.0 if is_new else 0.0
             cand.reject_reason = ""
 
-            topo_prob = float(np.clip(self._safe_num(getattr(cand, "topo_probability", 0.0), 0.0), 0.0, 1.0))
+            topo_prob = self._clamp01(self._safe_num(getattr(cand, "topo_probability", 0.0), 0.0))
             stability_term = max(0.0, float(controller._stability_component(cand)))
-            objective = max(0.0, topo_prob * stability_term)
-            diversity = 1.0 + float(self.config.diversity_novelty_boost) * float(cand.novelty_score)
-
-            raw_mean = self._safe_num(getattr(cand, "energy_mean", None), self._safe_num(getattr(cand, "energy_per_atom", 0.0), 0.0))
-            raw_std = abs(self._safe_num(getattr(cand, "energy_std", 0.0), 0.0))
-            calibrated_std = raw_std * float(self.state.std_scale)
-            conformal_radius = calibrated_std * float(self.state.conformal_scale)
+            raw_mean, calibrated_std, conformal_radius = self._calibrated_energy_stats(cand)
 
             cand.calibrated_mean = raw_mean
             cand.calibrated_std = calibrated_std
@@ -90,9 +129,12 @@ class PolicyEngine:
 
             estimated_cost = self._estimate_cost(cand, controller) if bool(self.config.cost_aware) else 1.0
             cand.estimated_cost = estimated_cost
-
-            utility = (objective * max(1e-6, topo_prob) * diversity) / (estimated_cost + float(self.config.cost_eps))
-            cand.acquisition_value = float(utility)
+            cand.acquisition_value = self._base_utility(
+                topo_prob=topo_prob,
+                stability_term=stability_term,
+                novelty_score=float(cand.novelty_score),
+                estimated_cost=estimated_cost,
+            )
 
             topo_terms.append(topo_prob)
             stability_terms.append(stability_term)
@@ -120,14 +162,15 @@ class PolicyEngine:
 
         # OOD risk in the currently selected controller space.
         ood_scores = controller._estimate_ood_scores(candidates)
+        max_conformal_radius = max(float(self.config.max_conformal_radius), float(self.config.cost_eps), 1e-9)
         for idx, cand in enumerate(candidates):
-            risk_ood = float(np.clip(self._safe_num(ood_scores[idx] if idx < len(ood_scores) else 0.0, 0.0), 0.0, 1.0))
-            conf_ratio = float(np.clip(float(getattr(cand, "conformal_radius", 0.0)) / float(self.config.max_conformal_radius), 0.0, 1.0))
+            risk_ood = self._clamp01(self._safe_num(ood_scores[idx] if idx < len(ood_scores) else 0.0, 0.0))
+            conf_ratio = self._clamp01(float(getattr(cand, "conformal_radius", 0.0)) / max_conformal_radius)
             risk_penalty = (
                 float(self.config.ood_penalty_weight) * risk_ood
                 + float(self.config.conformal_penalty_weight) * conf_ratio
             )
-            risk_score = float(np.clip(risk_penalty, 0.0, 1.0))
+            risk_score = self._clamp01(risk_penalty)
             cand.ood_score = risk_ood
             cand.risk_score = risk_score
 

@@ -16,28 +16,103 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _coerce_non_negative_int(value: int, *, default: int, minimum: int = 0) -> int:
+    if isinstance(value, bool):
+        return max(int(default), int(minimum))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return max(int(default), int(minimum))
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return max(int(default), int(minimum))
+    rounded = int(round(parsed))
+    if abs(parsed - rounded) > 1e-12:
+        return max(int(default), int(minimum))
+    return max(rounded, int(minimum))
+
+
+def _coerce_int(value: int, *, default: int) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return int(default)
+    rounded = int(round(parsed))
+    if abs(parsed - rounded) > 1e-12:
+        return int(default)
+    return int(rounded)
+
+
+def _coerce_positive_float(value: float, *, default: float, floor: float = 1e-12) -> float:
+    if isinstance(value, bool):
+        return max(float(default), float(floor))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return max(float(default), float(floor))
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return max(float(default), float(floor))
+    return max(parsed, float(floor))
+
+
+def _coerce_bool(value: bool, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        canon = value.strip().lower()
+        if canon in {"1", "true", "yes", "y", "on"}:
+            return True
+        if canon in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(default)
+
+
+def _coerce_nonempty_string(value: str, *, default: str) -> str:
+    text = str(value).strip()
+    return text or str(default)
+
+
 @dataclass
 class PathConfig:
     """File system paths."""
     project_root: Path = _PROJECT_ROOT
-    data_dir: Path = field(default=None)
-    models_dir: Path = field(default=None)
-    raw_dir: Path = field(default=None)
-    processed_dir: Path = field(default=None)
-    artifacts_dir: Path = field(default=None)
+    data_dir: Path | None = field(default=None)
+    models_dir: Path | None = field(default=None)
+    raw_dir: Path | None = field(default=None)
+    processed_dir: Path | None = field(default=None)
+    artifacts_dir: Path | None = field(default=None)
+
+    def _normalize_path(self, candidate: Path | str | None, default: Path) -> Path:
+        if candidate is None:
+            base = default
+        elif isinstance(candidate, bool):
+            raise ValueError("path candidates must be path-like, not bool")
+        elif isinstance(candidate, str):
+            text = candidate.strip()
+            base = default if not text else Path(text)
+        else:
+            base = Path(candidate)
+        base = base.expanduser()
+        if not base.is_absolute():
+            base = self.project_root / base
+        return base
 
     def __post_init__(self):
+        self.project_root = self.project_root.expanduser().resolve()
+
         # Allow env override
         data_env = os.environ.get("ATLAS_DATA_DIR")
-        if data_env:
-            self.data_dir = Path(data_env)
-        else:
-            self.data_dir = self.data_dir or self.project_root / "data"
-
-        self.models_dir = self.models_dir or self.project_root / "models"
-        self.raw_dir = self.data_dir / "raw"
-        self.processed_dir = self.data_dir / "processed"
-        self.artifacts_dir = self.project_root / "artifacts"
+        data_candidate: Path | str | None = data_env if data_env else self.data_dir
+        self.data_dir = self._normalize_path(data_candidate, self.project_root / "data")
+        self.models_dir = self._normalize_path(self.models_dir, self.project_root / "models")
+        self.raw_dir = self._normalize_path(self.raw_dir, self.data_dir / "raw")
+        self.processed_dir = self._normalize_path(self.processed_dir, self.data_dir / "processed")
+        self.artifacts_dir = self._normalize_path(self.artifacts_dir, self.project_root / "artifacts")
 
     def ensure_dirs(self):
         """Create all directories if they don't exist."""
@@ -55,6 +130,15 @@ class DFTConfig:
     sigma: float = 0.05           # smearing width (eV)
     nkpts_line: int = 40          # k-points per high-symmetry line
     nbands_factor: float = 1.5    # factor for number of bands
+
+    def __post_init__(self):
+        self.encut = _coerce_positive_float(self.encut, default=520.0)
+        self.kpoints_density = _coerce_positive_float(self.kpoints_density, default=40.0)
+        self.ediff = _coerce_positive_float(self.ediff, default=1e-6)
+        self.sigma = _coerce_positive_float(self.sigma, default=0.05)
+        self.nkpts_line = _coerce_non_negative_int(self.nkpts_line, default=40, minimum=1)
+        self.nbands_factor = _coerce_positive_float(self.nbands_factor, default=1.5)
+        self.ismear = _coerce_int(self.ismear, default=0)
 
 
 @dataclass
@@ -79,6 +163,21 @@ class MACEConfig:
     forces_weight: float = 10.0
     stress_weight: float = 1.0
 
+    def __post_init__(self):
+        self.num_interactions = _coerce_non_negative_int(self.num_interactions, default=2, minimum=1)
+        self.max_ell = _coerce_non_negative_int(self.max_ell, default=3, minimum=0)
+        self.correlation = _coerce_non_negative_int(self.correlation, default=3, minimum=1)
+        self.hidden_irreps = _coerce_nonempty_string(self.hidden_irreps, default="128x0e + 128x1o")
+        self.r_max = _coerce_positive_float(self.r_max, default=5.0)
+        self.batch_size = _coerce_non_negative_int(self.batch_size, default=16, minimum=1)
+        self.lr = _coerce_positive_float(self.lr, default=0.01)
+        self.max_epochs = _coerce_non_negative_int(self.max_epochs, default=500, minimum=1)
+        self.patience = _coerce_non_negative_int(self.patience, default=50, minimum=1)
+        self.weight_decay = _coerce_positive_float(self.weight_decay, default=5e-7)
+        self.energy_weight = _coerce_positive_float(self.energy_weight, default=1.0)
+        self.forces_weight = _coerce_positive_float(self.forces_weight, default=10.0)
+        self.stress_weight = _coerce_positive_float(self.stress_weight, default=1.0)
+
 
 @dataclass
 class TrainConfig:
@@ -88,6 +187,13 @@ class TrainConfig:
     deterministic: bool = True
     num_workers: int = 4
     pin_memory: bool = True
+
+    def __post_init__(self):
+        self.device = _coerce_nonempty_string(self.device, default="auto")
+        self.seed = _coerce_non_negative_int(self.seed, default=42, minimum=0)
+        self.deterministic = _coerce_bool(self.deterministic, default=True)
+        self.num_workers = _coerce_non_negative_int(self.num_workers, default=4, minimum=0)
+        self.pin_memory = _coerce_bool(self.pin_memory, default=True)
 
 
 @dataclass
@@ -100,7 +206,33 @@ class ProfileConfig:
     evaluator_name: str = "rustworkx_pathfinder"
     data_source_key: str = "jarvis_dft"
     method_key: str = "workflow_reproducible_graph"
-    fallback_methods: tuple[str, str] = ("gp_active_learning", "descriptor_microstructure")
+    fallback_methods: tuple[str, ...] = ("gp_active_learning", "descriptor_microstructure")
+
+    def __post_init__(self):
+        self.model_name = _coerce_nonempty_string(self.model_name, default="mace_default")
+        self.relaxer_name = _coerce_nonempty_string(self.relaxer_name, default="ase_bfgs")
+        self.screener_name = _coerce_nonempty_string(self.screener_name, default="crabnet_default")
+        self.evaluator_name = _coerce_nonempty_string(
+            self.evaluator_name,
+            default="rustworkx_pathfinder",
+        )
+        self.data_source_key = _coerce_nonempty_string(self.data_source_key, default="jarvis_dft")
+        self.method_key = _coerce_nonempty_string(
+            self.method_key,
+            default="workflow_reproducible_graph",
+        )
+        if isinstance(self.fallback_methods, (list, tuple)):
+            fallbacks = [
+                str(item).strip()
+                for item in self.fallback_methods
+                if str(item).strip()
+            ]
+        else:
+            single = str(self.fallback_methods).strip()
+            fallbacks = [single] if single else []
+        if not fallbacks:
+            fallbacks = ["gp_active_learning", "descriptor_microstructure"]
+        self.fallback_methods = tuple(fallbacks)
 
 @dataclass
 class Config:
@@ -118,21 +250,27 @@ class Config:
     def _set_device(self):
         try:
             self.device = self.get_device(self.train.device)
-        except ImportError:
+        except Exception:
+            # Keep config initialization robust even when the requested device
+            # is invalid or torch is unavailable in minimal environments.
             self.device = "cpu"
 
     @staticmethod
     def get_device(requested: str = "auto"):
         """Resolve device string to torch.device."""
         import torch
-        if requested == "auto":
+        req = str(requested).strip().lower()
+        if req == "auto":
             if torch.cuda.is_available():
                 return torch.device("cuda")
             # Potential check for MPS (Mac)
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                 return torch.device("mps")
+                return torch.device("mps")
             return torch.device("cpu")
-        return torch.device(requested)
+        try:
+            return torch.device(requested)
+        except Exception as exc:
+            raise ValueError(f"Invalid device specification: {requested!r}") from exc
 
     @staticmethod
     def source_label(source_key: str) -> str:

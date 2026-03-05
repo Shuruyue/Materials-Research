@@ -13,6 +13,8 @@ refactored into atlas.models for broader reuse across different GNN architecture
 
 from __future__ import annotations
 
+import math
+from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -74,16 +76,101 @@ _ELEM_TO_IDX = {e: i for i, e in enumerate(_ELEMENTS)}
 _N_ELEMENTS = len(_ELEMENTS)
 
 
+def _is_boolean_like(value: object) -> bool:
+    return isinstance(value, bool) or type(value).__name__ == "bool_"
+
+
+def _coerce_positive_int(value: object, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be integer-valued, not boolean")
+    if isinstance(value, Integral):
+        integer = int(value)
+    elif isinstance(value, Real):
+        scalar = float(value)
+        if not math.isfinite(scalar):
+            raise ValueError(f"{name} must be finite")
+        rounded = round(scalar)
+        if abs(scalar - rounded) > 1e-9:
+            raise ValueError(f"{name} must be integer-valued")
+        integer = int(rounded)
+    else:
+        raise ValueError(f"{name} must be integer-valued")
+    if integer <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return integer
+
+
+def _coerce_positive_float(value: object, name: str) -> float:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be a finite value > 0, not boolean")
+    scalar = float(value)
+    if not np.isfinite(scalar) or scalar <= 0:
+        raise ValueError(f"{name} must be a finite value > 0, got {value!r}")
+    return scalar
+
+
+def _coerce_bool(value: object, name: str) -> bool:
+    if _is_boolean_like(value):
+        return bool(value)
+    if isinstance(value, Integral):
+        integer = int(value)
+        if integer in (0, 1):
+            return bool(integer)
+        raise ValueError(f"{name} integer value must be 0 or 1, got {integer}")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        truthy = {"1", "true", "yes", "y", "on"}
+        falsy = {"0", "false", "no", "n", "off"}
+        if normalized in truthy:
+            return True
+        if normalized in falsy:
+            return False
+    raise ValueError(
+        f"{name} must be boolean-like (bool, 0/1, true/false), got {value!r}"
+    )
+
+
+def _coerce_property_tensor(value: Any, key: str) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().to(dtype=torch.float32)
+    elif isinstance(value, (np.ndarray, list, tuple)):
+        tensor = torch.as_tensor(value, dtype=torch.float32)
+    else:
+        if _is_boolean_like(value):
+            raise ValueError(f"Property '{key}' must be numeric, not boolean")
+        scalar = float(value)
+        tensor = torch.tensor([scalar], dtype=torch.float32)
+
+    if tensor.numel() <= 0:
+        raise ValueError(f"Property '{key}' cannot be empty")
+    if not torch.isfinite(tensor).all():
+        raise ValueError(f"Property '{key}' contains NaN or Inf values")
+    if tensor.ndim == 0:
+        tensor = tensor.reshape(1)
+    return tensor
+
+
 def gaussian_expansion(distances: np.ndarray, cutoff: float, n_gaussians: int = 20) -> np.ndarray:
     """
     Expand distances into Gaussian basis functions.
     Shared implementation for graph builders.
     """
-    centers = np.linspace(0, cutoff, n_gaussians)
-    width = 0.5 * (centers[1] - centers[0])
-    return np.exp(-((distances[:, None] - centers[None, :]) ** 2) / width**2).astype(
-        np.float32
-    )
+    n = _coerce_positive_int(n_gaussians, "n_gaussians")
+    cutoff_f = _coerce_positive_float(cutoff, "cutoff")
+
+    dist = np.asarray(distances, dtype=float)
+    if dist.ndim != 1:
+        dist = dist.reshape(-1)
+    dist = np.nan_to_num(dist, nan=cutoff_f, posinf=cutoff_f, neginf=0.0)
+    dist = np.clip(dist, 0.0, cutoff_f)
+
+    centers = np.linspace(0.0, cutoff_f, n, dtype=float)
+    if n == 1:
+        width = max(cutoff_f, 1e-6)
+    else:
+        width = max(0.5 * (centers[1] - centers[0]), 1e-6)
+    features = np.exp(-((dist[:, None] - centers[None, :]) ** 2) / (width**2))
+    return features.astype(np.float32, copy=False)
 
 
 class CrystalGraphBuilder:
@@ -99,9 +186,12 @@ class CrystalGraphBuilder:
     """
 
     def __init__(self, cutoff: float = 5.0, max_neighbors: int = 12, compute_3body: bool = True):
-        self.cutoff = cutoff
-        self.max_neighbors = max_neighbors
-        self.compute_3body = compute_3body
+        cutoff_f = _coerce_positive_float(cutoff, "cutoff")
+        max_neighbors_i = _coerce_positive_int(max_neighbors, "max_neighbors")
+        compute_3body_b = _coerce_bool(compute_3body, "compute_3body")
+        self.cutoff = cutoff_f
+        self.max_neighbors = max_neighbors_i
+        self.compute_3body = compute_3body_b
         # Backward-compatibility for scripts/tests that expect builder.ELEMENTS
         self.ELEMENTS = tuple(_ELEMENTS)
 
@@ -117,18 +207,25 @@ class CrystalGraphBuilder:
         Features: [one_hot(86), atomic_number, electronegativity,
                    atomic_radius, is_metal, is_heavy(Z>=50)]
         """
-        from pymatgen.core import Element
+        try:
+            from pymatgen.core import Element
 
-        elem = Element(symbol)
+            elem = Element(symbol)
+            atomic_number = float(elem.Z)
+            is_metal = 1.0 if elem.is_metal else 0.0
+        except Exception:
+            elem = None
+            atomic_number = 0.0
+            is_metal = 0.0
         one_hot = np.zeros(_N_ELEMENTS, dtype=np.float32)
-        idx = _ELEM_TO_IDX.get(symbol, 0)
-        one_hot[idx] = 1.0
+        idx = _ELEM_TO_IDX.get(symbol)
+        if idx is not None:
+            one_hot[idx] = 1.0
 
-        z = elem.Z / 100.0
+        z = atomic_number / 100.0
         en = _ELECTRONEG.get(symbol, 1.5) / 4.0
         radius = _RADII.get(symbol, 1.5) / 3.0
-        is_metal = 1.0 if elem.is_metal else 0.0
-        is_heavy = 1.0 if elem.Z >= 50 else 0.0
+        is_heavy = 1.0 if atomic_number >= 50 else 0.0
 
         return np.concatenate([one_hot, [z, en, radius, is_metal, is_heavy]])
 
@@ -143,7 +240,9 @@ class CrystalGraphBuilder:
             dict with keys: node_features, edge_index, edge_features,
                            num_nodes, edge_vectors (for equivariant models)
         """
-        n_atoms = len(structure)
+        n_atoms = int(len(structure))
+        if n_atoms <= 0:
+            raise ValueError("Cannot build graph from an empty structure.")
 
         # Node features
         def get_symbol(site):
@@ -152,7 +251,18 @@ class CrystalGraphBuilder:
             else:
                 # Handle disordered structures (e.g. alloys)
                 # Take majority element
-                return site.species.most_common(1)[0][0].symbol
+                species = getattr(site, "species", None)
+                if species is None:
+                    return "H"
+                if hasattr(species, "as_dict"):
+                    species_dict = species.as_dict()
+                    if species_dict:
+                        return str(max(species_dict.items(), key=lambda x: float(x[1]))[0])
+                if hasattr(species, "most_common"):
+                    common = species.most_common(1)
+                    if common:
+                        return str(common[0][0])
+                return "H"
 
         node_feats = np.array(
             [self.element_features(get_symbol(site)) for site in structure],
@@ -175,10 +285,11 @@ class CrystalGraphBuilder:
                 vectors.append(vec)
 
         if len(src) == 0:
-            # Fallback: self-loops
-            src, dst = [0], [0]
-            dists = [0.0]
-            vectors = [[0.0, 0.0, 0.0]]
+            # Fallback: self-loops for every atom.
+            src = list(range(n_atoms))
+            dst = list(range(n_atoms))
+            dists = [0.0] * n_atoms
+            vectors = [[0.0, 0.0, 0.0] for _ in range(n_atoms)]
 
         # 3-Body Indices (Edge pairs sharing source)
         # We need to map (src, dst) -> edge_idx
@@ -188,6 +299,7 @@ class CrystalGraphBuilder:
         edge_index = np.array([src, dst], dtype=np.int64)
         distances = np.array(dists, dtype=np.float32)
         edge_vectors = np.array(vectors, dtype=np.float32)
+        edge_vectors = np.nan_to_num(edge_vectors, nan=0.0, posinf=0.0, neginf=0.0)
 
         three_body_indices = np.zeros((0, 3), dtype=np.int64) # Changed from (0,2) to (0,3) to match [d1, i, d2]
         three_body_edge_indices = np.zeros((0, 2), dtype=np.int64)
@@ -265,19 +377,17 @@ class CrystalGraphBuilder:
         graph = self.structure_to_graph(structure)
 
         data = Data(
-            x=torch.tensor(graph["node_features"]),
-            edge_index=torch.tensor(graph["edge_index"]),
-            edge_attr=torch.tensor(graph["edge_features"]),
-            edge_vec=torch.tensor(graph["edge_vectors"]),
-            edge_index_3body=torch.tensor(graph["three_body_edge_indices"].T), # (2, N_triplets)
+            x=torch.tensor(graph["node_features"], dtype=torch.float32),
+            edge_index=torch.tensor(graph["edge_index"], dtype=torch.long),
+            edge_attr=torch.tensor(graph["edge_features"], dtype=torch.float32),
+            edge_vec=torch.tensor(graph["edge_vectors"], dtype=torch.float32),
+            edge_index_3body=torch.tensor(graph["three_body_edge_indices"].T, dtype=torch.long), # (2, N_triplets)
             num_nodes=graph["num_nodes"],
         )
 
         # Attach property targets
         for key, value in properties.items():
             if value is not None:
-                # Allow NaNs (they will be masked in loss function)
-                # if value is not None and not (isinstance(value, float) and np.isnan(value)):
-                setattr(data, key, torch.tensor([value], dtype=torch.float))
+                setattr(data, key, _coerce_property_tensor(value, key))
 
         return data

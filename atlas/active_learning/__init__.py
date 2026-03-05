@@ -5,6 +5,7 @@ atlas.active_learning — Bayesian optimization discovery loop.
 from __future__ import annotations
 
 from importlib import import_module
+from typing import Any
 
 _EXPORTS = {
     "DiscoveryController": ("atlas.active_learning.controller", "DiscoveryController"),
@@ -29,10 +30,10 @@ _EXPORTS = {
     "PolicyEngine": ("atlas.active_learning.policy_engine", "PolicyEngine"),
 }
 
-__all__ = list(_EXPORTS.keys())
+__all__ = tuple(_EXPORTS.keys())
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name not in _EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module_name, attr_name = _EXPORTS[name]
@@ -42,5 +43,5 @@ def __getattr__(name: str):
     return value
 
 
-def __dir__():
-    return sorted(list(globals().keys()) + __all__)
+def __dir__() -> list[str]:
+    return sorted(set(globals().keys()) | set(__all__))

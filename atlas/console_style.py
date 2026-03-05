@@ -30,22 +30,35 @@ _TOKEN_STYLES: list[tuple[str, str]] = [
     ("[Mode]", _ANSI_BLUE),
 ]
 
-_PHASE_HEADER_RE = re.compile(r"^\s*\[Phase[1-9]\]")
+_PHASE_HEADER_RE = re.compile(r"^\s*\[Phase\d+\]")
+
+
+def _env_truthy(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _env_falsy(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"0", "false", "no", "off"}
 
 
 def _supports_color(stream: Any) -> bool:
     if os.environ.get("NO_COLOR"):
         return False
 
-    force = os.environ.get("FORCE_COLOR", "").strip().lower()
-    if force in {"1", "true", "yes", "on"}:
+    if _env_truthy("FORCE_COLOR") or _env_truthy("CLICOLOR_FORCE"):
         return True
+    if _env_falsy("FORCE_COLOR") or _env_falsy("CLICOLOR"):
+        return False
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return False
 
     isatty = getattr(stream, "isatty", None)
     if callable(isatty):
         try:
             return bool(isatty())
-        except Exception:
+        except (OSError, TypeError, ValueError):
             return False
     return False
 
@@ -56,6 +69,9 @@ def _style_line(line: str) -> str:
     stripped = raw.strip()
 
     if not stripped:
+        return line
+    if "\x1b[" in raw:
+        # Already styled text, keep as-is.
         return line
 
     if _PHASE_HEADER_RE.match(raw):
@@ -86,18 +102,24 @@ def install_console_style() -> None:
 
     It preserves original text and only adds ANSI colors for terminal display.
     """
+    if _env_falsy("ATLAS_CONSOLE_STYLE"):
+        return
     if getattr(builtins.print, "_atlas_console_style_installed", False):
         return
 
     original_print = builtins.print
 
     def styled_print(*args: Any, **kwargs: Any) -> None:
-        stream = kwargs.get("file", sys.stdout)
+        stream = kwargs.get("file")
+        if stream is None:
+            stream = sys.stdout
         if not _supports_color(stream):
             original_print(*args, **kwargs)
             return
 
         sep = kwargs.get("sep", " ")
+        if sep is None:
+            sep = " "
         text = sep.join(str(arg) for arg in args)
         styled = _style_text(text)
 

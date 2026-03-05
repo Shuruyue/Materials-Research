@@ -482,3 +482,84 @@ def test_channel_reliability_override_changes_probability(topo_db):
         out_override[out_override["jid"] == "override-1"]["topological_probability"].iloc[0]
     )
     assert abs(p_override - p_default) > 1e-6
+
+
+def test_invalid_weight_constraint_raises(topo_db):
+    topo_db.add_material(
+        "Bi2Se3",
+        "TI",
+        {"jid": "bad-weight", "space_group": 166, "spillage": 1.0, "si_score": 1.0},
+    )
+    with pytest.raises(ValueError, match="weight_constraint"):
+        topo_db.infer_topology_probabilities(
+            calibrate_reliability=False,
+            weight_constraint="positive_only",
+        )
+
+
+def test_invalid_base_weights_shape_raises(topo_db):
+    topo_db.add_material(
+        "TaAs",
+        "TSM",
+        {"jid": "bad-base-weights", "space_group": 109, "spillage": 0.8, "si_score": 0.4},
+    )
+    with pytest.raises(ValueError, match="base_weights"):
+        topo_db.infer_topology_probabilities(
+            calibrate_reliability=False,
+            base_weights=(1.0, 0.0),  # type: ignore[arg-type]
+        )
+
+
+def test_fuzzy_search_validates_cutoff_range(topo_db):
+    topo_db.load_seed_data()
+    with pytest.raises(ValueError, match="cutoff"):
+        topo_db.fuzzy_search("Bi2Se3", cutoff=1.2)
+
+
+def test_query_validates_band_gap_range_shape_and_order(topo_db):
+    topo_db.load_seed_data()
+    with pytest.raises(ValueError, match="band_gap_range"):
+        topo_db.query(band_gap_range=(0.1,))
+    with pytest.raises(ValueError, match="lower bound"):
+        topo_db.query(band_gap_range=(1.0, 0.1))
+
+
+def test_add_material_rejects_empty_formula(topo_db):
+    with pytest.raises(ValueError, match="formula"):
+        topo_db.add_material(
+            "   ",
+            "TI",
+            {"jid": "bad-formula", "space_group": 166},
+        )
+
+
+def test_add_material_trims_jid_source_and_formula(topo_db):
+    topo_db.add_material(
+        "  Bi2Se3  ",
+        "TI",
+        {"jid": "  trim-1  ", "space_group": 166, "source": "  custom-source  "},
+    )
+    row = topo_db.df[topo_db.df["jid"] == "trim-1"].iloc[0]
+    assert row["formula"] == "Bi2Se3"
+    assert row["source"] == "custom-source"
+
+
+def test_rank_candidates_validates_input_ranges(topo_db):
+    topo_db.load_seed_data()
+    with pytest.raises(ValueError, match="min_probability"):
+        topo_db.rank_topological_candidates(min_probability=1.1)
+    with pytest.raises(ValueError, match="top_k"):
+        topo_db.rank_topological_candidates(top_k=-1)
+
+
+def test_infer_topology_probabilities_validates_integer_calibration_params(topo_db):
+    topo_db.add_material(
+        "Bi2Se3",
+        "TI",
+        {"jid": "invalid-calib-params", "space_group": 166, "spillage": 1.0, "si_score": 1.0},
+    )
+    with pytest.raises(ValueError, match="calibration_bins"):
+        topo_db.infer_topology_probabilities(
+            calibrate_reliability=False,
+            calibration_bins=1,
+        )

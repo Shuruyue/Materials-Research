@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,94 @@ from tqdm import tqdm
 from atlas.config import get_config
 from atlas.models.graph_builder import CrystalGraphBuilder
 from atlas.models.prediction_utils import extract_mean_and_std
+
+
+def _coerce_positive_int(value: Any, default: int, minimum: int = 1) -> int:
+    if isinstance(value, bool):
+        return max(int(default), int(minimum))
+    if isinstance(value, Integral):
+        out = int(value)
+    elif isinstance(value, Real):
+        out_f = float(value)
+        if not math.isfinite(out_f) or not out_f.is_integer():
+            return max(int(default), int(minimum))
+        out = int(out_f)
+    else:
+        try:
+            out = int(value)
+        except Exception:
+            return max(int(default), int(minimum))
+    if out < minimum:
+        return int(minimum)
+    return int(out)
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    if isinstance(value, Integral):
+        out = int(value)
+    elif isinstance(value, Real):
+        out_f = float(value)
+        if not math.isfinite(out_f) or not out_f.is_integer():
+            return int(default)
+        out = int(out_f)
+    else:
+        try:
+            out = int(value)
+        except Exception:
+            return int(default)
+    return int(out)
+
+
+def _coerce_probability(value: Any, default: float, *, lo: float = 0.0, hi: float = 1.0) -> float:
+    if isinstance(value, bool):
+        return float(default)
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if not math.isfinite(out):
+        out = float(default)
+    return float(min(max(out, lo), hi))
+
+
+def _coerce_n_jobs(value: Any, default: int = -1) -> int:
+    out = _coerce_int(value, default=default)
+    if out == 0:
+        return int(default if default != 0 else 1)
+    return int(out)
+
+
+def _coerce_non_negative_fold_id(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"fold indices must be non-negative integers, got {value!r}")
+    if isinstance(value, Integral):
+        idx = int(value)
+    elif isinstance(value, Real):
+        raw = float(value)
+        if not math.isfinite(raw) or not raw.is_integer():
+            raise ValueError(f"fold indices must be non-negative integers, got {value!r}")
+        idx = int(raw)
+    else:
+        try:
+            idx = int(value)
+        except Exception as exc:
+            raise ValueError(f"fold indices must be non-negative integers, got {value!r}") from exc
+    if idx < 0:
+        raise ValueError(f"fold indices must be non-negative integers, got {value!r}")
+    return idx
+
+
+def _sanitize_bootstrap_params(
+    confidence: float,
+    n_bootstrap: int,
+    seed: int,
+) -> tuple[float, int, int]:
+    conf = _coerce_probability(confidence, default=0.95, lo=0.5, hi=0.999)
+    boots = _coerce_positive_int(n_bootstrap, default=400, minimum=64)
+    seed_i = _coerce_int(seed, default=42)
+    return conf, boots, seed_i
 
 
 def _to_numeric_array(values: Sequence[Any]) -> np.ndarray:
@@ -75,10 +165,9 @@ def _bootstrap_ci(
         v = float(arr[0])
         return v, v
 
-    b = max(64, int(n_bootstrap))
-    conf = min(max(float(confidence), 0.5), 0.999)
+    conf, b, seed_i = _sanitize_bootstrap_params(confidence, n_bootstrap, seed)
     alpha = 0.5 * (1.0 - conf)
-    rng = np.random.RandomState(int(seed))
+    rng = np.random.RandomState(seed_i)
     idx = rng.randint(0, arr.size, size=(b, arr.size))
     means = np.mean(arr[idx], axis=1)
     lo = float(np.quantile(means, alpha))
@@ -106,10 +195,9 @@ def _bootstrap_metric_ci_from_indices(
         v = float(metric_fn(np.array([0], dtype=np.int64)))
         return v, v
 
-    b = max(64, int(n_bootstrap))
-    conf = min(max(float(confidence), 0.5), 0.999)
+    conf, b, seed_i = _sanitize_bootstrap_params(confidence, n_bootstrap, seed)
     alpha = 0.5 * (1.0 - conf)
-    rng = np.random.RandomState(int(seed))
+    rng = np.random.RandomState(seed_i)
     idx = rng.randint(0, n, size=(b, n))
     stats = np.asarray([float(metric_fn(row)) for row in idx], dtype=np.float64)
     stats = stats[np.isfinite(stats)]
@@ -409,14 +497,23 @@ class MatbenchRunner:
         self.property_name = property_name
         self.cfg = get_config()
         self.graph_builder = CrystalGraphBuilder()
-        self.batch_size = batch_size
-        self.n_jobs = n_jobs
-        self.bootstrap_samples = max(64, int(bootstrap_samples))
-        self.bootstrap_seed = int(bootstrap_seed)
-        self.min_coverage_required = min(max(float(min_coverage_required), 0.0), 1.0)
+        self.batch_size = _coerce_positive_int(batch_size, default=32, minimum=1)
+        self.n_jobs = _coerce_n_jobs(n_jobs, default=-1)
+        self.bootstrap_samples = _coerce_positive_int(bootstrap_samples, default=400, minimum=64)
+        self.bootstrap_seed = _coerce_int(bootstrap_seed, default=42)
+        self.min_coverage_required = _coerce_probability(min_coverage_required, default=0.0, lo=0.0, hi=1.0)
         self.use_conformal = bool(use_conformal)
-        self.conformal_coverage = min(max(float(conformal_coverage), 1e-6), 1.0 - 1e-6)
-        self.conformal_max_calibration_samples = max(0, int(conformal_max_calibration_samples))
+        self.conformal_coverage = _coerce_probability(
+            conformal_coverage,
+            default=0.95,
+            lo=1e-6,
+            hi=1.0 - 1e-6,
+        )
+        self.conformal_max_calibration_samples = _coerce_positive_int(
+            conformal_max_calibration_samples,
+            default=0,
+            minimum=0,
+        )
         self.structure_cache = bool(structure_cache)
         self.fail_on_fallback_signature = bool(fail_on_fallback_signature)
         self._structure_data_cache: dict[str, Any] = {}
@@ -677,7 +774,11 @@ class MatbenchRunner:
         cal_inputs = cal_inputs[:n]
         cal_targets = cal_targets[:n]
 
-        limit = int(getattr(self, "conformal_max_calibration_samples", 0))
+        limit = _coerce_positive_int(
+            getattr(self, "conformal_max_calibration_samples", 0),
+            default=0,
+            minimum=0,
+        )
         if limit > 0 and n > limit:
             rng = np.random.RandomState(int(self.bootstrap_seed) + int(fold) + 7919)
             picked = np.sort(rng.choice(n, size=limit, replace=False))
@@ -842,8 +943,8 @@ class MatbenchRunner:
         call_counts_before = np.asarray(self._call_variant_counts, dtype=np.int64)
         cache_hits_before = int(self._structure_cache_hits)
         cache_misses_before = int(self._structure_cache_misses)
-        fold_ids = list(folds) if folds is not None else list(getattr(task, "folds", []))
-        fold_ids = sorted({int(f) for f in fold_ids})
+        fold_ids_raw = list(folds) if folds is not None else list(getattr(task, "folds", []))
+        fold_ids = sorted({_coerce_non_negative_fold_id(f) for f in fold_ids_raw})
         if not fold_ids:
             raise ValueError(f"No folds available for task '{task_name}'")
 

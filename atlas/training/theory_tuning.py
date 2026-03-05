@@ -8,11 +8,18 @@ The goal is to keep training defaults explainable and reproducible:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 ProfileParams = dict[str, Any]
 ParamBounds = dict[str, tuple[float, float]]
+
+_VALID_OBJECTIVE_MODES = {"min", "max"}
+
+
+def _is_boolean_like(value: Any) -> bool:
+    return isinstance(value, bool) or type(value).__name__ in {"bool_", "bool"}
 
 
 @dataclass(frozen=True)
@@ -23,12 +30,30 @@ class MetricObjective:
     mode: str  # "min" or "max"
     min_relative_improvement: float = 0.015
 
+    def __post_init__(self) -> None:
+        normalized_keys = tuple(str(key).strip() for key in self.keys if str(key).strip())
+        if not normalized_keys:
+            raise ValueError("MetricObjective.keys must contain at least one non-empty key")
+        mode = str(self.mode).strip().lower()
+        if mode not in _VALID_OBJECTIVE_MODES:
+            raise ValueError(f"MetricObjective.mode must be one of {_VALID_OBJECTIVE_MODES!r}")
+        threshold = _coerce_non_negative_float(
+            self.min_relative_improvement,
+            "MetricObjective.min_relative_improvement",
+        )
+
+        object.__setattr__(self, "keys", normalized_keys)
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "min_relative_improvement", threshold)
+
     def improvement(self, prev_score: float, curr_score: float) -> float:
         """Return relative improvement (>0 means better)."""
-        denom = max(abs(prev_score), 1e-12)
+        prev = _coerce_finite_float(prev_score, "prev_score")
+        curr = _coerce_finite_float(curr_score, "curr_score")
+        denom = max(abs(prev), 1e-12)
         if self.mode == "min":
-            return (prev_score - curr_score) / denom
-        return (curr_score - prev_score) / denom
+            return (prev - curr) / denom
+        return (curr - prev) / denom
 
 
 @dataclass(frozen=True)
@@ -42,6 +67,21 @@ class TheoryProfile:
     bounds: ParamBounds
     objective: MetricObjective
     references: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        phase = _normalize_profile_token(self.phase, "phase")
+        algorithm = _normalize_profile_token(self.algorithm, "algorithm")
+        stage = _normalize_profile_token(self.stage, "stage")
+        if not isinstance(self.params, dict):
+            raise TypeError("TheoryProfile.params must be a dictionary")
+        if not isinstance(self.bounds, dict):
+            raise TypeError("TheoryProfile.bounds must be a dictionary")
+        if not isinstance(self.references, tuple) or not self.references:
+            raise ValueError("TheoryProfile.references must be a non-empty tuple")
+
+        object.__setattr__(self, "phase", phase)
+        object.__setattr__(self, "algorithm", algorithm)
+        object.__setattr__(self, "stage", stage)
 
 
 _REG_BOUNDS: ParamBounds = {
@@ -73,6 +113,29 @@ _RF_BOUNDS: ParamBounds = {
 
 def _obj(keys: tuple[str, ...], mode: str, thr: float = 0.015) -> MetricObjective:
     return MetricObjective(keys=keys, mode=mode, min_relative_improvement=thr)
+
+
+def _normalize_profile_token(value: Any, name: str) -> str:
+    token = str(value).strip().lower()
+    if not token:
+        raise ValueError(f"{name} must be a non-empty string")
+    return token
+
+
+def _coerce_finite_float(value: Any, name: str) -> float:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be a finite real number")
+    scalar = float(value)
+    if not math.isfinite(scalar):
+        raise ValueError(f"{name} must be finite")
+    return scalar
+
+
+def _coerce_non_negative_float(value: Any, name: str) -> float:
+    scalar = _coerce_finite_float(value, name)
+    if scalar < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return scalar
 
 
 # IDs are documented in docs/THEORY_BACKED_TUNING.md
@@ -656,7 +719,11 @@ DEFAULT_PHASE_ALGORITHMS = {
 
 
 def get_profile(phase: str, algorithm: str, stage: str) -> TheoryProfile:
-    key = (phase, algorithm, stage)
+    key = (
+        _normalize_profile_token(phase, "phase"),
+        _normalize_profile_token(algorithm, "algorithm"),
+        _normalize_profile_token(stage, "stage"),
+    )
     if key not in PROFILES:
         raise KeyError(f"No theory profile for phase={phase}, algorithm={algorithm}, stage={stage}")
     return PROFILES[key]
@@ -667,8 +734,8 @@ def _clip(value: float, lo: float, hi: float) -> float:
 
 
 def _coerce(param: str, value: float, template: Any) -> Any:
-    if isinstance(template, bool):
-        return bool(value)
+    if _is_boolean_like(template):
+        return bool(round(value))
     if isinstance(template, int):
         return int(round(value))
     if isinstance(template, float):
@@ -691,10 +758,12 @@ def _adjust_numeric(
     factor: float | None = None,
     delta: float | None = None,
 ) -> None:
+    if factor is None and delta is None:
+        return
     if key not in params:
         return
     cur = params[key]
-    if not isinstance(cur, (int, float)):
+    if _is_boolean_like(cur) or not isinstance(cur, (int, float)):
         return
     new_val = float(cur)
     if factor is not None:
@@ -722,11 +791,36 @@ def adapt_params_for_next_round(
     - if failed / metric missing, use a conservative recovery move
     - otherwise adapt by relative improvement against threshold
     """
+    if not isinstance(profile, TheoryProfile):
+        raise TypeError(f"profile must be TheoryProfile, got {type(profile)!r}")
+    if not isinstance(current_params, dict):
+        raise TypeError("current_params must be a dictionary")
+
     next_params: ProfileParams = dict(current_params)
+    if failed:
+        _adjust_numeric(next_params, profile.bounds, "lr", factor=0.6)
+        _adjust_numeric(next_params, profile.bounds, "batch-size", factor=0.75)
+        _adjust_numeric(next_params, profile.bounds, "epochs", factor=1.35)
+        _adjust_numeric(next_params, profile.bounds, "max-samples", factor=1.15)
+        _adjust_numeric(next_params, profile.bounds, "n-estimators", factor=1.3)
+        _adjust_numeric(next_params, profile.bounds, "max-depth", delta=2)
+        return next_params, "metric_missing_or_run_failed_recovery", None
+
+    prev_score = (
+        _coerce_finite_float(previous_score, "previous_score")
+        if previous_score is not None
+        else None
+    )
+    curr_score = (
+        _coerce_finite_float(current_score, "current_score")
+        if current_score is not None
+        else None
+    )
+
     obj = profile.objective
     improvement: float | None = None
 
-    if failed or current_score is None:
+    if curr_score is None:
         # Recovery: lower LR, slightly smaller batch, more epochs.
         _adjust_numeric(next_params, profile.bounds, "lr", factor=0.6)
         _adjust_numeric(next_params, profile.bounds, "batch-size", factor=0.75)
@@ -736,7 +830,7 @@ def adapt_params_for_next_round(
         _adjust_numeric(next_params, profile.bounds, "max-depth", delta=2)
         return next_params, "metric_missing_or_run_failed_recovery", None
 
-    if previous_score is None:
+    if prev_score is None:
         # Round-1 -> Round-2: deterministic resource ramp (successive-halving style).
         _adjust_numeric(next_params, profile.bounds, "lr", factor=0.9)
         _adjust_numeric(next_params, profile.bounds, "epochs", factor=1.2)
@@ -744,7 +838,7 @@ def adapt_params_for_next_round(
         _adjust_numeric(next_params, profile.bounds, "n-estimators", factor=1.15)
         return next_params, "round1_to_round2_resource_ramp", None
 
-    improvement = obj.improvement(previous_score, current_score)
+    improvement = obj.improvement(prev_score, curr_score)
     if improvement < obj.min_relative_improvement:
         # Improvement too small: stronger optimization move.
         _adjust_numeric(next_params, profile.bounds, "lr", factor=0.7)
@@ -782,8 +876,16 @@ def extract_score_from_manifest(
     if not isinstance(result, dict):
         result = {}
     for key in objective.keys:
-        if key in result and isinstance(result[key], (int, float)):
-            return float(result[key])
-        if key in manifest and isinstance(manifest[key], (int, float)):
-            return float(manifest[key])
+        if key in result:
+            value = result[key]
+            if _is_boolean_like(value):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        if key in manifest:
+            value = manifest[key]
+            if _is_boolean_like(value):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
     return None

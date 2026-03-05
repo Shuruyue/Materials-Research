@@ -123,13 +123,13 @@ class CompositionScreener(nn.Module):
         mc_dropout_samples: int = 0,
     ):
         super().__init__()
-        self.out_dims = int(out_dims)
-        self.d_model = int(d_model)
+        self.out_dims = self._coerce_int(out_dims, default=1, minimum=1)
+        self.d_model = self._coerce_int(d_model, default=512, minimum=2)
         if self.d_model % 2 != 0:
             raise ValueError(f"d_model must be even for split fractional encoders, got {self.d_model}")
         self.return_distribution = bool(return_distribution)
-        self.ensemble_size = int(max(ensemble_size, 1))
-        self.mc_dropout_samples = int(max(mc_dropout_samples, 0))
+        self.ensemble_size = self._coerce_int(ensemble_size, default=1, minimum=1)
+        self.mc_dropout_samples = self._coerce_int(mc_dropout_samples, default=0, minimum=0)
         self._helmert_cache: dict[int, torch.Tensor] = {}
 
         transform_key = str(simplex_transform).strip().lower()
@@ -137,17 +137,18 @@ class CompositionScreener(nn.Module):
             supported = ", ".join(sorted(_SIMPLEX_TRANSFORMS))
             raise ValueError(f"Unknown simplex_transform: {simplex_transform!r}. Supported: {supported}")
         self.simplex_transform = transform_key
-        self.simplex_blend = float(min(max(simplex_blend, 0.0), 1.0))
-        self.escort_power = float(max(escort_power, 1e-6))
-        self.clr_temperature = float(max(clr_temperature, 1e-6))
-        self.ilr_temperature = float(max(ilr_temperature, 1e-6))
+        blend = self._coerce_nonnegative_finite(simplex_blend, default=0.25)
+        self.simplex_blend = float(min(blend, 1.0))
+        self.escort_power = self._coerce_positive_finite(escort_power, default=0.85)
+        self.clr_temperature = self._coerce_positive_finite(clr_temperature, default=1.0)
+        self.ilr_temperature = self._coerce_positive_finite(ilr_temperature, default=1.0)
 
         uq_key = str(uncertainty_head_mode).strip().lower()
         if uq_key not in _UQ_MODES:
             supported = ", ".join(sorted(_UQ_MODES))
             raise ValueError(f"Unknown uncertainty_head_mode: {uncertainty_head_mode!r}. Supported: {supported}")
         self.uncertainty_head_mode = uq_key
-        self.uncertainty_min_std = float(max(uncertainty_min_std, 0.0))
+        self.uncertainty_min_std = self._coerce_nonnegative_finite(uncertainty_min_std, default=1e-6)
 
         # Learnable element embedding. Padding index 0 stays fixed as zero vector.
         self.embedder = nn.Embedding(120, self.d_model, padding_idx=0)
@@ -177,6 +178,39 @@ class CompositionScreener(nn.Module):
             self.uncertainty_nns = nn.ModuleList(
                 [ResidualNetwork(self.d_model, self.out_dims, [256, 128]) for _ in range(self.ensemble_size)]
             )
+
+    @staticmethod
+    def _coerce_nonnegative_finite(value: object, default: float) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out):
+            return float(default)
+        return float(max(out, 0.0))
+
+    @staticmethod
+    def _coerce_positive_finite(value: object, default: float) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out) or out <= 0.0:
+            return float(default)
+        return out
+
+    @staticmethod
+    def _coerce_int(value: object, default: int, minimum: int = 0) -> int:
+        fallback = int(max(default, minimum))
+        if isinstance(value, bool):
+            return fallback
+        try:
+            numeric = float(value)
+        except Exception:
+            return fallback
+        if not math.isfinite(numeric) or not numeric.is_integer():
+            return fallback
+        return int(max(int(numeric), minimum))
 
     @staticmethod
     def _renormalize_simplex(frac: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -275,6 +309,7 @@ class CompositionScreener(nn.Module):
             std = F.softplus(raw)
         else:
             raise ValueError(f"Unsupported uncertainty mode: {mode}")
+        std = torch.nan_to_num(std, nan=min_std, posinf=1e6, neginf=min_std)
         if min_std > 0.0:
             std = torch.clamp(std, min=min_std)
         return std
@@ -331,8 +366,13 @@ class CompositionScreener(nn.Module):
         member_stds: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         mean = member_means.mean(dim=0)
-        epistemic_var = torch.var(member_means, dim=0, unbiased=False)
-        aleatoric_var = torch.mean(torch.square(member_stds), dim=0)
+        epistemic_var = torch.nan_to_num(torch.var(member_means, dim=0, unbiased=False), nan=0.0, posinf=1e6, neginf=0.0)
+        aleatoric_var = torch.nan_to_num(
+            torch.mean(torch.square(member_stds), dim=0),
+            nan=0.0,
+            posinf=1e6,
+            neginf=0.0,
+        )
         total_var = epistemic_var + aleatoric_var
         return {
             "mean": mean,
@@ -371,20 +411,41 @@ class CompositionScreener(nn.Module):
             raise ValueError(f"target shape must match predictions, got {tuple(target.shape)} vs {tuple(mean.shape)}")
 
         if member_stds is None:
-            return F.mse_loss(mean, target, reduction=reduction)
+            valid = torch.isfinite(target) & torch.isfinite(mean)
+            if reduction == "none":
+                sq = torch.square(mean - target)
+                return torch.where(valid, sq, torch.zeros_like(sq))
+            if not bool(valid.any()):
+                return torch.zeros((), dtype=mean.dtype, device=mean.device)
+            diff = (mean - target)[valid]
+            if reduction == "sum":
+                return torch.sum(torch.square(diff))
+            return torch.mean(torch.square(diff))
 
         aleatoric_std = self._safe_sqrt(torch.mean(torch.square(member_stds), dim=0), eps=self.uncertainty_min_std**2)
+        valid = torch.isfinite(target) & torch.isfinite(mean) & torch.isfinite(aleatoric_std) & (aleatoric_std > 0.0)
+        if reduction == "none":
+            nll = self.gaussian_nll(
+                target,
+                mean,
+                aleatoric_std,
+                reduction="none",
+                eps=max(self.uncertainty_min_std**2, 1e-12),
+            )
+            return torch.where(valid, nll, torch.zeros_like(nll))
+        if not bool(valid.any()):
+            return torch.zeros((), dtype=mean.dtype, device=mean.device)
         return self.gaussian_nll(
-            target,
-            mean,
-            aleatoric_std,
+            target[valid],
+            mean[valid],
+            aleatoric_std[valid],
             reduction=reduction,
             eps=max(self.uncertainty_min_std**2, 1e-12),
         )
 
     @torch.no_grad()
     def _mc_dropout_epistemic_var(self, src: torch.Tensor, frac: torch.Tensor, samples: int) -> torch.Tensor | None:
-        samples = int(max(samples, 0))
+        samples = self._coerce_int(samples, default=0, minimum=0)
         if samples <= 0:
             return None
 
@@ -426,7 +487,10 @@ class CompositionScreener(nn.Module):
         out = self._aggregate_distribution(member_means, member_stds)
         out["transformed_frac"] = transformed_frac
 
-        samples = self.mc_dropout_samples if mc_samples is None else int(max(mc_samples, 0))
+        if mc_samples is None:
+            samples = self.mc_dropout_samples
+        else:
+            samples = self._coerce_int(mc_samples, default=self.mc_dropout_samples, minimum=0)
         if samples > 0:
             mc_epistemic_var = self._mc_dropout_epistemic_var(src, frac, samples)
             if mc_epistemic_var is not None:

@@ -20,6 +20,7 @@ References:
 from __future__ import annotations
 
 import math
+from numbers import Integral, Real
 
 import torch
 
@@ -88,6 +89,32 @@ _INV_SQRT_2PI = 0.3989422804014327
 _ASYMPTOTIC_LOG_EI_SWITCH = -5.0
 
 
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        out_f = float(value)
+        if not math.isfinite(out_f) or not out_f.is_integer():
+            return int(default)
+        return int(out_f)
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_float(value: float, default: float) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if not math.isfinite(out):
+        return float(default)
+    return float(out)
+
+
 def _as_tensor(x: torch.Tensor | float, ref: torch.Tensor | None = None) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         if ref is not None and (x.dtype != ref.dtype or x.device != ref.device):
@@ -121,8 +148,32 @@ def _prepare_mean_std(
     if not torch.is_floating_point(mean_t):
         mean_t = mean_t.to(torch.float32)
         std_t = std_t.to(dtype=mean_t.dtype, device=mean_t.device)
+    mean_t = torch.nan_to_num(mean_t, nan=0.0, posinf=0.0, neginf=0.0)
     std_t = _sanitize_std(std_t)
     return mean_t, std_t
+
+
+def _sanitize_best_f(best_f: float) -> float:
+    return _coerce_float(best_f, 0.0)
+
+
+def _sanitize_jitter(jitter: float) -> float:
+    return max(0.0, _coerce_float(jitter, 0.01))
+
+
+def _sanitize_kappa(kappa: float) -> float:
+    return max(0.0, _coerce_float(kappa, 2.0))
+
+
+def _sanitize_mc_samples(
+    mc_samples: int,
+    *,
+    default: int = 128,
+    minimum: int = 8,
+    maximum: int = 4096,
+) -> int:
+    out = _coerce_int(mc_samples, default)
+    return int(min(max(out, minimum), maximum))
 
 
 def _log_clamped(x: torch.Tensor) -> torch.Tensor:
@@ -214,7 +265,6 @@ def _prepare_observed(
     if observed_mean is None:
         return None, None
     obs_mean_t = _as_tensor(observed_mean, ref=ref).reshape(-1)
-    obs_mean_t = torch.nan_to_num(obs_mean_t, nan=0.0, posinf=0.0, neginf=0.0)
     if obs_mean_t.numel() == 0:
         return None, None
 
@@ -226,7 +276,14 @@ def _prepare_observed(
             raise ValueError(
                 "observed_std must have the same number of elements as observed_mean."
             )
-        obs_std_t = _sanitize_std(obs_std_t)
+    finite_mask = torch.isfinite(obs_mean_t) & torch.isfinite(obs_std_t)
+    if not bool(torch.all(finite_mask)):
+        obs_mean_t = obs_mean_t[finite_mask]
+        obs_std_t = obs_std_t[finite_mask]
+    if obs_mean_t.numel() == 0:
+        return None, None
+
+    obs_std_t = _sanitize_std(obs_std_t)
     return obs_mean_t, obs_std_t
 
 
@@ -250,13 +307,27 @@ def _noisy_expected_improvement_prepared(
     if observed_mean is None or observed_std is None or observed_mean.numel() == 0:
         return _expected_improvement_prepared(mean, std, best_f=best_f_fallback, jitter=jitter)
 
-    sample_count = max(8, int(mc_samples))
-    eps = torch.randn(
-        (sample_count, observed_mean.numel()),
+    floor = max(_MIN_STD, torch.finfo(observed_std.dtype).tiny)
+    if bool(torch.all(observed_std <= floor)):
+        return _expected_improvement_prepared(
+            mean,
+            std,
+            best_f=float(torch.max(observed_mean).item()),
+            jitter=jitter,
+        )
+
+    sample_count = _sanitize_mc_samples(mc_samples)
+    half = (sample_count + 1) // 2
+    eps_half = torch.randn(
+        (half, observed_mean.numel()),
         dtype=observed_mean.dtype,
         device=observed_mean.device,
         generator=generator,
     )
+    if sample_count == 1:
+        eps = eps_half
+    else:
+        eps = torch.cat((eps_half, -eps_half), dim=0)[:sample_count]
     noisy_obs = observed_mean.unsqueeze(0) + observed_std.unsqueeze(0) * eps
     noisy_best = noisy_obs.max(dim=1).values
 
@@ -338,19 +409,22 @@ def schedule_ucb_kappa(
     - Srinivas et al. (2010) for GP-UCB beta_t schedule:
       https://arxiv.org/abs/0912.3995
     """
-    t = max(1, int(iteration))
+    t = max(1, _coerce_int(iteration, 1))
     mode_key = str(mode).strip().lower().replace("-", "_")
+    base = max(0.0, _coerce_float(base_kappa, 2.0))
+    floor = max(0.0, _coerce_float(kappa_min, 1.0))
+    decay_safe = max(0.0, _coerce_float(decay, 0.08))
 
     if mode_key in {"fixed", "constant"}:
-        return float(base_kappa)
+        return float(base)
     if mode_key in {"anneal", "exp_decay"}:
-        k0 = max(float(base_kappa), float(kappa_min))
-        return float(kappa_min + (k0 - kappa_min) * math.exp(-float(decay) * (t - 1)))
+        k0 = max(base, floor)
+        return float(floor + (k0 - floor) * math.exp(-decay_safe * (t - 1)))
     if mode_key in {"gp_ucb", "srinivas"}:
-        d = max(1, int(dimension))
-        delta_eff = min(max(float(delta), 1e-12), 1.0 - 1e-12)
+        d = max(1, _coerce_int(dimension, 1))
+        delta_eff = min(max(_coerce_float(delta, 0.1), 1e-12), 1.0 - 1e-12)
         beta_t = 2.0 * math.log((t ** (d / 2.0 + 2.0)) * (math.pi**2) / (3.0 * delta_eff))
-        return float(max(float(kappa_min), math.sqrt(max(beta_t, 1e-12))))
+        return float(max(floor, math.sqrt(max(beta_t, 1e-12))))
     raise ValueError(f"Unknown kappa schedule mode: {mode!r}")
 
 
@@ -381,6 +455,8 @@ def expected_improvement(
     where Z = (mu - f_best - xi) / sigma
     """
     mean_t, std_t = _prepare_mean_std(mean, std)
+    best_f = _sanitize_best_f(best_f)
+    jitter = _sanitize_jitter(jitter)
     if not maximize:
         # Transform minimization into maximization.
         mean_t = -mean_t
@@ -397,6 +473,8 @@ def log_expected_improvement(
 ) -> torch.Tensor:
     """Compute logarithm of expected improvement (LogEI)."""
     mean_t, std_t = _prepare_mean_std(mean, std)
+    best_f = _sanitize_best_f(best_f)
+    jitter = _sanitize_jitter(jitter)
     if not maximize:
         mean_t = -mean_t
         best_f = -best_f
@@ -412,6 +490,8 @@ def probability_of_improvement(
 ) -> torch.Tensor:
     """Compute probability of improvement (PI)."""
     mean_t, std_t = _prepare_mean_std(mean, std)
+    best_f = _sanitize_best_f(best_f)
+    jitter = _sanitize_jitter(jitter)
     if not maximize:
         # Transform minimization into maximization.
         mean_t = -mean_t
@@ -428,6 +508,8 @@ def log_probability_of_improvement(
 ) -> torch.Tensor:
     """Compute logarithm of probability of improvement (LogPI)."""
     mean_t, std_t = _prepare_mean_std(mean, std)
+    best_f = _sanitize_best_f(best_f)
+    jitter = _sanitize_jitter(jitter)
     if not maximize:
         mean_t = -mean_t
         best_f = -best_f
@@ -449,6 +531,8 @@ def noisy_expected_improvement(
     """Compute Monte Carlo Noisy Expected Improvement (NEI)."""
     mean_t, std_t = _prepare_mean_std(mean, std)
     obs_mean_t, obs_std_t = _prepare_observed(observed_mean, observed_std, ref=mean_t)
+    best_f_fallback = _sanitize_best_f(best_f_fallback)
+    jitter = _sanitize_jitter(jitter)
 
     if not maximize:
         mean_t = -mean_t
@@ -508,7 +592,12 @@ def upper_confidence_bound(
     maximize=False -> LCB = mu - kappa * sigma
     """
     mean_t, std_t = _prepare_mean_std(mean, std)
-    return _upper_confidence_bound_prepared(mean_t, std_t, kappa=kappa, maximize=maximize)
+    return _upper_confidence_bound_prepared(
+        mean_t,
+        std_t,
+        kappa=_sanitize_kappa(kappa),
+        maximize=maximize,
+    )
 
 
 def thompson_sampling(
@@ -550,6 +639,8 @@ def score_acquisition(
     canon = normalize_acquisition_strategy(strategy)
     mean_t, std_t = _prepare_mean_std(mean, std)
     obs_mean_t, obs_std_t = _prepare_observed(observed_mean, observed_std, ref=mean_t)
+    best_f = _sanitize_best_f(best_f)
+    jitter = _sanitize_jitter(jitter)
 
     if canon == "ei":
         if not maximize:
@@ -605,8 +696,8 @@ def score_acquisition(
         )
     if canon == "ucb":
         kappa_t = schedule_ucb_kappa(
-            iteration=1 if iteration is None else int(iteration),
-            base_kappa=kappa,
+            iteration=_coerce_int(1 if iteration is None else iteration, 1),
+            base_kappa=_sanitize_kappa(kappa),
             mode=kappa_schedule,
             dimension=ucb_dimension,
             delta=ucb_delta,
@@ -617,8 +708,8 @@ def score_acquisition(
         return bound if maximize else -bound
     if canon == "lcb":
         kappa_t = schedule_ucb_kappa(
-            iteration=1 if iteration is None else int(iteration),
-            base_kappa=kappa,
+            iteration=_coerce_int(1 if iteration is None else iteration, 1),
+            base_kappa=_sanitize_kappa(kappa),
             mode=kappa_schedule,
             dimension=ucb_dimension,
             delta=ucb_delta,

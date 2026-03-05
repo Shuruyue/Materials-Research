@@ -62,6 +62,14 @@ def test_min_labeled_properties_filters_rows(tmp_path, monkeypatch):
                 "formation_energy_peratom": "na",
                 "optb88vdw_bandgap": 2.1,
             },
+            {
+                "jid": "J4",
+                "atoms": {"dummy": 1},
+                "formula": "Al2O3",
+                "ehull": 0.01,
+                "formation_energy_peratom": -1.2,
+                "optb88vdw_bandgap": " NaN ",
+            },
         ]
     )
     _patch_runtime(monkeypatch, tmp_path, df)
@@ -75,6 +83,47 @@ def test_min_labeled_properties_filters_rows(tmp_path, monkeypatch):
     ).prepare(force_reload=True)
 
     assert list(ds._df["jid"]) == ["J2"]
+
+
+def test_prepare_summary_tracks_failed_graph_rows(tmp_path, monkeypatch):
+    df = pd.DataFrame(
+        [
+            {
+                "jid": "J1",
+                "atoms": {"dummy": 1},
+                "formula": "Li2O",
+                "ehull": 0.01,
+                "formation_energy_peratom": -1.0,
+            },
+            {
+                "jid": "J2",
+                "atoms": {"dummy": 1},
+                "formula": "Fe2O3",
+                "ehull": 0.01,
+                "formation_energy_peratom": -1.1,
+            },
+        ]
+    )
+    _patch_runtime(monkeypatch, tmp_path, df)
+    monkeypatch.setattr(
+        dataset_mod,
+        "_worker_process_row",
+        lambda row_data, *args, **kwargs: (
+            None if row_data.get("jid") == "J2" else SimpleNamespace(jid=row_data["jid"])
+        ),
+    )
+
+    ds = dataset_mod.CrystalPropertyDataset(
+        properties=["formation_energy"],
+        stability_filter=None,
+        split="train",
+        split_ratio=(1.0, 0.0, 0.0),
+    ).prepare(force_reload=True)
+
+    summary = ds.prepare_summary()
+    assert summary["requested"] == 2
+    assert summary["built"] == 1
+    assert summary["failed"] == 1
 
 
 def test_fallback_split_strategy_compositional_matches_governance(tmp_path, monkeypatch):
@@ -216,6 +265,31 @@ def test_invalid_strategies_and_unknown_property_raise():
         )
     with pytest.raises(ValueError):
         dataset_mod.CrystalPropertyDataset(properties=["unknown_property"])
+    with pytest.raises(ValueError):
+        dataset_mod.CrystalPropertyDataset(
+            properties=["formation_energy"],
+            split="invalid_split",
+        )
+    with pytest.raises(ValueError):
+        dataset_mod.CrystalPropertyDataset(
+            properties=["formation_energy"],
+            split_ratio=(0.8, float("nan"), 0.2),
+        )
+    with pytest.raises(ValueError):
+        dataset_mod.CrystalPropertyDataset(
+            properties=["formation_energy"],
+            split_ratio=(True, 0.1, 0.9),
+        )
+    with pytest.raises(ValueError):
+        dataset_mod.CrystalPropertyDataset(
+            properties=["formation_energy"],
+            max_samples=2.5,
+        )
+    with pytest.raises(ValueError):
+        dataset_mod.CrystalPropertyDataset(
+            properties=["formation_energy"],
+            graph_max_neighbors=True,
+        )
 
 
 def test_enforce_nonempty_split_raises_on_empty_ood_split(tmp_path, monkeypatch):
@@ -237,3 +311,65 @@ def test_enforce_nonempty_split_raises_on_empty_ood_split(tmp_path, monkeypatch)
             enforce_nonempty_split=True,
             split_manifest_path=None,
         ).prepare(force_reload=True)
+
+
+def test_kcenter_coreset_indices_sanitize_non_finite_features():
+    features = np.array(
+        [
+            [0.0, 1.0, np.nan],
+            [np.inf, 0.1, 0.2],
+            [0.3, 0.2, 0.1],
+            [-np.inf, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    idx = dataset_mod._kcenter_coreset_indices(features, k=3, seed=42)
+    assert idx.shape == (3,)
+    assert len(set(idx.tolist())) == 3
+
+
+def test_manifest_assignment_ignores_invalid_rows(tmp_path):
+    manifest = tmp_path / "split_manifest_iid.json"
+    manifest.write_text(
+        '{"split_strategy": "iid", "metadata": {"assignment_csv": "assign.csv"}}',
+        encoding="utf-8",
+    )
+    assign = pd.DataFrame(
+        [
+            {"sample_id": "J1", "split": "train"},
+            {"sample_id": "J2", "split": "VAL"},
+            {"sample_id": "J3", "split": "bad"},
+            {"sample_id": None, "split": "test"},
+            {"sample_id": "J4", "split": None},
+        ]
+    )
+    assign.to_csv(tmp_path / "assign.csv", index=False)
+
+    ds = dataset_mod.CrystalPropertyDataset(
+        properties=["formation_energy"],
+        split_manifest_path=manifest,
+    )
+    mapping = ds._load_manifest_assignment()
+    assert mapping == {"J1": "train", "J2": "val"}
+
+
+def test_manifest_assignment_conflicting_rows_raise(tmp_path):
+    manifest = tmp_path / "split_manifest_iid.json"
+    manifest.write_text(
+        '{"split_strategy": "iid", "metadata": {"assignment_csv": "assign.csv"}}',
+        encoding="utf-8",
+    )
+    assign = pd.DataFrame(
+        [
+            {"sample_id": "J1", "split": "train"},
+            {"sample_id": "J1", "split": "test"},
+        ]
+    )
+    assign.to_csv(tmp_path / "assign.csv", index=False)
+
+    ds = dataset_mod.CrystalPropertyDataset(
+        properties=["formation_energy"],
+        split_manifest_path=manifest,
+    )
+    with pytest.raises(ValueError, match="Conflicting split assignment"):
+        ds._load_manifest_assignment()

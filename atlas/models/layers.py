@@ -6,10 +6,46 @@ Neural network layers for crystal property prediction:
 - GatedEquivariantBlock: E(3)-equivariant convolution (e3nn)
 """
 
+import math
+from numbers import Integral, Real
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+
+def _is_boolean_like(value: object) -> bool:
+    return isinstance(value, bool) or type(value).__name__ == "bool_"
+
+
+def _coerce_positive_int(value: object, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be integer-valued, not boolean")
+    if isinstance(value, Integral):
+        integer = int(value)
+    elif isinstance(value, Real):
+        scalar = float(value)
+        if not math.isfinite(scalar):
+            raise ValueError(f"{name} must be finite")
+        rounded = round(scalar)
+        if abs(scalar - rounded) > 1e-9:
+            raise ValueError(f"{name} must be integer-valued")
+        integer = int(rounded)
+    else:
+        raise ValueError(f"{name} must be integer-valued")
+    if integer <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return integer
+
+
+def _coerce_positive_float(value: object, name: str) -> float:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be > 0, not boolean")
+    scalar = float(value)
+    if not math.isfinite(scalar):
+        raise ValueError(f"{name} must be finite")
+    if scalar <= 0.0:
+        raise ValueError(f"{name} must be > 0")
+    return scalar
 
 
 class MessagePassingLayer(nn.Module):
@@ -29,20 +65,22 @@ class MessagePassingLayer(nn.Module):
         use_edge_gates: bool = True,
     ):
         super().__init__()
+        node_dim_i = _coerce_positive_int(node_dim, "node_dim")
+        edge_dim_i = _coerce_positive_int(edge_dim, "edge_dim")
         if aggr not in {"sum", "mean"}:
             raise ValueError(f"Unsupported aggregation: {aggr}")
         self.aggr = aggr
         self.use_edge_gates = use_edge_gates
 
-        msg_in = node_dim * 2 + edge_dim
+        msg_in = node_dim_i * 2 + edge_dim_i
         self.msg_mlp = nn.Sequential(
-            nn.Linear(msg_in, node_dim),
+            nn.Linear(msg_in, node_dim_i),
             nn.SiLU(),
-            nn.Linear(node_dim, node_dim),
+            nn.Linear(node_dim_i, node_dim_i),
         )
-        self.gate_mlp = nn.Linear(msg_in, node_dim) if use_edge_gates else None
+        self.gate_mlp = nn.Linear(msg_in, node_dim_i) if use_edge_gates else None
         self.update_mlp = nn.Sequential(
-            nn.Linear(node_dim * 2, node_dim),
+            nn.Linear(node_dim_i * 2, node_dim_i),
             nn.SiLU(),
         )
 
@@ -61,7 +99,28 @@ class MessagePassingLayer(nn.Module):
         Returns:
             (N, node_dim) updated node features
         """
-        src, dst = edge_index
+        if h.ndim != 2:
+            raise ValueError(f"h must be rank-2 tensor, got shape {tuple(h.shape)}")
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError(f"edge_index must have shape (2, E), got {tuple(edge_index.shape)}")
+        if edge_index.dtype not in (torch.int32, torch.int64):
+            raise ValueError(f"edge_index must be integer tensor, got dtype {edge_index.dtype}")
+        if e.ndim != 2:
+            raise ValueError(f"e must be rank-2 tensor, got shape {tuple(e.shape)}")
+        if e.size(0) != edge_index.size(1):
+            raise ValueError(
+                f"Edge feature count mismatch: got {e.size(0)}, expected {edge_index.size(1)}"
+            )
+
+        src, dst = edge_index[0].to(dtype=torch.long), edge_index[1].to(dtype=torch.long)
+        if src.numel() == 0:
+            agg = torch.zeros_like(h)
+            return self.update_mlp(torch.cat([h, agg], dim=-1))
+        if int(src.min()) < 0 or int(src.max()) >= h.size(0):
+            raise ValueError("edge_index src contains out-of-range node indices")
+        if int(dst.min()) < 0 or int(dst.max()) >= h.size(0):
+            raise ValueError("edge_index dst contains out-of-range node indices")
+
         msg_input = torch.cat([h[src], h[dst], e], dim=-1)
         messages = self.msg_mlp(msg_input)
         if self.gate_mlp is not None:
@@ -78,7 +137,6 @@ class MessagePassingLayer(nn.Module):
 
         # Update
         h_new = self.update_mlp(torch.cat([h, agg], dim=-1))
-        h_new = F.silu(h_new)
         return h_new
 
 
@@ -111,12 +169,14 @@ class GatedEquivariantBlock(nn.Module):
         max_radius: float = 5.0,
     ):
         super().__init__()
+        n_radial_basis_i = _coerce_positive_int(n_radial_basis, "n_radial_basis")
+        max_radius_f = _coerce_positive_float(max_radius, "max_radius")
         self.irreps_in = irreps_in
         self.irreps_out = irreps_out
         self.irreps_edge = irreps_edge
-        self.max_radius = max_radius
+        self.max_radius = max_radius_f
         self._initialized = False
-        self._n_radial_basis = n_radial_basis
+        self._n_radial_basis = n_radial_basis_i
 
         self._lazy_init()
 
@@ -172,7 +232,22 @@ class GatedEquivariantBlock(nn.Module):
         Returns:
             (N, irreps_out_dim) updated node features
         """
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError(f"edge_index must have shape (2, E), got {tuple(edge_index.shape)}")
+        if edge_sh.ndim != 2 or edge_radial.ndim != 2:
+            raise ValueError("edge_sh and edge_radial must be rank-2 tensors")
+        if edge_sh.size(0) != edge_index.size(1) or edge_radial.size(0) != edge_index.size(1):
+            raise ValueError("edge_sh/edge_radial row counts must match edge count")
+
         src, dst = edge_index
+        src = src.long()
+        dst = dst.long()
+        if src.numel() == 0:
+            return node_features
+        if int(src.min()) < 0 or int(src.max()) >= node_features.size(0):
+            raise ValueError("edge_index src contains out-of-range node indices")
+        if int(dst.min()) < 0 or int(dst.max()) >= node_features.size(0):
+            raise ValueError("edge_index dst contains out-of-range node indices")
 
         # Compute tensor product weights from radial basis
         weights = self.radial_mlp(edge_radial)

@@ -67,6 +67,42 @@ class TestTopoGNN:
         assert 0.0 <= mean_prob <= 1.0
         assert std_prob >= 0.0
 
+    def test_invalid_hyperparameters_raise(self):
+        with pytest.raises(ValueError, match="must be > 0"):
+            TopoGNN(node_dim=0)
+        with pytest.raises(ValueError, match="node_dim must be integer-valued"):
+            TopoGNN(node_dim=91.5)
+        with pytest.raises(ValueError, match="edge_dim must be integer-valued, not boolean"):
+            TopoGNN(edge_dim=True)
+        with pytest.raises(ValueError, match="dropout must be in"):
+            TopoGNN(dropout=1.2)
+        with pytest.raises(ValueError, match="dropout must be in"):
+            TopoGNN(dropout=False)
+
+    def test_predict_proba_rejects_multi_graph_batch(self, model):
+        n_nodes = 8
+        node_feats = torch.randn(n_nodes, 91)
+        edge_index = torch.randint(0, n_nodes, (2, 12))
+        edge_feats = torch.randn(12, 20)
+        batch = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.long)
+        with pytest.raises(ValueError, match="exactly one graph"):
+            model.predict_proba(node_feats, edge_index, edge_feats, batch=batch)
+
+    def test_mc_dropout_restores_training_state(self, model, fake_graph):
+        model.train(True)
+        _ = model.predict_proba(*fake_graph, mc_dropout=True, n_samples=3)
+        assert model.training is True
+
+    @pytest.mark.parametrize("n_samples", [0, -1, 2.5, True, float("inf"), float("nan")])
+    def test_predict_proba_validates_n_samples(self, model, fake_graph, n_samples):
+        with pytest.raises(ValueError, match="n_samples"):
+            model.predict_proba(*fake_graph, mc_dropout=True, n_samples=n_samples)
+
+    def test_forward_validates_shape_mismatch(self, model, fake_graph):
+        node_feats, edge_index, edge_feats, batch = fake_graph
+        with pytest.raises(ValueError, match="edge_feats first dim must match edge count"):
+            model(node_feats, edge_index, edge_feats[:-1], batch)
+
     def test_save_load_roundtrip(self, model, fake_graph):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "topo_model.pt"

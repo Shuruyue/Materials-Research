@@ -12,11 +12,34 @@ from __future__ import annotations
 import numpy as np
 
 
-def pareto_front(points: np.ndarray) -> np.ndarray:
-    """Return the non-dominated subset under maximization."""
+def _as_2d_points(points: np.ndarray) -> np.ndarray:
     arr = np.asarray(points, dtype=float)
     if arr.size == 0:
-        return arr.reshape(0, 2)
+        if arr.ndim == 2:
+            return np.zeros((0, int(arr.shape[1])), dtype=float)
+        return np.zeros((0, 0), dtype=float)
+    if arr.ndim == 1:
+        return arr.reshape(1, -1)
+    if arr.ndim != 2:
+        return arr.reshape(arr.shape[0], -1)
+    return arr
+
+
+def _finite_row_mask(arr: np.ndarray) -> np.ndarray:
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return np.zeros(arr.shape[0] if arr.ndim >= 1 else 0, dtype=bool)
+    return np.all(np.isfinite(arr), axis=1)
+
+
+def pareto_front(points: np.ndarray) -> np.ndarray:
+    """Return the non-dominated subset under maximization."""
+    arr = _as_2d_points(points)
+    if arr.size == 0:
+        return arr
+    finite_mask = _finite_row_mask(arr)
+    arr = arr[finite_mask]
+    if arr.size == 0:
+        return np.zeros((0, _as_2d_points(points).shape[1]), dtype=float)
     ge = np.all(arr[:, None, :] >= arr[None, :, :], axis=2)
     gt = np.any(arr[:, None, :] > arr[None, :, :], axis=2)
     dominates = ge & gt
@@ -33,15 +56,25 @@ def non_dominated_sort(points: np.ndarray) -> list[np.ndarray]:
     this keeps the overall complexity close to O(n^2) for fixed objective
     dimension, matching practical fast-sort implementations used by NSGA-II.
     """
-    arr = np.asarray(points, dtype=float)
+    arr = _as_2d_points(points)
     if arr.size == 0:
         return []
-    n = int(arr.shape[0])
-    if n == 1:
-        return [np.array([0], dtype=int)]
+    finite_rows = _finite_row_mask(arr)
+    finite_indices = np.flatnonzero(finite_rows)
+    nonfinite_indices = np.flatnonzero(~finite_rows)
+    if finite_indices.size == 0:
+        return [nonfinite_indices.astype(int)] if nonfinite_indices.size else []
 
-    ge = np.all(arr[:, None, :] >= arr[None, :, :], axis=2)
-    gt = np.any(arr[:, None, :] > arr[None, :, :], axis=2)
+    work = arr[finite_indices]
+    n = int(work.shape[0])
+    if n == 1:
+        fronts = [finite_indices.astype(int)]
+        if nonfinite_indices.size:
+            fronts.append(nonfinite_indices.astype(int))
+        return fronts
+
+    ge = np.all(work[:, None, :] >= work[None, :, :], axis=2)
+    gt = np.any(work[:, None, :] > work[None, :, :], axis=2)
     dominates = ge & gt
     np.fill_diagonal(dominates, False)
 
@@ -63,14 +96,18 @@ def non_dominated_sort(points: np.ndarray) -> list[np.ndarray]:
             break
         domination_count -= dominates[front].sum(axis=0).astype(np.int32, copy=False)
         domination_count[~remaining] = -1
+    fronts = [finite_indices[front].astype(int, copy=False) for front in fronts]
+    if nonfinite_indices.size:
+        fronts.append(nonfinite_indices.astype(int))
     return fronts
 
 
 def crowding_distance(points: np.ndarray) -> np.ndarray:
     """NSGA-II crowding distance for a single front."""
-    arr = np.asarray(points, dtype=float)
+    arr = _as_2d_points(points)
     if arr.ndim != 2:
         return np.zeros(0, dtype=float)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     n, m = arr.shape
     if n == 0:
         return np.zeros(0, dtype=float)
@@ -97,7 +134,7 @@ def crowding_distance(points: np.ndarray) -> np.ndarray:
 
 def pareto_rank_score(points: np.ndarray) -> np.ndarray:
     """Convert Pareto front rank + crowding into a normalized [0, 1] score."""
-    arr = np.asarray(points, dtype=float)
+    arr = _as_2d_points(points)
     if arr.size == 0:
         return np.zeros(0, dtype=float)
 
@@ -135,9 +172,15 @@ def hypervolume_2d(points: np.ndarray, reference: np.ndarray) -> float:
     The implementation sweeps sorted Pareto points once and accumulates
     rectangle strips, avoiding repeated sub-filtering per x-slice.
     """
-    arr = np.asarray(points, dtype=float)
+    arr = _as_2d_points(points)
     ref = np.asarray(reference, dtype=float).reshape(-1)
-    if arr.size == 0 or ref.size != 2:
+    if arr.size == 0 or ref.size != 2 or arr.shape[1] != 2:
+        return 0.0
+    if not np.all(np.isfinite(ref)):
+        return 0.0
+
+    arr = arr[np.all(np.isfinite(arr), axis=1)]
+    if arr.size == 0:
         return 0.0
 
     pts = pareto_front(arr)
@@ -186,14 +229,17 @@ def hypervolume(
     - Exact for 1D and 2D.
     - Monte Carlo estimate for >=3D.
     """
-    arr = np.asarray(points, dtype=float)
+    arr = _as_2d_points(points)
     ref = np.asarray(reference, dtype=float).reshape(-1)
     if arr.size == 0 or arr.ndim != 2:
         return 0.0
     dim = int(arr.shape[1])
-    if dim <= 0 or ref.size != dim:
+    if dim <= 0 or ref.size != dim or not np.all(np.isfinite(ref)):
         return 0.0
 
+    arr = arr[np.all(np.isfinite(arr), axis=1)]
+    if arr.size == 0:
+        return 0.0
     valid = arr[np.all(arr > ref.reshape(1, -1), axis=1)]
     if valid.size == 0:
         return 0.0
@@ -201,6 +247,8 @@ def hypervolume(
         return float(max(0.0, np.max(valid[:, 0]) - ref[0]))
     if dim == 2:
         return hypervolume_2d(valid, ref)
+    if valid.shape[0] == 1:
+        return float(max(0.0, np.prod(valid[0] - ref)))
 
     upper = np.max(valid, axis=0)
     side = upper - ref
@@ -210,10 +258,19 @@ def hypervolume(
     if box_volume <= 0.0:
         return 0.0
 
-    samples = max(256, int(hv_mc_samples))
-    seed = int(hv_mc_seed) + max(1, int(iteration))
+    try:
+        samples = max(256, int(hv_mc_samples))
+    except Exception:
+        samples = 4096
+    try:
+        seed = int(hv_mc_seed) + max(1, int(iteration))
+    except Exception:
+        seed = 12345 + max(1, int(iteration))
     probes = _sample_hv_probes(ref, upper, samples=samples, seed=seed)
-    chunk = max(64, int(hv_chunk_size))
+    try:
+        chunk = max(64, int(hv_chunk_size))
+    except Exception:
+        chunk = 512
 
     dominated_count = 0
     for start in range(0, samples, chunk):
@@ -240,9 +297,9 @@ def mc_hv_improvements_shared(
     For dim>=3 this computes all candidate gains in vectorized chunks:
     gain_i = box_volume * P(probe not dominated by history and dominated by i)
     """
-    cand = np.asarray(cand_points, dtype=float)
+    cand = _as_2d_points(cand_points)
     ref = np.asarray(reference, dtype=float).reshape(-1)
-    hist = np.asarray(hist_arr, dtype=float)
+    hist = _as_2d_points(hist_arr)
     if cand.size == 0:
         return np.zeros(0, dtype=float)
     if cand.ndim != 2:
@@ -250,8 +307,10 @@ def mc_hv_improvements_shared(
 
     n_cand, dim = cand.shape
     out = np.zeros(n_cand, dtype=float)
-    if ref.size != dim:
+    if ref.size != dim or not np.all(np.isfinite(ref)):
         return out
+    cand_finite = np.all(np.isfinite(cand), axis=1)
+    hist = hist[np.all(np.isfinite(hist), axis=1)] if hist.size else np.zeros((0, dim), dtype=float)
 
     if dim <= 2:
         baseline = hypervolume(
@@ -263,6 +322,8 @@ def mc_hv_improvements_shared(
             hv_chunk_size=hv_chunk_size,
         )
         for idx, p in enumerate(cand):
+            if not cand_finite[idx]:
+                continue
             if p[0] < feas_threshold:
                 continue
             augmented = p.reshape(1, dim) if hist.size == 0 else np.vstack([hist, p.reshape(1, dim)])
@@ -285,7 +346,14 @@ def mc_hv_improvements_shared(
         if hist.size
         else np.zeros((0, dim), dtype=float)
     )
-    valid_mask = (cand[:, 0] >= float(feas_threshold)) & np.all(cand > ref.reshape(1, -1), axis=1)
+    valid_mask = (
+        cand_finite
+        & (cand[:, 0] >= float(feas_threshold))
+        & np.all(cand > ref.reshape(1, -1), axis=1)
+    )
+    valid_indices = np.flatnonzero(valid_mask)
+    if valid_indices.size == 0:
+        return out
     if not np.any(valid_mask) and valid_hist.size == 0:
         return out
 
@@ -297,8 +365,14 @@ def mc_hv_improvements_shared(
     if np.any(side <= 1e-12):
         return out
 
-    samples = max(256, int(hv_mc_samples))
-    seed = int(hv_mc_seed) + max(1, int(iteration))
+    try:
+        samples = max(256, int(hv_mc_samples))
+    except Exception:
+        samples = 4096
+    try:
+        seed = int(hv_mc_seed) + max(1, int(iteration))
+    except Exception:
+        seed = 12345 + max(1, int(iteration))
     probes = _sample_hv_probes(ref, upper, samples=samples, seed=seed)
     box_volume = float(np.prod(side))
     if box_volume <= 0.0:
@@ -307,7 +381,10 @@ def mc_hv_improvements_shared(
     if valid_hist.size == 0:
         dominated_hist = np.zeros(samples, dtype=bool)
     else:
-        chunk = max(64, int(hv_chunk_size))
+        try:
+            chunk = max(64, int(hv_chunk_size))
+        except Exception:
+            chunk = 512
         dominated_hist = np.zeros(samples, dtype=bool)
         for start in range(0, samples, chunk):
             batch = probes[start : start + chunk]
@@ -317,9 +394,11 @@ def mc_hv_improvements_shared(
     if not np.any(uncovered):
         return out
 
-    valid_indices = np.flatnonzero(valid_mask)
     cand_valid = cand[valid_indices]
-    chunk = max(8, int(hv_chunk_size // max(1, dim)))
+    try:
+        chunk = max(8, int(hv_chunk_size // max(1, dim)))
+    except Exception:
+        chunk = 64
     for start in range(0, cand_valid.shape[0], chunk):
         sub = cand_valid[start : start + chunk]
         dominates_sub = np.all(sub[:, None, :] >= probes[None, :, :], axis=2)

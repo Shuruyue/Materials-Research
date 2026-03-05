@@ -27,11 +27,14 @@ References:
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import logging
 import multiprocessing
 import os
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from numbers import Integral, Real
 
 import numpy as np
 from pymatgen.core import Element, Structure
@@ -110,13 +113,27 @@ TOPO_PROTOTYPES = {
 
 
 def _softmax(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
+    x = np.asarray(x, dtype=float).reshape(-1)
+    if x.size == 0:
+        return np.zeros(0, dtype=float)
+    finite = np.isfinite(x)
+    if not np.any(finite):
+        return np.ones_like(x, dtype=float) / float(x.size)
+    floor = np.min(x[finite]) if np.any(finite) else 0.0
+    x = np.where(finite, x, floor)
     x = x - np.max(x)
-    ex = np.exp(x)
-    denom = np.sum(ex)
+    # Guard exp overflow/underflow in pathological logits.
+    ex = np.exp(np.clip(x, -700.0, 700.0))
+    ex = np.nan_to_num(ex, nan=0.0, posinf=0.0, neginf=0.0)
+    denom = float(np.sum(ex))
     if denom <= 0.0 or not np.isfinite(denom):
         return np.ones_like(ex) / max(len(ex), 1)
     return ex / denom
+
+
+def _stable_seed_from_text(text: str) -> int:
+    digest = hashlib.blake2b(str(text).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
 
 
 def _species_symbol(specie) -> str:
@@ -148,6 +165,26 @@ def _safe_float(x, default: float = 0.0) -> float:
     except Exception:
         pass
     return float(default)
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        out_f = float(value)
+        if not np.isfinite(out_f) or not out_f.is_integer():
+            return int(default)
+        return int(out_f)
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_float(value: object, default: float) -> float:
+    return _safe_float(value, default)
 
 
 def _element_feature_vector(symbol: str) -> np.ndarray:
@@ -332,7 +369,8 @@ def _charge_neutrality_score(
         iterator = itertools.product(*state_options)
     else:
         # Bounded Monte Carlo on oxidation-state product space.
-        seed = abs(hash(structure.composition.reduced_formula)) % (2**32)
+        signature = "|".join(f"{sym}:{amount:.8f}" for sym, amount in sorted(comp.items()))
+        seed = _stable_seed_from_text(signature) % (2**32)
         rng = np.random.RandomState(int(seed))
 
         def _sample_iter():
@@ -571,32 +609,40 @@ class StructureGenerator:
         substitution_stat_decay: float = 0.995,
     ):
         self.seeds = seed_structures or []
-        self.rng_seed = int(rng_seed)
+        self.rng_seed = _coerce_int(rng_seed, 42)
         self.rng = np.random.RandomState(self.rng_seed)
         self.generated: list[dict] = []
 
-        self.substitution_temperature = float(max(substitution_temperature, 1e-6))
-        self.max_strain = float(max(max_strain, 1e-6))
+        self.substitution_temperature = float(max(_coerce_float(substitution_temperature, 0.35), 1e-6))
+        self.max_strain = float(max(_coerce_float(max_strain, 0.03), 1e-6))
         self.weights = {
-            "topo": float(max(w_topo, 0.0)),
-            "novelty": float(max(w_novelty, 0.0)),
-            "feasibility": float(max(w_feasibility, 0.0)),
-            "strain": float(max(w_strain, 0.0)),
+            "topo": float(max(_coerce_float(w_topo, 0.50), 0.0)),
+            "novelty": float(max(_coerce_float(w_novelty, 0.30), 0.0)),
+            "feasibility": float(max(_coerce_float(w_feasibility, 0.20), 0.0)),
+            "strain": float(max(_coerce_float(w_strain, 0.10), 0.0)),
         }
-        self.novelty_sigma = float(max(novelty_sigma, 1e-6))
-        self.diversity_lambda = float(max(diversity_lambda, 0.0))
-        self.diversity_sigma = float(max(diversity_sigma, 1e-6))
-        self.strain_regularity_sigma = float(max(strain_regularity_sigma, 1e-6))
-        self.archive_limit = int(max(archive_limit, 32))
-        self.adaptive_weight_power = float(max(adaptive_weight_power, 0.0))
-        self.substitution_ucb_beta = float(max(substitution_ucb_beta, 0.0))
-        self.substitution_reward_weight = float(max(substitution_reward_weight, 0.0))
-        self.substitution_stat_decay = float(min(max(substitution_stat_decay, 0.90), 1.0))
+        self.novelty_sigma = float(max(_coerce_float(novelty_sigma, 0.20), 1e-6))
+        self.diversity_lambda = float(max(_coerce_float(diversity_lambda, 0.20), 0.0))
+        self.diversity_sigma = float(max(_coerce_float(diversity_sigma, 0.22), 1e-6))
+        self.strain_regularity_sigma = float(max(_coerce_float(strain_regularity_sigma, 0.08), 1e-6))
+        self.archive_limit = max(32, _coerce_int(archive_limit, 1024))
+        self.adaptive_weight_power = float(max(_coerce_float(adaptive_weight_power, 1.0), 0.0))
+        self.substitution_ucb_beta = float(max(_coerce_float(substitution_ucb_beta, 0.25), 0.0))
+        self.substitution_reward_weight = float(max(_coerce_float(substitution_reward_weight, 1.0), 0.0))
+        decay = _coerce_float(substitution_stat_decay, 0.995)
+        self.substitution_stat_decay = float(np.clip(decay, 0.90, 1.0))
 
         # Online substitution kernel learning cache.
         # key: (target_symbol, new_symbol) -> {"count": float, "reward_sum": float}
         self.substitution_stats: dict[tuple[str, str], dict[str, float]] = {}
         self.last_adaptive_weights: dict[str, float] = dict(self.weights)
+        self._seed_fingerprints: list[np.ndarray] = []
+        if self.seeds:
+            for seed in self.seeds:
+                try:
+                    self._seed_fingerprints.append(_structure_fingerprint(seed))
+                except Exception:
+                    continue
 
         if os.name == "nt":
             self.n_workers = 1
@@ -605,7 +651,14 @@ class StructureGenerator:
 
     def add_seeds(self, structures: list[Structure]):
         """Add seed structures for mutation."""
+        if not structures:
+            return
         self.seeds.extend(structures)
+        for struct in structures:
+            try:
+                self._seed_fingerprints.append(_structure_fingerprint(struct))
+            except Exception:
+                continue
 
     def _validate_structure(self, struct: Structure) -> bool:
         """Check if structure is physically reasonable."""
@@ -625,7 +678,7 @@ class StructureGenerator:
         return True
 
     def _archive_fingerprints(self) -> list[np.ndarray]:
-        fps = [_structure_fingerprint(s) for s in self.seeds]
+        fps = list(self._seed_fingerprints)
         generated_structs = [c.get("structure") for c in self.generated if c.get("structure") is not None]
         if generated_structs:
             for s in generated_structs[-self.archive_limit :]:
@@ -633,11 +686,15 @@ class StructureGenerator:
         return fps[-self.archive_limit :]
 
     def _normalize_weights(self, d: dict[str, float]) -> dict[str, float]:
-        total = sum(max(float(v), 0.0) for v in d.values())
+        cleaned: dict[str, float] = {}
+        for key, value in d.items():
+            v = _coerce_float(value, 0.0)
+            cleaned[key] = max(v, 0.0)
+        total = sum(cleaned.values())
         if total <= 0.0:
             k = max(len(d), 1)
             return {kk: 1.0 / k for kk in d}
-        return {kk: max(float(v), 0.0) / total for kk, v in d.items()}
+        return {kk: cleaned.get(kk, 0.0) / total for kk in d}
 
     def _adaptive_weights(self, objective_matrix: dict[str, np.ndarray]) -> dict[str, float]:
         base = self._normalize_weights(self.weights)
@@ -660,7 +717,7 @@ class StructureGenerator:
         actions: list[tuple[str, str]] = []
         logits: list[float] = []
 
-        total_count = sum(v.get("count", 0.0) for v in self.substitution_stats.values())
+        total_count = sum(_coerce_float(v.get("count", 0.0), 0.0) for v in self.substitution_stats.values())
         total_count = max(float(total_count), 0.0)
 
         for target in elements:
@@ -668,8 +725,8 @@ class StructureGenerator:
             for new_elem in candidates:
                 key = (target, new_elem)
                 stat = self.substitution_stats.get(key, {"count": 0.0, "reward_sum": 0.0})
-                count = float(max(stat.get("count", 0.0), 0.0))
-                reward_sum = float(max(stat.get("reward_sum", 0.0), 0.0))
+                count = float(max(_coerce_float(stat.get("count", 0.0), 0.0), 0.0))
+                reward_sum = float(max(_coerce_float(stat.get("reward_sum", 0.0), 0.0), 0.0))
                 mean_reward = (reward_sum / count) if count > 0 else 0.5
 
                 prior = _substitution_prior_logit(target, new_elem, self.substitution_temperature)
@@ -687,8 +744,10 @@ class StructureGenerator:
     def _update_substitution_stats(self, selected: list[dict]):
         decay = self.substitution_stat_decay
         for key in list(self.substitution_stats.keys()):
-            self.substitution_stats[key]["count"] *= decay
-            self.substitution_stats[key]["reward_sum"] *= decay
+            base_count = _coerce_float(self.substitution_stats[key].get("count", 0.0), 0.0)
+            base_reward = _coerce_float(self.substitution_stats[key].get("reward_sum", 0.0), 0.0)
+            self.substitution_stats[key]["count"] = base_count * decay
+            self.substitution_stats[key]["reward_sum"] = base_reward * decay
 
         for cand in selected:
             method = str(cand.get("method", ""))
@@ -800,61 +859,70 @@ class StructureGenerator:
         candidates = []
         per_method = n_candidates // max(len(methods), 1) + 2
 
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = []
+        tasks: list[tuple[Callable[..., dict | None], tuple]] = []
 
-            if "substitute" in methods:
-                for _ in range(per_method):
-                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
-                    action = self._sample_substitution_action(seed)
-                    if action is None:
-                        futures.append(
-                            executor.submit(
-                                _worker_substitute,
-                                seed,
-                                int(self.rng.randint(1e9)),
-                                self.substitution_temperature,
-                            )
+        if "substitute" in methods:
+            for _ in range(per_method):
+                seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
+                action = self._sample_substitution_action(seed)
+                if action is None:
+                    tasks.append(
+                        (
+                            _worker_substitute,
+                            (seed, int(self.rng.randint(1e9)), self.substitution_temperature),
                         )
-                    else:
-                        target, new_elem = action
-                        futures.append(executor.submit(_worker_apply_substitution, seed, target, new_elem))
+                    )
+                else:
+                    target, new_elem = action
+                    tasks.append((_worker_apply_substitution, (seed, target, new_elem)))
 
-            if "strain" in methods:
-                for _ in range(per_method):
-                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
-                    futures.append(executor.submit(_worker_strain, seed, self.max_strain, int(self.rng.randint(1e9))))
+        if "strain" in methods:
+            for _ in range(per_method):
+                seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
+                tasks.append((_worker_strain, (seed, self.max_strain, int(self.rng.randint(1e9)))))
 
-            # Keep legacy "mix" method, mapped to stochastic substitution kernels.
-            if "mix" in methods:
-                for _ in range(per_method):
-                    seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
-                    action = self._sample_substitution_action(seed)
-                    if action is None:
-                        futures.append(
-                            executor.submit(
-                                _worker_substitute,
-                                seed,
-                                int(self.rng.randint(1e9)),
-                                self.substitution_temperature,
-                            )
+        # Keep legacy "mix" method, mapped to stochastic substitution kernels.
+        if "mix" in methods:
+            for _ in range(per_method):
+                seed = self.seeds[int(self.rng.randint(0, len(self.seeds)))]
+                action = self._sample_substitution_action(seed)
+                if action is None:
+                    tasks.append(
+                        (
+                            _worker_substitute,
+                            (seed, int(self.rng.randint(1e9)), self.substitution_temperature),
                         )
-                    else:
-                        target, new_elem = action
-                        futures.append(executor.submit(_worker_apply_substitution, seed, target, new_elem))
+                    )
+                else:
+                    target, new_elem = action
+                    tasks.append((_worker_apply_substitution, (seed, target, new_elem)))
 
-            for future in as_completed(futures):
+        def _consume_candidate(cand: dict | None) -> None:
+            if not cand:
+                return
+            if not self._validate_structure(cand["structure"]):
+                return
+            if "mix" in methods and cand.get("method") == "substitute":
+                cand = {**cand, "method": "mix"}
+            candidates.append(cand)
+
+        if self.n_workers <= 1:
+            # Single-process fallback avoids ProcessPool spawn/pickle overhead.
+            for fn, args in tasks:
                 try:
-                    cand = future.result()
+                    cand = fn(*args)
                 except Exception:
                     continue
-                if not cand:
-                    continue
-                if not self._validate_structure(cand["structure"]):
-                    continue
-                if "mix" in methods and cand.get("method") == "substitute":
-                    cand = {**cand, "method": "mix"}
-                candidates.append(cand)
+                _consume_candidate(cand)
+        else:
+            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+                futures = [executor.submit(fn, *args) for fn, args in tasks]
+                for future in as_completed(futures):
+                    try:
+                        cand = future.result()
+                    except Exception:
+                        continue
+                    _consume_candidate(cand)
 
         ranked = self._rank_candidates(candidates, n_candidates)
         self.generated.extend(ranked)

@@ -25,6 +25,24 @@ from mace.tools.scatter import scatter_sum
 AlchemicalPair = namedtuple("AlchemicalPair", ["atom_index", "atomic_number"])
 
 
+def _pair_to_indices(pair: tuple[int, int] | AlchemicalPair | object) -> tuple[int, int]:
+    if hasattr(pair, "atom_index") and hasattr(pair, "atomic_number"):
+        idx_raw = pair.atom_index
+        z_raw = pair.atomic_number
+    else:
+        if not isinstance(pair, Sequence) or len(pair) != 2:
+            raise TypeError("alchemical pair must be a 2-tuple/list or AlchemicalPair")
+        idx_raw = pair[0]
+        z_raw = pair[1]
+    if isinstance(idx_raw, bool) or type(idx_raw).__name__ in {"bool", "bool_"}:
+        raise ValueError("atom_index must be integer-valued, not boolean")
+    if isinstance(z_raw, bool) or type(z_raw).__name__ in {"bool", "bool_"}:
+        raise ValueError("atomic_number must be integer-valued, not boolean")
+    idx = int(idx_raw)
+    z = int(z_raw)
+    return idx, z
+
+
 class AlchemyManager(torch.nn.Module):
     """
     Manages alchemical weights and constructs the alchemical graph for MACE.
@@ -52,9 +70,25 @@ class AlchemyManager(torch.nn.Module):
             r_max: Cutoff radius for graph construction.
         """
         super().__init__()
+        if len(atoms) == 0:
+            raise ValueError("atoms must contain at least one site")
+        cutoff = float(r_max)
+        if not np.isfinite(cutoff) or cutoff <= 0.0:
+            raise ValueError(f"r_max must be finite and > 0, got {r_max!r}")
+        if alchemical_weights.ndim != 1:
+            raise ValueError("alchemical_weights must be a 1D tensor")
+        if len(alchemical_pairs) == 0:
+            raise ValueError("alchemical_pairs must not be empty")
+        if alchemical_weights.numel() != len(alchemical_pairs):
+            raise ValueError(
+                "alchemical_weights length must match number of alchemical groups: "
+                f"{alchemical_weights.numel()} != {len(alchemical_pairs)}"
+            )
+        if not torch.isfinite(alchemical_weights).all():
+            raise ValueError("alchemical_weights must be finite")
         self.alchemical_weights = torch.nn.Parameter(alchemical_weights)
         self.alchemical_pairs = alchemical_pairs
-        self.r_max = r_max
+        self.r_max = cutoff
 
         # --- Process Alchemical Indices ---
         # 1-based indexing for alchemical weights (0 is reserved for non-alchemical/fixed atoms)
@@ -62,15 +96,16 @@ class AlchemyManager(torch.nn.Module):
         alchemical_atomic_numbers = []
         alchemical_weight_indices = []
 
+        num_atoms = len(atoms)
         for weight_idx, pairs in enumerate(alchemical_pairs):
+            if len(pairs) == 0:
+                raise ValueError(f"alchemical_pairs[{weight_idx}] must not be empty")
             for pair in pairs:
-                # Support both simple tuples (index, Z) and namedtuples/objects
-                if hasattr(pair, "atom_index"):
-                    idx = pair.atom_index
-                    z = pair.atomic_number
-                else:
-                    idx = pair[0]
-                    z = pair[1]
+                idx, z = _pair_to_indices(pair)
+                if idx < 0 or idx >= num_atoms:
+                    raise ValueError(f"Invalid atom index {idx}; valid range is [0, {num_atoms - 1}]")
+                if z <= 0:
+                    raise ValueError(f"Invalid atomic number {z}; must be positive")
 
                 alchemical_atom_indices.append(idx)
                 alchemical_atomic_numbers.append(z)
@@ -78,9 +113,8 @@ class AlchemyManager(torch.nn.Module):
                 alchemical_weight_indices.append(weight_idx + 1)
 
         # Identify fixed (non-alchemical) atoms
-        non_alchemical_atom_indices = [
-            i for i in range(len(atoms)) if i not in alchemical_atom_indices
-        ]
+        alchemical_atom_index_set = set(alchemical_atom_indices)
+        non_alchemical_atom_indices = [i for i in range(len(atoms)) if i not in alchemical_atom_index_set]
         non_alchemical_atomic_numbers = atoms.get_atomic_numbers()[
             non_alchemical_atom_indices
         ].tolist()

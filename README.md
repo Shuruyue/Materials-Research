@@ -22,13 +22,12 @@ See:
 python -m venv .venv
 .venv\Scripts\activate
 
-pip install -r requirements.txt
-pip install -e .
+pip install -r requirements.txt  # Base editable install
 
-# Optional profiles
-# pip install -r requirements-dev.txt
-# pip install -r requirements-benchmark.txt
-# pip install -r requirements-full.txt
+# Optional profiles (run one of these instead of the base command when needed)
+# pip install -r requirements-dev.txt        # lint + test + notebooks
+# pip install -r requirements-benchmark.txt  # benchmark toolchain
+# pip install -r requirements-full.txt       # stable optional profiles
 
 python scripts/dev_tools/check_env.py
 ```

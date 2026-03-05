@@ -191,3 +191,90 @@ class TestPropertyEstimator:
         )
         assert abs(simple_adapt - simple_const) < 1e-8
         assert complex_adapt > simple_adapt
+
+    def test_invalid_fusion_hyperparameters_are_sanitized(self):
+        est = PropertyEstimator()
+        out = est.extract_all_properties(
+            _make_df(),
+            bandgap_sigma_hse=float("nan"),
+            bandgap_sigma_mbj=float("-inf"),
+            bandgap_sigma_opt=-1.0,
+            bandgap_sigma_floor=float("nan"),
+            bandgap_sigma_adaptive_slope=float("inf"),
+            bandgap_fusion_correlation=float("nan"),
+            conductivity_temperature=0.0,
+            avg_atomic_mass_fallback_amu=float("nan"),
+        )
+        row1 = out.loc[out["jid"] == "J1"].iloc[0]
+        assert np.isfinite(float(row1["bandgap_fused_std"]))
+        assert np.isfinite(float(row1["avg_atomic_mass_amu_est"]))
+        assert 0.0 <= float(row1["p_metal"]) <= 1.0
+
+    def test_precision_fusion_ignores_invalid_sigma_entries(self):
+        values = np.array(
+            [
+                [1.0, 2.0, np.nan],
+                [1.0, 2.0, 3.0],
+            ],
+            dtype=float,
+        )
+        sigmas = np.array(
+            [
+                [0.1, np.nan, 0.2],
+                [0.1, -0.5, 0.2],
+            ],
+            dtype=float,
+        )
+        mu, std, count = PropertyEstimator._precision_fusion(
+            values,
+            sigmas,
+            correlation=0.5,
+        )
+        assert count.tolist() == [1.0, 2.0]
+        assert np.isfinite(mu).all()
+        assert np.isfinite(std).all()
+        assert abs(float(mu[0]) - 1.0) < 1e-8
+
+    def test_search_invalid_max_results_falls_back(self):
+        est = PropertyEstimator()
+        out = est.extract_all_properties(_make_df())
+        filt = est.search(out, criteria={}, max_results=-3)
+        assert len(filt) == len(out)
+
+    def test_search_rejects_invalid_criteria_payload(self):
+        est = PropertyEstimator()
+        out = est.extract_all_properties(_make_df())
+        try:
+            est.search(out, criteria="not-a-dict")  # type: ignore[arg-type]
+        except ValueError as exc:
+            assert "criteria" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for non-dict criteria")
+
+    def test_search_rejects_invalid_range_tuple(self):
+        est = PropertyEstimator()
+        out = est.extract_all_properties(_make_df())
+        try:
+            est.search(out, criteria={"bandgap_fused": (0.1,)})  # type: ignore[arg-type]
+        except ValueError as exc:
+            assert "tuple" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for malformed range tuple")
+
+    def test_search_rejects_descending_range(self):
+        est = PropertyEstimator()
+        out = est.extract_all_properties(_make_df())
+        try:
+            est.search(out, criteria={"bandgap_fused": (1.0, 0.1)})
+        except ValueError as exc:
+            assert "lo <= hi" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for descending range")
+
+    def test_hardness_is_nan_for_non_physical_shear_modulus(self):
+        est = PropertyEstimator()
+        df = _make_df().copy()
+        df.loc[df["jid"] == "J1", "shear_modulus_gv"] = -10.0
+        out = est.extract_all_properties(df)
+        row = out.loc[out["jid"] == "J1"].iloc[0]
+        assert np.isnan(float(row["hardness_chen"]))

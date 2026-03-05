@@ -196,3 +196,75 @@ def test_compute_training_loss_supports_gaussian_nll_with_uq_head():
     target = torch.tensor([[0.4], [0.1]], dtype=torch.float32)
     loss = model.compute_training_loss(src, frac, target)
     assert torch.isfinite(loss)
+
+
+def test_invalid_numeric_hyperparameters_are_sanitized():
+    model = CompositionScreener(
+        d_model=64,
+        N=1,
+        heads=4,
+        simplex_blend=float("nan"),
+        escort_power=float("nan"),
+        clr_temperature=float("nan"),
+        ilr_temperature=float("nan"),
+        uncertainty_min_std=float("nan"),
+        ensemble_size=0,
+        mc_dropout_samples=-5,
+    )
+    assert 0.0 <= model.simplex_blend <= 1.0
+    assert model.escort_power > 0.0
+    assert model.clr_temperature > 0.0
+    assert model.ilr_temperature > 0.0
+    assert model.uncertainty_min_std >= 0.0
+    assert model.ensemble_size >= 1
+    assert model.mc_dropout_samples >= 0
+
+
+def test_compute_training_loss_ignores_non_finite_targets():
+    torch.manual_seed(17)
+    model = CompositionScreener(out_dims=1, d_model=64, N=1, heads=4, dropout=0.0, uncertainty_head_mode="none")
+    model.eval()
+    src = torch.tensor([[13, 8, 0], [26, 8, 0]], dtype=torch.long)
+    frac = torch.tensor([[0.5, 0.5, 0.0], [0.8, 0.2, 0.0]], dtype=torch.float32)
+    target = torch.tensor([[0.2], [float("nan")]], dtype=torch.float32)
+
+    loss = model.compute_training_loss(src, frac, target)
+    pred = model(src, frac)
+    expected = torch.square(pred[0:1] - target[0:1]).mean()
+    assert torch.allclose(loss, expected, atol=1e-7)
+
+
+def test_integer_controls_reject_bool_and_fractional_values():
+    model = CompositionScreener(
+        out_dims=True,
+        d_model=63.5,  # type: ignore[arg-type]
+        N=1,
+        heads=4,
+        dropout=0.0,
+        uncertainty_head_mode="log_std",
+        ensemble_size=True,
+        mc_dropout_samples=3.2,  # type: ignore[arg-type]
+    )
+    assert model.out_dims == 1
+    assert model.d_model == 512
+    assert model.ensemble_size == 1
+    assert model.mc_dropout_samples == 0
+
+
+def test_predict_distribution_sanitizes_non_integral_mc_samples():
+    torch.manual_seed(19)
+    model = CompositionScreener(
+        out_dims=1,
+        d_model=64,
+        N=1,
+        heads=4,
+        dropout=0.0,
+        uncertainty_head_mode="log_std",
+        mc_dropout_samples=0,
+    )
+    model.eval()
+    src = torch.tensor([[14, 8, 0]], dtype=torch.long)
+    frac = torch.tensor([[0.7, 0.3, 0.0]], dtype=torch.float32)
+    out = model.predict_distribution(src, frac, mc_samples=3.5)
+    assert "mc_epistemic_std" not in out
+    assert "mc_samples" not in out

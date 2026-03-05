@@ -18,6 +18,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import math
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -65,9 +66,13 @@ def _chemical_system(formula: str) -> str:
 def _normalized_ratios(
     ratios: tuple[float, float, float],
 ) -> np.ndarray:
+    if any(isinstance(value, bool) for value in ratios):
+        raise ValueError(f"ratios must be numeric and non-boolean, got {ratios}")
     arr = np.asarray(ratios, dtype=float)
     if arr.shape != (3,):
         raise ValueError(f"ratios must have length 3, got {ratios}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"ratios must be finite numbers, got {ratios}")
     if np.any(arr < 0):
         raise ValueError(f"ratios must be non-negative, got {ratios}")
     s = float(arr.sum())
@@ -119,9 +124,55 @@ def _require_parallel_lengths(
         )
 
 
-def _require_unique_ids(sample_ids: list[str]):
-    if len(set(sample_ids)) != len(sample_ids):
-        raise ValueError("sample_ids must be unique for deterministic split assignment")
+def _normalize_and_validate_sample_ids(sample_ids: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for i, raw_id in enumerate(sample_ids):
+        if isinstance(raw_id, bool) or type(raw_id).__name__ in {"bool", "bool_"}:
+            raise ValueError(f"sample_ids[{i}] must be a non-boolean identifier")
+        sample_id = str(raw_id).strip()
+        if not sample_id:
+            raise ValueError(f"sample_ids[{i}] must be non-empty after string normalization")
+        if sample_id in seen:
+            raise ValueError("sample_ids must be unique for deterministic split assignment")
+        seen.add(sample_id)
+        normalized.append(sample_id)
+    return normalized
+
+
+def _coerce_non_negative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}:
+        raise ValueError(f"{name} must be an integer, got boolean")
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if not math.isfinite(scalar):
+        raise ValueError(f"{name} must be finite")
+    rounded = round(scalar)
+    if abs(scalar - rounded) > 1e-9:
+        raise ValueError(f"{name} must be integer-valued")
+    out = int(rounded)
+    if out < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return out
+
+
+def _normalize_formula_value(value: Any) -> str:
+    if value is None or isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}:
+        return "unknown"
+    formula = str(value).strip()
+    return formula if formula else "unknown"
+
+
+def _normalize_spacegroup_value(value: Any) -> str:
+    if value is None or isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}:
+        return "unknown"
+    raw = str(value).strip()
+    if not raw:
+        return "unknown"
+    parsed = _spacegroup_number(raw)
+    return str(parsed) if parsed is not None else raw
 
 
 def _partition_objective(
@@ -277,6 +328,8 @@ def _chemical_system_similarity_matrix(groups: list[str]) -> np.ndarray:
 def _spacegroup_number(value: str | int | None) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
     try:
         out = int(value)
     except (TypeError, ValueError):
@@ -323,6 +376,37 @@ def _prototype_similarity_matrix(groups: list[str]) -> np.ndarray:
             sim[i, j] = s
             sim[j, i] = s
     return sim
+
+
+def _sanitize_similarity_matrix(
+    similarity_matrix: np.ndarray | None,
+    *,
+    n_groups: int,
+) -> np.ndarray | None:
+    """Validate and sanitize a similarity matrix to [0, 1] symmetric form."""
+    if similarity_matrix is None:
+        return None
+    if n_groups <= 0:
+        return None
+    arr = np.asarray(similarity_matrix, dtype=float)
+    if arr.shape != (n_groups, n_groups):
+        return None
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    arr = np.clip(arr, 0.0, 1.0)
+    arr = 0.5 * (arr + arr.T)
+    np.fill_diagonal(arr, 0.0)
+    return arr
+
+
+def _normalize_search_hyperparams(
+    *,
+    n_restarts: int,
+    local_moves: int,
+) -> tuple[int, int]:
+    """Guard split optimizer knobs against invalid values."""
+    restarts = max(_coerce_non_negative_int(n_restarts, "n_restarts"), 1)
+    moves = _coerce_non_negative_int(local_moves, "local_moves")
+    return restarts, moves
 
 
 def _balanced_group_split(  # noqa: C901
@@ -391,6 +475,16 @@ def _balanced_group_split(  # noqa: C901
             mean_sq = global_label_sumsq / global_label_count
             var = max(mean_sq - global_label_mean * global_label_mean, 1e-12)
             global_label_scale = max(float(np.sqrt(var)), 1e-6)
+
+    restarts, local_moves = _normalize_search_hyperparams(
+        n_restarts=n_restarts,
+        local_moves=local_moves,
+    )
+
+    similarity_matrix = _sanitize_similarity_matrix(
+        similarity_matrix,
+        n_groups=n_groups,
+    )
 
     # Optional cross-split similarity leakage term.
     leakage_enabled = (
@@ -690,7 +784,6 @@ def _balanced_group_split(  # noqa: C901
     base_rng = np.random.RandomState(seed)
     best_assignment: dict[str, int] | None = None
     best_score = float("inf")
-    restarts = max(int(n_restarts), 1)
     for _ in range(restarts):
         local_seed = int(base_rng.randint(0, 2**31 - 1))
         local_rng = np.random.RandomState(local_seed)
@@ -791,7 +884,7 @@ def iid_split(
     dict
         ``{"train": [...], "val": [...], "test": [...]}``
     """
-    _require_unique_ids(sample_ids)
+    sample_ids = _normalize_and_validate_sample_ids(sample_ids)
     n_train, n_val, _ = _deterministic_split_counts(len(sample_ids), ratios)
 
     rng = np.random.RandomState(seed)
@@ -855,7 +948,7 @@ def compositional_split(
     dict
         ``{"train": [...], "val": [...], "test": [...]}``
     """
-    _require_unique_ids(sample_ids)
+    sample_ids = _normalize_and_validate_sample_ids(sample_ids)
     _require_parallel_lengths(sample_ids, formulas, "formulas")
     if targets is not None:
         _require_parallel_lengths(sample_ids, targets, "targets")
@@ -866,10 +959,12 @@ def compositional_split(
     system_map: dict[str, list[str]] = defaultdict(list)
     system_to_indices: dict[str, list[int]] = defaultdict(list)
     for sid, formula in zip(sample_ids, formulas):
-        system = _chemical_system(formula) if formula else "unknown"
+        normalized_formula = _normalize_formula_value(formula)
+        system = _chemical_system(normalized_formula) if normalized_formula != "unknown" else "unknown"
         system_map[system].append(sid)
     for idx, formula in enumerate(formulas):
-        system = _chemical_system(formula) if formula else "unknown"
+        normalized_formula = _normalize_formula_value(formula)
+        system = _chemical_system(normalized_formula) if normalized_formula != "unknown" else "unknown"
         system_to_indices[system].append(idx)
 
     label_stats = None
@@ -943,7 +1038,7 @@ def prototype_split(
     dict
         ``{"train": [...], "val": [...], "test": [...]}``
     """
-    _require_unique_ids(sample_ids)
+    sample_ids = _normalize_and_validate_sample_ids(sample_ids)
     _require_parallel_lengths(sample_ids, spacegroups, "spacegroups")
     if targets is not None:
         _require_parallel_lengths(sample_ids, targets, "targets")
@@ -954,10 +1049,10 @@ def prototype_split(
     sg_map: dict[str, list[str]] = defaultdict(list)
     sg_to_indices: dict[str, list[int]] = defaultdict(list)
     for sid, sg in zip(sample_ids, spacegroups):
-        sg_key = str(sg) if sg else "unknown"
+        sg_key = _normalize_spacegroup_value(sg)
         sg_map[sg_key].append(sid)
     for idx, sg in enumerate(spacegroups):
-        sg_key = str(sg) if sg else "unknown"
+        sg_key = _normalize_spacegroup_value(sg)
         sg_to_indices[sg_key].append(idx)
 
     label_stats = None
@@ -999,11 +1094,12 @@ def build_assignment_records(
     rows: list[dict[str, str]] = []
     for split in ("train", "val", "test"):
         for sample_id in sorted(splits.get(split, [])):
+            sid = str(sample_id).strip()
             rows.append(
                 {
-                    "sample_id": str(sample_id),
+                    "sample_id": sid,
                     "split": split,
-                    "group": str(group_by_id.get(sample_id, "")) if group_by_id else "",
+                    "group": str(group_by_id.get(sid, "")) if group_by_id else "",
                 }
             )
     return rows
@@ -1039,11 +1135,15 @@ def generate_manifest(
     extra_metadata: dict[str, Any] | None = None,
 ) -> SplitManifestV2:
     """Build a split manifest from computed splits."""
+    strategy_key = str(strategy).strip().lower()
+    if strategy_key not in {"iid", "compositional", "prototype"}:
+        raise ValueError(f"Unknown split strategy: {strategy!r}")
+
     if assignment_rows is None:
         assignment_rows = build_assignment_records(splits, group_by_id=group_by_id)
 
     manifest = SplitManifestV2(
-        strategy=strategy,
+        strategy=strategy_key,
         seed=seed,
         split_id=split_id,
         dataset_fingerprint=dataset_fingerprint,
@@ -1051,7 +1151,11 @@ def generate_manifest(
         assignment_hash=_assignment_hash(assignment_rows),
     )
 
-    for name, ids in splits.items():
+    ordered_split_names = list(_SPLIT_NAMES) + sorted(
+        name for name in splits.keys() if name not in _SPLIT_NAMES
+    )
+    for name in ordered_split_names:
+        ids = [str(sample_id).strip() for sample_id in splits.get(name, [])]
         group_count = 0
         if group_by_id:
             group_count = len({group_by_id.get(sample_id, "") for sample_id in ids})

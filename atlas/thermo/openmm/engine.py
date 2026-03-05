@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+import logging
+import math
+from pathlib import Path
 from typing import Any
 
 import ase
+import numpy as np
 import openmm
 import openmm.app as app
 import openmm.unit as unit
@@ -9,164 +15,235 @@ from atlas.thermo.openmm.reporters import PymatgenTrajectoryReporter
 from atlas.utils.registry import RELAXERS
 from atlas.utils.structure import ase_to_pymatgen
 
+logger = logging.getLogger(__name__)
+
+_KJ_MOL_PER_EV = 96.48533212331002
+
+
+def _is_boolean_like(value: Any) -> bool:
+    return isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}
+
+
+def _is_periodic(atoms: ase.Atoms) -> bool:
+    pbc = np.asarray(atoms.pbc, dtype=bool).reshape(-1)
+    return bool(np.any(pbc))
+
+
+def _coerce_positive_int(value: Any, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+    if isinstance(value, (int, np.integer)):
+        number = int(value)
+    elif isinstance(value, (float, np.floating)):
+        number_f = float(value)
+        if not math.isfinite(number_f) or not number_f.is_integer():
+            raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        number = int(number_f)
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be a positive integer, got {value!r}") from exc
+
+    if number <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return number
+
 
 @RELAXERS.register("atomate2_openmm")
 class OpenMMEngine:
     """
-    Wrapper for OpenMM to perform molecular dynamics simulations.
-    Designed to integrate with ATLAS MACE potentials via openmm-ml/torch.
+    OpenMM wrapper for molecular dynamics simulations.
+
+    Supports MACE via `openmm-ml` (`forcefield_path='mace'`) and a built-in LJ fallback.
     """
 
-    def __init__(self,
-                 temperature: float = 300.0,
-                 friction: float = 1.0,
-                 step_size: float = 1.0):
-        """
-        Initialize the OpenMM Engine.
+    def __init__(
+        self,
+        temperature: float = 300.0,
+        friction: float = 1.0,
+        step_size: float = 1.0,
+    ):
+        if not math.isfinite(float(temperature)) or float(temperature) <= 0:
+            raise ValueError(f"temperature must be finite and > 0, got {temperature!r}")
+        if not math.isfinite(float(friction)) or float(friction) < 0:
+            raise ValueError(f"friction must be finite and >= 0, got {friction!r}")
+        if not math.isfinite(float(step_size)) or float(step_size) <= 0:
+            raise ValueError(f"step_size must be finite and > 0, got {step_size!r}")
 
-        Args:
-            temperature (float): Temperature in Kelvin.
-            friction (float): Friction coefficient in 1/ps.
-            step_size (float): Time step in fs.
-        """
-        self.temperature = temperature * unit.kelvin
-        self.friction = friction / unit.picosecond
-        self.step_size = step_size * unit.femtoseconds
+        self.temperature = float(temperature) * unit.kelvin
+        self.friction = float(friction) / unit.picosecond
+        self.step_size = float(step_size) * unit.femtoseconds
+
+        self.atoms: ase.Atoms | None = None
+        self.system: openmm.System | None = None
+        self.integrator: openmm.Integrator | None = None
         self.simulation: app.Simulation | None = None
 
-    def setup_system(self, atoms: ase.Atoms, forcefield_path: str | None = None):
-        """
-        Setup OpenMM System from ASE Atoms.
+    def _set_periodic_box(self, topology: app.Topology, atoms: ase.Atoms) -> tuple[Any, Any, Any] | None:
+        pbc = np.asarray(atoms.pbc, dtype=bool).reshape(-1)
+        if not bool(np.any(pbc)):
+            return None
+        if not bool(np.all(pbc)):
+            raise ValueError(
+                "OpenMM engine requires either fully periodic (x/y/z) or non-periodic boundary conditions"
+            )
 
-        Args:
-            atoms (ase.Atoms): Structure to simulate.
-            forcefield_path (str): Path to forcefield XML (if using classical FF).
-                                   If None, uses a simple Lennard-Jones potential for testing.
-        """
-        self.atoms = atoms
+        cell = np.asarray(atoms.get_cell(), dtype=float)
+        if cell.shape != (3, 3):
+            raise ValueError(f"Expected 3x3 cell matrix for periodic system, got {cell.shape}")
 
-        # Convert ASE to OpenMM Topology
+        vecs_nm = tuple(openmm.Vec3(*map(float, row / 10.0)) for row in cell)
+
+        if hasattr(topology, "setPeriodicBoxVectors"):
+            topology.setPeriodicBoxVectors(vecs_nm)
+        else:  # pragma: no cover - legacy OpenMM compatibility
+            lengths_nm = np.asarray(atoms.get_cell().lengths(), dtype=float) / 10.0
+            topology.setUnitCellDimensions(unit.Quantity(lengths_nm.tolist(), unit.nanometer))
+
+        return vecs_nm
+
+    def _build_system(self, topology: app.Topology, atoms: ase.Atoms, forcefield_path: str | None) -> openmm.System:
+        ff_name = str(forcefield_path).strip().lower() if forcefield_path is not None else ""
+
+        if ff_name == "mace":
+            try:
+                from openmmml import MLPotential
+
+                potential = MLPotential("mace-mpa-0-medium")
+                system = potential.createSystem(topology)
+                logger.info("Attached MACE potential via openmm-ml.")
+                return system
+            except Exception as exc:  # pragma: no cover - optional dependency path
+                logger.warning("Failed to initialize MACE potential. Falling back to LJ: %s", exc)
+
+        if forcefield_path and ff_name not in {"mace", "lj"}:
+            path = Path(forcefield_path).expanduser()
+            if not path.exists():
+                logger.warning("forcefield_path does not exist (%s). Falling back to LJ.", path)
+            else:
+                logger.warning(
+                    "Custom forcefield files are currently unsupported (%s). Falling back to LJ.",
+                    path,
+                )
+
+        system = openmm.System()
+        masses = np.asarray(atoms.get_masses(), dtype=float)
+        if masses.size != len(atoms):
+            raise ValueError("Failed to resolve ASE atomic masses")
+        for mass in masses:
+            if not math.isfinite(float(mass)) or float(mass) <= 0:
+                raise ValueError(f"Invalid atomic mass: {mass!r}")
+            system.addParticle(float(mass) * unit.dalton)
+
+        self._add_lj_force(system, atoms)
+        return system
+
+    def setup_system(self, atoms: ase.Atoms, forcefield_path: str | None = None) -> None:
+        """Setup OpenMM System from ASE Atoms."""
+        if atoms is None:
+            raise ValueError("atoms must not be None")
+        if len(atoms) == 0:
+            raise ValueError("atoms must contain at least one site")
+
+        self.atoms = atoms.copy()
+
         topology = app.Topology()
         chain = topology.addChain()
         residue = topology.addResidue("RES", chain)
 
-        # Box vectors
-        if atoms.pbc.any():
-            box = atoms.get_cell()
-            a = box[0] * unit.angstrom
-            b = box[1] * unit.angstrom
-            c = box[2] * unit.angstrom
+        vecs_nm = self._set_periodic_box(topology, self.atoms)
 
-            # Set on Topology (for createSystem)
-            topology.setUnitCellDimensions(unit.Quantity([a.value_in_unit(unit.nanometer)[0],
-                                                          b.value_in_unit(unit.nanometer)[1],
-                                                          c.value_in_unit(unit.nanometer)[2]], unit.nanometer))
+        for atom in self.atoms:
+            try:
+                element = app.Element.getBySymbol(str(atom.symbol))
+            except Exception as exc:
+                raise ValueError(f"Unsupported element symbol for OpenMM topology: {atom.symbol!r}") from exc
+            topology.addAtom(str(atom.symbol), element, residue)
 
-            # We also set on Manual System later if needed
-            vectors = (a, b, c)
-        else:
-            vectors = None
+        self.system = self._build_system(topology, self.atoms, forcefield_path)
 
-        # Add atoms to Topology
-        masses = atoms.get_masses()
-        for _i, atom in enumerate(atoms):
-            element = app.Element.getBySymbol(atom.symbol)
-            topology.addAtom(atom.symbol, element, residue)
+        if vecs_nm is not None:
+            self.system.setDefaultPeriodicBoxVectors(*vecs_nm)
 
-        # Logic to create System
-        self.system = None
-
-        if forcefield_path == "mace":
-             try:
-                 from openmmml import MLPotential
-                 # Download/Load MACE model
-                 # Use 'mace-mpa-0-medium' for Materials Project coverage (supports Cu, etc.)
-                 potential = MLPotential('mace-mpa-0-medium')
-                 # Create System from Topology
-                 self.system = potential.createSystem(topology)
-                 print("MACE Potential attached via openmm-ml.")
-             except ImportError:
-                  print("Warning: openmm-ml not found. Falling back to LJ.")
-             except Exception as e:
-                  print(f"Failed to initialize MACE: {e}. Falling back to LJ.")
-
-        if self.system is None:
-            # Manual creation (LJ fallback or manual FF)
-            self.system = openmm.System()
-            if vectors:
-                self.system.setDefaultPeriodicBoxVectors(*vectors)
-
-            # Add particles to System
-            for masse in masses:
-                self.system.addParticle(masse * unit.dalton)
-
-            if forcefield_path and forcefield_path != "mace":
-                 # Placeholder for XML loading
-                 pass
-            else:
-                 self._add_lj_force(atoms)
-
-        # Integrator
         self.integrator = openmm.LangevinMiddleIntegrator(
             self.temperature,
             self.friction,
-            self.step_size
+            self.step_size,
         )
-
-        # Simulation
         self.simulation = app.Simulation(topology, self.system, self.integrator)
 
-        # Set positions
-        positions = atoms.get_positions() * unit.angstrom
-        self.simulation.context.setPositions(positions)
-
-        # Set velocities
+        positions = np.asarray(self.atoms.get_positions(), dtype=float)
+        if not np.isfinite(positions).all():
+            raise ValueError("Non-finite atom coordinates provided")
+        self.simulation.context.setPositions(positions * unit.angstrom)
         self.simulation.context.setVelocitiesToTemperature(self.temperature)
 
-        print(f"OpenMM System Configured. Particles: {self.system.getNumParticles()}")
+        logger.info("OpenMM system configured. Particles: %d", self.system.getNumParticles())
 
-    def _add_lj_force(self, atoms):
-        """Add simple Lennard-Jones Force for testing (Argon-like)."""
+    def _add_lj_force(self, system: openmm.System, atoms: ase.Atoms) -> None:
+        """Add simple Lennard-Jones force for fallback/testing."""
         force = openmm.NonbondedForce()
-        force.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
-        # Reduce cutoff to 5.0 A to be safe with smaller boxes (min box >= 10.0 A)
-        force.setCutoffDistance(5.0 * unit.angstrom)
+        use_periodic = _is_periodic(atoms)
+        if use_periodic:
+            force.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
+            lengths = np.asarray(atoms.get_cell().lengths(), dtype=float)
+            if lengths.size != 3 or not np.isfinite(lengths).all():
+                raise ValueError("Periodic system requires finite 3-vector cell lengths")
+            min_box = float(np.min(lengths))
+            if min_box <= 0:
+                raise ValueError(f"Invalid periodic cell lengths: {lengths.tolist()!r}")
+
+            half_box = 0.5 * min_box
+            if half_box <= 0.25:
+                raise ValueError(
+                    "Periodic box too small for stable LJ cutoff; increase lattice vectors or use non-periodic setup"
+                )
+            # Keep cutoff strictly below half min box to satisfy minimum image convention.
+            cutoff_angstrom = min(5.0, max(0.5, 0.95 * half_box))
+            cutoff_angstrom = min(cutoff_angstrom, half_box - 1e-3)
+            force.setCutoffDistance(cutoff_angstrom * unit.angstrom)
+        else:
+            force.setNonbondedMethod(openmm.NonbondedForce.NoCutoff)
+
         for _ in range(len(atoms)):
-            # Charge, Sigma, Epsilon
             force.addParticle(0.0, 3.4 * unit.angstrom, 0.2 * unit.kilocalories_per_mole)
-        self.system.addForce(force)
+
+        system.addForce(force)
 
     def run(self, steps: int, trajectory_interval: int = 100) -> Any:
-        """
-        Run simulation for N steps and return a Pymatgen Trajectory.
-
-        Args:
-            steps (int): Number of steps to simulate.
-            trajectory_interval (int): How often to record a frame.
-        Returns:
-            trajectory (pymatgen.core.trajectory.Trajectory): Recorded MD trajectory.
-        """
-        if not self.simulation:
+        """Run simulation for N steps and return a pymatgen Trajectory."""
+        if self.simulation is None or self.atoms is None:
             raise RuntimeError("Simulation not initialized. Call setup_system first.")
 
-        print(f"Running OpenMM simulation for {steps} steps...")
+        n_steps = _coerce_positive_int(steps, "steps")
 
-        # Attach Atomate2-style Reporter
-        pmg_struct = ase_to_pymatgen(self.atoms)
-        pmg_reporter = PymatgenTrajectoryReporter(
-            reportInterval=trajectory_interval,
-            structure=pmg_struct
+        interval = _coerce_positive_int(trajectory_interval, "trajectory_interval")
+        interval = min(interval, n_steps)
+
+        logger.info("Running OpenMM simulation for %d steps (interval=%d)", n_steps, interval)
+
+        reporter = PymatgenTrajectoryReporter(
+            reportInterval=interval,
+            structure=ase_to_pymatgen(self.atoms),
         )
-        self.simulation.reporters.append(pmg_reporter)
 
-        # Run
-        self.simulation.step(steps)
+        self.simulation.reporters.append(reporter)
+        try:
+            self.simulation.step(n_steps)
+        finally:
+            with np.errstate(all="ignore"):
+                if self.simulation.reporters and self.simulation.reporters[-1] is reporter:
+                    self.simulation.reporters.pop()
+                else:
+                    self.simulation.reporters = [r for r in self.simulation.reporters if r is not reporter]
 
-        # Get final state summary
         state = self.simulation.context.getState(getEnergy=True)
-        pe_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
-        pot_energy_ev = pe_kj / 96.4853
-        print(f"Simulation Done. Final Potential Energy: {pot_energy_ev:.4f} eV")
+        pe_kj = float(state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole))
+        if not math.isfinite(pe_kj):
+            raise RuntimeError("Non-finite potential energy after simulation")
+        pot_energy_ev = pe_kj / _KJ_MOL_PER_EV
+        logger.info("Simulation completed. Final potential energy: %.4f eV", pot_energy_ev)
 
-        # Return elegant PyMatgen Trajectory
-        return pmg_reporter.get_trajectory()
+        return reporter.get_trajectory()

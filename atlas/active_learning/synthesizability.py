@@ -36,6 +36,57 @@ logger = logging.getLogger(__name__)
 _SOURCE_NODE = "__ELEMENTS__"
 
 
+def _coerce_int(value: object, default: int, *, min_value: int | None = None) -> int:
+    fallback = int(default)
+    if isinstance(value, bool):
+        out = fallback
+    else:
+        try:
+            numeric = float(value)
+        except Exception:
+            out = fallback
+        else:
+            if not math.isfinite(numeric) or not numeric.is_integer():
+                out = fallback
+            else:
+                out = int(numeric)
+    if min_value is not None:
+        out = max(int(min_value), out)
+    return int(out)
+
+
+def _coerce_float(
+    value: object,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if not math.isfinite(out):
+        out = float(default)
+    if min_value is not None:
+        out = max(float(min_value), out)
+    if max_value is not None:
+        out = min(float(max_value), out)
+    return float(out)
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in {"1", "true", "yes", "y", "on"}:
+            return True
+        if key in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
 @dataclass(slots=True, frozen=True)
 class _ReactionStep:
     src: str
@@ -96,23 +147,27 @@ class SynthesisPathfinder:
         energy_prior_temperature: float = 0.22,
     ):
         self.precursor_db = str(precursor_db)
-        self.max_pathways = max(1, int(max_pathways))
-        self.max_steps = max(2, int(max_steps))
-        self.max_subset_nodes = max(8, int(max_subset_nodes))
-        self.max_path_expansions = max(100, int(max_path_expansions))
-        self.max_rank_candidates = max(16, int(max_rank_candidates))
-        self.max_total_activation = float(max_total_activation)
-        self.max_total_delta_g = float(max_total_delta_g)
-        self.score_threshold = float(score_threshold)
-        self.risk_aversion = max(1e-6, float(risk_aversion))
-        self.allow_jump_edges = bool(allow_jump_edges)
-        self.use_adaptive_threshold = bool(use_adaptive_threshold)
-        self.threshold_min = float(threshold_min)
-        self.threshold_max = float(threshold_max)
-        self.threshold_uncertainty_weight = max(0.0, float(threshold_uncertainty_weight))
-        self.threshold_step_weight = max(0.0, float(threshold_step_weight))
-        self.energy_prior_center = float(energy_prior_center)
-        self.energy_prior_temperature = max(1e-6, float(energy_prior_temperature))
+        self.max_pathways = _coerce_int(max_pathways, 5, min_value=1)
+        self.max_steps = _coerce_int(max_steps, 6, min_value=2)
+        self.max_subset_nodes = _coerce_int(max_subset_nodes, 96, min_value=8)
+        self.max_path_expansions = _coerce_int(max_path_expansions, 120000, min_value=100)
+        self.max_rank_candidates = _coerce_int(max_rank_candidates, 2048, min_value=16)
+        self.max_total_activation = _coerce_float(max_total_activation, 2.6)
+        self.max_total_delta_g = _coerce_float(max_total_delta_g, 0.20)
+        self.score_threshold = _coerce_float(score_threshold, 0.18, min_value=0.0, max_value=1.0)
+        self.risk_aversion = _coerce_float(risk_aversion, 3.0, min_value=1e-6)
+        self.allow_jump_edges = _coerce_bool(allow_jump_edges, True)
+        self.use_adaptive_threshold = _coerce_bool(use_adaptive_threshold, True)
+        tmin = _coerce_float(threshold_min, 0.12, min_value=0.0, max_value=1.0)
+        tmax = _coerce_float(threshold_max, 0.55, min_value=0.0, max_value=1.0)
+        if tmin > tmax:
+            tmin, tmax = tmax, tmin
+        self.threshold_min = tmin
+        self.threshold_max = tmax
+        self.threshold_uncertainty_weight = _coerce_float(threshold_uncertainty_weight, 0.35, min_value=0.0)
+        self.threshold_step_weight = _coerce_float(threshold_step_weight, 0.03, min_value=0.0)
+        self.energy_prior_center = _coerce_float(energy_prior_center, -0.50)
+        self.energy_prior_temperature = _coerce_float(energy_prior_temperature, 0.22, min_value=1e-6)
 
         self.objective_weights = self._normalize_weights(objective_weights)
         self._route_library = self._load_route_library(self.precursor_db)
@@ -138,10 +193,7 @@ class SynthesisPathfinder:
         for key, value in weights.items():
             if key not in defaults:
                 continue
-            try:
-                out[key] = max(0.0, float(value))
-            except Exception:
-                continue
+            out[key] = _coerce_float(value, defaults[key], min_value=0.0)
 
         total = sum(out.values())
         if total <= 0:
@@ -230,17 +282,22 @@ class SynthesisPathfinder:
             return all_subsets
 
         selected: list[tuple[str, ...]] = []
+        selected_set: set[tuple[str, ...]] = set()
         wanted_sizes = [1, 2, max(1, n - 1), n]
         for size in wanted_sizes:
             for subset in combinations(elements, size):
+                if subset in selected_set:
+                    continue
                 selected.append(subset)
+                selected_set.add(subset)
                 if len(selected) >= max_subset_nodes:
                     return selected
 
         for subset in all_subsets:
-            if subset in selected:
+            if subset in selected_set:
                 continue
             selected.append(subset)
+            selected_set.add(subset)
             if len(selected) >= max_subset_nodes:
                 break
         return selected
@@ -674,6 +731,8 @@ class SynthesisPathfinder:
         # Monotone prior p(E): lower formation energy => higher prior probability.
         # 单调先验：形成能越低，先验可合成概率越高。
         x = (candidate_energy - self.energy_prior_center) / self.energy_prior_temperature
+        if not math.isfinite(x):
+            return 0.5
         # Numerically stable logistic: avoids overflow when |x| is large.
         # 数值稳定 sigmoid，避免极端能量下的 exp 溢出。
         if x >= 0:
@@ -683,7 +742,10 @@ class SynthesisPathfinder:
         return 1.0 / (1.0 + z)
 
     def _score_from_best(self, best: _PathCandidate, candidate_energy: float) -> float:
-        thermo, activation, steps, risk = best.objectives
+        thermo = self._safe_float(best.objectives[0], 0.0)
+        activation = self._safe_float(best.objectives[1], 0.0)
+        steps = self._safe_float(best.objectives[2], 0.0)
+        risk = self._safe_float(best.objectives[3], 0.0)
 
         stability_term = 1.0 - math.exp(-max(0.0, -thermo))
         kinetic_term = math.exp(-0.8 * max(0.0, activation))
@@ -692,6 +754,8 @@ class SynthesisPathfinder:
         prior = self._energy_prior(candidate_energy)
 
         score = stability_term * kinetic_term * complexity_term * risk_term * prior
+        if not math.isfinite(score):
+            return 0.0
         return float(max(0.0, min(1.0, score)))
 
     def _decision_threshold(self, best: _PathCandidate) -> float:

@@ -4,6 +4,7 @@ Model loading helpers for script-level inference utilities.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,9 +24,43 @@ _PHASE2_PRESETS = [
 ]
 
 
+def _coerce_checkpoint_path(checkpoint_path: str | Path) -> Path:
+    if isinstance(checkpoint_path, bool) or type(checkpoint_path).__name__ == "bool_":
+        raise ValueError("checkpoint_path must be a path-like string, not boolean")
+    path = Path(checkpoint_path).expanduser()
+    if not str(path).strip():
+        raise ValueError("checkpoint_path must be non-empty")
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
+    if path.is_dir():
+        raise IsADirectoryError(f"checkpoint_path must point to a file, got directory: {path}")
+    return path
+
+
+def _payload_values_compatible(lhs, rhs) -> bool:
+    if torch.is_tensor(lhs) and torch.is_tensor(rhs):
+        return lhs.shape == rhs.shape and lhs.dtype == rhs.dtype and torch.equal(lhs, rhs)
+    return lhs == rhs
+
+
+def _is_valid_scalar_normalizer(norm: TargetNormalizer) -> bool:
+    try:
+        mean = float(norm.mean)
+        std = float(norm.std)
+    except (TypeError, ValueError):
+        return False
+    return bool(math.isfinite(mean) and math.isfinite(std) and std > 0.0)
+
+
+def _is_valid_multi_normalizer(norm: MultiTargetNormalizer) -> bool:
+    return all(_is_valid_scalar_normalizer(sub_norm) for sub_norm in norm.normalizers.values())
+
+
 def _extract_tasks_from_state_dict(state_dict: dict) -> list[str]:
     tasks = set()
     for key in state_dict:
+        if not isinstance(key, str):
+            continue
         if key.startswith("heads."):
             parts = key.split(".")
             if len(parts) >= 2:
@@ -64,6 +99,8 @@ def _infer_cgcnn_config_from_state_dict(state_dict: dict, *, prefix: str = "enco
         raise KeyError(f"Missing {node_embed_key} in state_dict")
 
     node_embed = state_dict[node_embed_key]
+    if not isinstance(node_embed, torch.Tensor) or node_embed.ndim != 2:
+        raise ValueError(f"Invalid tensor layout for {node_embed_key}: expected 2D tensor.")
     hidden_dim = int(node_embed.shape[0])
     node_dim = int(node_embed.shape[1])
 
@@ -76,8 +113,11 @@ def _infer_cgcnn_config_from_state_dict(state_dict: dict, *, prefix: str = "enco
     n_conv = (max(conv_indices) + 1) if conv_indices else 3
 
     msg_weight_key = f"{prefix}convs.0.msg_mlp.0.weight"
-    if msg_weight_key in state_dict:
-        msg_in = int(state_dict[msg_weight_key].shape[1])
+    if msg_weight_key in state_dict and isinstance(state_dict[msg_weight_key], torch.Tensor):
+        msg_weight = state_dict[msg_weight_key]
+        if msg_weight.ndim < 2:
+            raise ValueError(f"Invalid tensor layout for {msg_weight_key}: expected rank>=2 tensor.")
+        msg_in = int(msg_weight.shape[1])
         edge_dim = max(msg_in - 2 * hidden_dim, 1)
     else:
         edge_dim = 20
@@ -229,45 +269,41 @@ def _normalize_state_dict_keys(state_dict: dict) -> dict:
     - DDP/DataParallel prefix: module.*
     - legacy phase2 CGCNN wrapper: encoder.cgcnn.* -> encoder.*
     """
-    normalized = dict(state_dict)
+    def canonical_key(key: str) -> str:
+        out = key
+        if out.startswith("module."):
+            out = out[len("module."):]
+        if out.startswith("encoder.cgcnn."):
+            out = "encoder." + out[len("encoder.cgcnn."):]
+        if out.startswith("cgcnn."):
+            out = out[len("cgcnn."):]
+        return out
 
-    if any(key.startswith("module.") for key in normalized):
-        normalized = {
-            (key[len("module."):] if key.startswith("module.") else key): value
-            for key, value in normalized.items()
-        }
-
-    if any(key.startswith("encoder.cgcnn.") for key in normalized):
-        normalized = {
-            (
-                "encoder." + key[len("encoder.cgcnn."):]
-                if key.startswith("encoder.cgcnn.")
-                else key
-            ): value
-            for key, value in normalized.items()
-        }
-
-    if any(key.startswith("cgcnn.") for key in normalized):
-        normalized = {
-            (
-                key[len("cgcnn."):]
-                if key.startswith("cgcnn.")
-                else key
-            ): value
-            for key, value in normalized.items()
-        }
-
+    normalized: dict = {}
+    for key, value in dict(state_dict).items():
+        key_str = str(key)
+        mapped = canonical_key(key_str)
+        if mapped in normalized:
+            if _payload_values_compatible(normalized[mapped], value):
+                continue
+            raise ValueError(
+                "Conflicting state_dict keys after normalization: "
+                f"{key_str!r} -> {mapped!r} collides with existing entry."
+            )
+        normalized[mapped] = value
     return normalized
 
 
 def _try_load_candidates(state_dict: dict, tasks: list[str]) -> MultiTaskGNN:
     # Try phase-2 equivariant presets first, then CGCNN multitask fallback.
+    errors: list[str] = []
     for preset in _PHASE2_PRESETS:
         try:
             model = _build_equivariant_multitask(tasks, preset)
             model.load_state_dict(state_dict, strict=True)
             return model
-        except Exception:
+        except (RuntimeError, KeyError, ValueError) as exc:
+            errors.append(f"equivariant[{preset['irreps_hidden']}]: {type(exc).__name__}")
             continue
 
     try:
@@ -275,13 +311,19 @@ def _try_load_candidates(state_dict: dict, tasks: list[str]) -> MultiTaskGNN:
         model = _build_m3gnet_multitask(tasks, m3_cfg)
         model.load_state_dict(state_dict, strict=True)
         return model
-    except Exception:
-        pass
+    except (RuntimeError, KeyError, ValueError) as exc:
+        errors.append(f"m3gnet: {type(exc).__name__}")
 
-    cgcnn_cfg = _infer_cgcnn_config_from_state_dict(state_dict)
-    model = _build_cgcnn_multitask(tasks, cfg=cgcnn_cfg)
-    model.load_state_dict(state_dict, strict=True)
-    return model
+    try:
+        cgcnn_cfg = _infer_cgcnn_config_from_state_dict(state_dict)
+        model = _build_cgcnn_multitask(tasks, cfg=cgcnn_cfg)
+        model.load_state_dict(state_dict, strict=True)
+        return model
+    except (RuntimeError, KeyError, ValueError) as exc:
+        errors.append(f"cgcnn: {type(exc).__name__}")
+
+    details = "; ".join(errors[-5:]) if errors else "no candidate model loaders succeeded"
+    raise ValueError(f"Unable to load checkpoint with known Phase-2 model candidates: {details}")
 
 
 def _load_normalizer(payload: dict) -> MultiTargetNormalizer | None:
@@ -289,8 +331,13 @@ def _load_normalizer(payload: dict) -> MultiTargetNormalizer | None:
     if not isinstance(state, dict):
         return None
     norm = MultiTargetNormalizer()
-    norm.load_state_dict(state)
-    return norm
+    try:
+        norm.load_state_dict(state)
+        if _is_valid_multi_normalizer(norm):
+            return norm
+        return None
+    except Exception:
+        return None
 
 
 def _load_scalar_normalizer(payload: dict) -> TargetNormalizer | None:
@@ -298,8 +345,13 @@ def _load_scalar_normalizer(payload: dict) -> TargetNormalizer | None:
     if not isinstance(state, dict):
         return None
     norm = TargetNormalizer()
-    norm.load_state_dict(state)
-    return norm
+    try:
+        norm.load_state_dict(state)
+        if _is_valid_scalar_normalizer(norm):
+            return norm
+        return None
+    except Exception:
+        return None
 
 
 def load_phase2_model(checkpoint_path: str | Path, device: str | torch.device = "cpu"):
@@ -309,12 +361,16 @@ def load_phase2_model(checkpoint_path: str | Path, device: str | torch.device = 
     Returns:
         tuple(model, normalizer_or_none)
     """
-    ckpt_path = Path(checkpoint_path)
+    ckpt_path = _coerce_checkpoint_path(checkpoint_path)
     payload = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Unsupported checkpoint format: {ckpt_path}")
     if "model_state_dict" not in payload:
         raise KeyError(f"{ckpt_path} does not contain 'model_state_dict'")
 
     state_dict = payload["model_state_dict"]
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{ckpt_path} has invalid 'model_state_dict' payload.")
     state_dict = _normalize_state_dict_keys(state_dict)
     tasks = _extract_tasks_from_state_dict(state_dict)
     model = _try_load_candidates(state_dict, tasks)
@@ -332,7 +388,7 @@ def load_phase1_model(checkpoint_path: str | Path, device: str | torch.device = 
     Returns:
         tuple(model, normalizer_or_none)
     """
-    ckpt_path = Path(checkpoint_path)
+    ckpt_path = _coerce_checkpoint_path(checkpoint_path)
     payload = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(payload, dict) and "model_state_dict" in payload:
         state_dict = payload["model_state_dict"]
@@ -342,6 +398,8 @@ def load_phase1_model(checkpoint_path: str | Path, device: str | torch.device = 
         normalizer = None
     else:
         raise ValueError(f"Unsupported checkpoint format: {ckpt_path}")
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{ckpt_path} has invalid 'model_state_dict' payload.")
 
     state_dict = _normalize_state_dict_keys(state_dict)
     cfg = _infer_cgcnn_config_from_state_dict(state_dict, prefix="")

@@ -1,6 +1,7 @@
 """Tests for atlas.data.alloy_estimator module."""
 
 
+import numpy as np
 import pytest
 
 
@@ -134,6 +135,10 @@ def test_unknown_preset_raises():
     from atlas.data.alloy_estimator import AlloyEstimator
     with pytest.raises(ValueError, match="Unknown preset"):
         AlloyEstimator.from_preset("INVALID_ALLOY")
+    with pytest.raises(ValueError, match="non-empty string"):
+        AlloyEstimator.from_preset("")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-empty string"):
+        AlloyEstimator.from_preset(None)  # type: ignore[arg-type]
 
 
 def test_custom_alloy():
@@ -152,6 +157,30 @@ def test_custom_alloy():
     assert 7.29 < props["density_g_cm3"] < 8.96
 
 
+def test_custom_alloy_requires_non_empty_phase_list():
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    with pytest.raises(ValueError, match="non-empty list"):
+        AlloyEstimator.custom("empty", [])
+
+
+def test_custom_alloy_rejects_non_finite_or_bool_properties():
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    with pytest.raises(ValueError, match="finite real number"):
+        AlloyEstimator.custom(
+            "bad_prop",
+            [
+                {
+                    "name": "Cu",
+                    "formula": "Cu",
+                    "weight_fraction": 1.0,
+                    "properties": {"density_g_cm3": True},
+                }
+            ],
+        )
+
+
 def test_convert_wt_to_vol():
     """Weight-to-volume conversion should produce valid fractions."""
     from atlas.data.alloy_estimator import AlloyEstimator, AlloyPhase
@@ -168,6 +197,92 @@ def test_convert_wt_to_vol():
     assert phases[1].volume_fraction > phases[0].volume_fraction
     total = sum(p.volume_fraction for p in phases)
     assert abs(total - 1.0) < 0.01
+
+
+def test_convert_wt_to_vol_sanitizes_non_finite_inputs():
+    """Non-finite weights/densities should not poison volume-fraction normalization."""
+    from atlas.data.alloy_estimator import AlloyEstimator, AlloyPhase
+
+    phases = [
+        AlloyPhase(
+            "A",
+            "A",
+            weight_fraction=float("nan"),
+            properties={"density_g_cm3": float("inf")},
+        ),
+        AlloyPhase(
+            "B",
+            "B",
+            weight_fraction=1.0,
+            properties={"density_g_cm3": float("nan")},
+        ),
+        AlloyPhase(
+            "C",
+            "C",
+            weight_fraction=2.0,
+            properties={"density_g_cm3": 8.0},
+        ),
+    ]
+    AlloyEstimator.convert_wt_to_vol(phases)
+    vf = np.asarray([p.volume_fraction for p in phases], dtype=float)
+    assert np.isfinite(vf).all()
+    assert np.isclose(float(vf.sum()), 1.0, atol=1e-8)
+
+
+def test_custom_alloy_sanitizes_non_finite_weights():
+    """Constructor should normalize away non-finite/negative weights safely."""
+    from atlas.data.alloy_estimator import AlloyEstimator
+
+    est = AlloyEstimator.custom(
+        "dirty_weights",
+        [
+            {
+                "name": "Cu",
+                "formula": "Cu",
+                "weight_fraction": float("nan"),
+                "properties": {
+                    "density_g_cm3": 8.96,
+                    "bulk_modulus_GPa": 137,
+                    "shear_modulus_GPa": 48.3,
+                    "thermal_conductivity_W_mK": 401,
+                    "thermal_expansion_1e6_K": 16.5,
+                    "melting_point_K": 1358,
+                },
+            },
+            {
+                "name": "Sn",
+                "formula": "Sn",
+                "weight_fraction": 1.0,
+                "properties": {
+                    "density_g_cm3": 7.29,
+                    "bulk_modulus_GPa": 56.3,
+                    "shear_modulus_GPa": 18.4,
+                    "thermal_conductivity_W_mK": 66,
+                    "thermal_expansion_1e6_K": 22,
+                    "melting_point_K": 505,
+                },
+            },
+            {
+                "name": "Ag",
+                "formula": "Ag",
+                "weight_fraction": -5.0,
+                "properties": {
+                    "density_g_cm3": 10.49,
+                    "bulk_modulus_GPa": 100,
+                    "shear_modulus_GPa": 30,
+                    "thermal_conductivity_W_mK": 429,
+                    "thermal_expansion_1e6_K": 18.9,
+                    "melting_point_K": 1234,
+                },
+            },
+        ],
+    )
+    wf = np.asarray([p.weight_fraction for p in est.phases], dtype=float)
+    assert np.isfinite(wf).all()
+    assert np.isclose(float(wf.sum()), 1.0, atol=1e-8)
+    props = est.estimate_properties()
+    assert np.isfinite(float(props["density_g_cm3"]))
+    assert np.isfinite(float(props["melting_point_K"]))
 
 
 def test_print_report_no_error(sac305, capsys):

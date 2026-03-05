@@ -146,6 +146,11 @@ class TestCheckDuplicates:
         dupes = check_duplicates(records, key_field="formula")
         assert "Li2O" in dupes
 
+    def test_ignores_none_keys(self):
+        records = [{"jid": None}, {"jid": None}, {"jid": "J1"}]
+        dupes = check_duplicates(records)
+        assert "None" not in dupes
+
 
 # ---------------------------------------------------------------------------
 # Outlier detection
@@ -192,6 +197,12 @@ class TestComputeDrift:
     def test_too_few_samples(self):
         assert compute_drift([1.0, 2.0], [3.0, 4.0]) == 0.0
 
+    def test_invalid_bin_count_is_sanitized(self):
+        old = [float(i) for i in range(100)]
+        new = [float(i + 30) for i in range(100)]
+        kl = compute_drift(old, new, n_bins=0)
+        assert kl > 0
+
 
 class TestDistributionMetrics:
     def test_wasserstein_identical(self):
@@ -209,6 +220,12 @@ class TestDistributionMetrics:
         old = [float(i) for i in range(80)]
         new = [float(i + 20) for i in range(80)]
         mmd2 = compute_mmd_rbf(old, new, max_points=128)
+        assert mmd2 > 0
+
+    def test_mmd_invalid_max_points_is_sanitized(self):
+        old = [float(i) for i in range(80)]
+        new = [float(i + 20) for i in range(80)]
+        mmd2 = compute_mmd_rbf(old, new, max_points=1)
         assert mmd2 > 0
 
     def test_bh_qvalues(self):
@@ -511,6 +528,20 @@ class TestValidationReport:
         import json
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["n_samples"] == 50
+
+    def test_to_json_sanitizes_non_finite_numbers(self, tmp_path):
+        report = ValidationReport(
+            n_samples=10,
+            drift_summary={"formation_energy": float("nan")},
+            details={"x": float("inf")},
+        )
+        report.apply_gates()
+        path = report.to_json(tmp_path / "test_report_nan.json")
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["drift_summary"]["formation_energy"] is None
+        assert data["details"]["x"] is None
 
     def test_to_markdown(self, tmp_path):
         report = ValidationReport(n_samples=50, outlier_count=3)

@@ -19,6 +19,7 @@ import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Integral, Real
 
 import numpy as np
 
@@ -52,6 +53,49 @@ logger = logging.getLogger(__name__)
 _LOG_2PI = math.log(2.0 * math.pi)
 _SQRT_2 = math.sqrt(2.0)
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in {"1", "true", "yes", "y", "on"}:
+            return True
+        if key in {"0", "false", "no", "n", "off"}:
+            return False
+        return bool(default)
+    return bool(value)
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        out_f = float(value)
+        if not math.isfinite(out_f) or not out_f.is_integer():
+            return int(default)
+        return int(out_f)
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_float(value: object, default: float) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if not math.isfinite(out):
+        return float(default)
+    return float(out)
+
+
+def _clip01(value: object, default: float = 0.0) -> float:
+    return float(np.clip(_coerce_float(value, default), 0.0, 1.0))
 
 
 def _ndtr(z: np.ndarray) -> np.ndarray:
@@ -100,6 +144,41 @@ class GPSurrogateConfig:
     normalize_output: bool = True
     include_energy_feature: bool = False
 
+    def validated(self) -> GPSurrogateConfig:
+        self.min_points = max(2, _coerce_int(self.min_points, 8))
+        self.kappa = max(0.0, _coerce_float(self.kappa, 1.5))
+        self.alpha = max(1e-12, _coerce_float(self.alpha, 1e-6))
+        self.random_state = _coerce_int(self.random_state, 42)
+        self.blend_ratio = float(np.clip(_coerce_float(self.blend_ratio, 0.5), 0.0, 1.0))
+        self.feasibility_power = max(0.0, _coerce_float(self.feasibility_power, 1.0))
+
+        acquisition_mode = str(self.acquisition_mode).strip().lower()
+        self.acquisition_mode = acquisition_mode if acquisition_mode in {"ucb", "ei", "logei"} else "logei"
+
+        kappa_schedule = str(self.kappa_schedule).strip().lower().replace("-", "_")
+        self.kappa_schedule = kappa_schedule if kappa_schedule in {"fixed", "anneal", "gp_ucb"} else "gp_ucb"
+
+        self.kappa_min = max(0.0, _coerce_float(self.kappa_min, 0.75))
+        self.kappa_decay = max(0.0, _coerce_float(self.kappa_decay, 0.08))
+        self.ucb_delta = float(np.clip(_coerce_float(self.ucb_delta, 0.1), 1e-12, 1.0 - 1e-12))
+        self.ucb_dimension = max(1, _coerce_int(self.ucb_dimension, 5))
+        self.ei_jitter = max(0.0, _coerce_float(self.ei_jitter, 0.0))
+
+        feasibility_mode = str(self.feasibility_mode).strip().lower()
+        self.feasibility_mode = feasibility_mode if feasibility_mode in {"chance", "mean", "lcb"} else "chance"
+
+        self.feasibility_threshold = float(np.clip(_coerce_float(self.feasibility_threshold, 0.5), 0.0, 1.0))
+        self.feasibility_kappa = max(0.0, _coerce_float(self.feasibility_kappa, 0.5))
+        self.use_feasibility_classifier = _coerce_bool(self.use_feasibility_classifier, True)
+        self.feasibility_label_threshold = float(
+            np.clip(_coerce_float(self.feasibility_label_threshold, 0.5), 0.0, 1.0)
+        )
+        self.coupling_strength = max(0.0, _coerce_float(self.coupling_strength, 0.35))
+        self.min_coupling_points = max(2, _coerce_int(self.min_coupling_points, 12))
+        self.normalize_output = _coerce_bool(self.normalize_output, True)
+        self.include_energy_feature = _coerce_bool(self.include_energy_feature, False)
+        return self
+
 
 class GPSurrogateAcquirer:
     """
@@ -111,7 +190,7 @@ class GPSurrogateAcquirer:
     """
 
     def __init__(self, config: GPSurrogateConfig | None = None):
-        self.config = config or GPSurrogateConfig()
+        self.config = (config or GPSurrogateConfig()).validated()
         self._x_hist: list[np.ndarray] = []
         self._y_obj_hist: list[float] = []
         self._y_obj_noise_hist: list[float] = []
@@ -130,19 +209,22 @@ class GPSurrogateAcquirer:
         try:
             if value is None:
                 return default
-            return float(value)
+            out = float(value)
         except Exception:
             return default
+        if not math.isfinite(out):
+            return default
+        return out
 
     def candidate_to_features(self, candidate) -> np.ndarray:
         energy_mean = getattr(candidate, "energy_mean", None)
         if energy_mean is None:
             energy_mean = getattr(candidate, "energy_per_atom", None)
         energy_std = self._safe_float(getattr(candidate, "energy_std", 0.0), 0.0)
-        topo_prob = self._safe_float(getattr(candidate, "topo_probability", 0.0), 0.0)
-        stability = self._safe_float(getattr(candidate, "stability_score", 0.0), 0.0)
-        heuristic = self._safe_float(getattr(candidate, "heuristic_topo_score", 0.0), 0.0)
-        novelty = self._safe_float(getattr(candidate, "novelty_score", 0.0), 0.0)
+        topo_prob = _clip01(getattr(candidate, "topo_probability", 0.0), 0.0)
+        stability = _clip01(getattr(candidate, "stability_score", 0.0), 0.0)
+        heuristic = _clip01(getattr(candidate, "heuristic_topo_score", 0.0), 0.0)
+        novelty = _clip01(getattr(candidate, "novelty_score", 0.0), 0.0)
 
         features = [topo_prob, stability, heuristic, novelty, max(0.0, energy_std)]
         if self.config.include_energy_feature:
@@ -205,7 +287,7 @@ class GPSurrogateAcquirer:
         decay: float,
     ) -> float:
         return schedule_ucb_kappa(
-            iteration=max(1, int(t)),
+            iteration=max(1, _coerce_int(t, 1)),
             base_kappa=base_kappa,
             mode=mode,
             dimension=dimension,
@@ -493,23 +575,37 @@ class GPSurrogateAcquirer:
             return None
 
         x_raw = np.vstack([self.candidate_to_features(c) for c in candidates])
-        x = self._transform_features(x_raw)
-        mean_obj, std_obj = self._objective_model.predict(x, return_std=True)
-        std_obj = np.maximum(std_obj, 0.0)
+        finite_mask = np.all(np.isfinite(x_raw), axis=1)
+        if not np.any(finite_mask):
+            return np.zeros(len(candidates), dtype=float)
+
+        x_raw_valid = x_raw[finite_mask]
+        x_valid = self._transform_features(x_raw_valid)
+        try:
+            mean_obj, std_obj = self._objective_model.predict(x_valid, return_std=True)
+        except Exception as exc:
+            logger.warning(f"GP predict failed; fallback to base acquisition. Error: {exc}")
+            return None
+        mean_obj = np.nan_to_num(mean_obj, nan=0.0, posinf=1e6, neginf=-1e6)
+        std_obj = np.maximum(np.nan_to_num(std_obj, nan=0.0, posinf=1e6, neginf=0.0), 0.0)
 
         obj_utility = self._objective_utility(mean_obj, std_obj)
-        feas_prob = self._predict_feasibility(x_raw)
+        feas_prob = self._predict_feasibility(x_raw_valid)
         feas_prob = self._apply_objective_feasibility_coupling(feas_prob, mean_obj)
         mode = str(self.config.acquisition_mode).strip().lower()
 
         if mode == "logei":
             # In log-domain: log U = logEI + p * log P(feasible).
             # 在對數域組合，避免極小 EI/feasibility 產生下溢。
-            utility = obj_utility + float(self.config.feasibility_power) * np.log(
+            utility_valid = obj_utility + float(self.config.feasibility_power) * np.log(
                 np.clip(feas_prob, 1e-12, 1.0)
             )
         else:
-            utility = obj_utility * np.power(feas_prob, float(self.config.feasibility_power))
+            utility_valid = obj_utility * np.power(feas_prob, float(self.config.feasibility_power))
+
+        utility_valid = np.nan_to_num(utility_valid, nan=-1e12, posinf=1e12, neginf=-1e12)
+        utility = np.full(len(candidates), -1e12, dtype=float)
+        utility[finite_mask] = utility_valid
 
         if self.config.normalize_output:
             return self._rank_normalize(utility)

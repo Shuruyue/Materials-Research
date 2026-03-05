@@ -16,6 +16,7 @@ import math
 import time
 from collections import Counter
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,48 @@ class JARVISClient:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _coerce_nonnegative_finite(value: float, *, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(parsed):
+            return float(default)
+        return max(parsed, 0.0)
+
+    @staticmethod
+    def _coerce_positive_finite(
+        value: float,
+        *,
+        default: float,
+        floor: float = 1e-8,
+    ) -> float:
+        parsed = JARVISClient._coerce_nonnegative_finite(value, default=default)
+        return max(parsed, float(floor))
+
+    @staticmethod
+    def _coerce_probability(value: float, *, default: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = float(default)
+        if not np.isfinite(parsed):
+            parsed = float(default)
+        return float(np.clip(parsed, 0.0, 1.0))
+
+    @staticmethod
+    def _coerce_optional_finite(value: float | None) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(parsed):
+            return None
+        return float(parsed)
+
+    @staticmethod
     def _sigmoid(x: np.ndarray | float) -> np.ndarray:
         arr = np.asarray(x, dtype=float)
         arr = np.clip(arr, -60.0, 60.0)
@@ -57,6 +100,7 @@ class JARVISClient:
     @staticmethod
     def _normal_cdf(x: np.ndarray | float) -> np.ndarray:
         arr = np.asarray(x, dtype=float)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=12.0, neginf=-12.0)
         flat = np.ravel(arr)
         out = np.asarray(
             [0.5 * (1.0 + math.erf(float(v) / math.sqrt(2.0))) for v in flat],
@@ -92,7 +136,8 @@ class JARVISClient:
           where z_fe is robust z-score of formation_energy_peratom.
         """
         n = len(df)
-        sigma = np.full(n, max(1e-8, float(base_noise)), dtype=float)
+        sigma0 = self._coerce_positive_finite(base_noise, default=0.03, floor=1e-8)
+        sigma = np.full(n, sigma0, dtype=float)
         mode = str(noise_mode).strip().lower()
         if mode not in {"constant", "adaptive"}:
             raise ValueError(
@@ -109,7 +154,8 @@ class JARVISClient:
         if np.any(valid):
             z_valid = self._robust_zscore(fe[valid])
             z[valid] = np.abs(z_valid)
-        sigma = sigma * (1.0 + max(0.0, float(adaptive_slope)) * z)
+        slope = self._coerce_nonnegative_finite(adaptive_slope, default=0.35)
+        sigma = sigma * (1.0 + slope * z)
         return np.clip(sigma, 1e-8, 1.0)
 
     def _stability_probability(
@@ -129,13 +175,14 @@ class JARVISClient:
         if "ehull" not in df.columns:
             return pd.Series(np.nan, index=df.index, dtype=float)
         ehull = pd.to_numeric(df["ehull"], errors="coerce")
+        ehull_max_v = self._coerce_nonnegative_finite(ehull_max, default=0.1)
         sigma = self._estimate_ehull_noise_series(
             df,
             base_noise=ehull_noise,
             noise_mode=noise_mode,
             adaptive_slope=adaptive_slope,
         )
-        z = (float(ehull_max) - ehull.to_numpy(dtype=float)) / sigma
+        z = (ehull_max_v - ehull.to_numpy(dtype=float)) / sigma
         probs = self._normal_cdf(z)
         probs = np.clip(probs, 0.0, 1.0)
         return pd.Series(probs, index=df.index, dtype=float).where(ehull.notna(), np.nan)
@@ -176,7 +223,11 @@ class JARVISClient:
         if not elem_freq:
             return np.zeros((len(df), 0), dtype=float)
 
-        ordered = [k for k, _ in elem_freq.most_common(max(1, int(top_k)))]
+        try:
+            top_k_i = int(top_k)
+        except (TypeError, ValueError):
+            top_k_i = 24
+        ordered = [k for k, _ in elem_freq.most_common(max(1, top_k_i))]
         mat = np.zeros((len(df), len(ordered)), dtype=float)
         for i, fracs in enumerate(all_fracs):
             for j, elem in enumerate(ordered):
@@ -185,13 +236,15 @@ class JARVISClient:
 
     @staticmethod
     def _normalize_features(x: np.ndarray) -> np.ndarray:
-        if x.size == 0:
-            return x
-        center = np.median(x, axis=0)
-        mad = np.median(np.abs(x - center), axis=0)
+        arr = np.asarray(x, dtype=float)
+        if arr.size == 0:
+            return arr
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        center = np.median(arr, axis=0)
+        mad = np.median(np.abs(arr - center), axis=0)
         scale = 1.4826 * mad
         scale[scale < 1e-8] = 1.0
-        return (x - center) / scale
+        return (arr - center) / scale
 
     def _feature_matrix(
         self,
@@ -246,7 +299,11 @@ class JARVISClient:
         - Gonzalez (1985), farthest-first traversal (k-center 2-approximation).
         - Sener & Savarese (2018), coreset intuition for active learning.
         """
-        n = int(features.shape[0])
+        feat = np.asarray(features, dtype=float)
+        if feat.ndim != 2:
+            raise ValueError(f"features must be 2D, got shape {feat.shape}")
+        feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+        n = int(feat.shape[0])
         if k >= n:
             return list(range(n))
         if k <= 0 or n == 0:
@@ -255,13 +312,13 @@ class JARVISClient:
         rng = np.random.RandomState(random_state)
         first = int(rng.randint(0, n))
         selected = [first]
-        diff = features - features[first]
+        diff = feat - feat[first]
         min_d2 = np.einsum("ij,ij->i", diff, diff)
 
         for _ in range(1, k):
             nxt = int(np.argmax(min_d2))
             selected.append(nxt)
-            diff = features - features[nxt]
+            diff = feat - feat[nxt]
             d2 = np.einsum("ij,ij->i", diff, diff)
             min_d2 = np.minimum(min_d2, d2)
         return selected
@@ -278,10 +335,20 @@ class JARVISClient:
         feature_space: str = "property",
         composition_top_k: int = 24,
     ) -> pd.DataFrame:
+        canon = str(strategy).strip().lower()
+        if canon not in {"random", "kcenter", "hybrid"}:
+            raise ValueError(
+                f"Unknown sampling strategy: {strategy}. Expected one of random/kcenter/hybrid."
+            )
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            return df.iloc[0:0].copy()
         if len(df) <= n:
             return df.copy()
 
-        canon = str(strategy).strip().lower()
         if canon == "random":
             return df.sample(n=n, random_state=random_state).copy()
 
@@ -317,9 +384,7 @@ class JARVISClient:
             explore = remaining.iloc[idx]
             return pd.concat([exploit, explore]).copy()
 
-        raise ValueError(
-            f"Unknown sampling strategy: {strategy}. Expected one of random/kcenter/hybrid."
-        )
+        return df.iloc[0:0].copy()
 
     def load_dft_3d(self, force_reload: bool = False) -> pd.DataFrame:
         """
@@ -391,35 +456,71 @@ class JARVISClient:
     def _download_file(self, url: str, dest_path: Path, max_retries: int = 3):
         """Download file with progress bar and retries."""
         print(f"  Downloading data from {url}...")
+        try:
+            retries = int(max_retries)
+        except (TypeError, ValueError):
+            retries = 3
+        retries = max(1, retries)
 
-        for attempt in range(max_retries):
+        for attempt in range(retries):
+            temp_path: Path | None = None
             try:
                 # Stream download
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
+                with requests.get(url, stream=True, timeout=30) as response:
+                    response.raise_for_status()
 
-                total_size = int(response.headers.get('content-length', 0))
-                block_size = 8192 # 8KB
+                    total_size = int(response.headers.get("content-length", 0))
+                    block_size = 8192  # 8KB
 
-                with open(dest_path, "wb") as f, tqdm(
-                    desc=dest_path.name,
-                    total=total_size,
-                    unit='iB',
-                    unit_scale=True,
-                    unit_divisor=1024,
-                ) as bar:
-                    for data in response.iter_content(block_size):
-                        size = f.write(data)
-                        bar.update(size)
+                    with NamedTemporaryFile(
+                        mode="wb",
+                        dir=str(dest_path.parent),
+                        prefix=f".{dest_path.name}.",
+                        suffix=".part",
+                        delete=False,
+                    ) as tmp:
+                        temp_path = Path(tmp.name)
+                        downloaded = 0
+                        with tqdm(
+                            desc=dest_path.name,
+                            total=total_size if total_size > 0 else None,
+                            unit="iB",
+                            unit_scale=True,
+                            unit_divisor=1024,
+                        ) as bar:
+                            for data in response.iter_content(block_size):
+                                if not data:
+                                    continue
+                                size = tmp.write(data)
+                                downloaded += size
+                                bar.update(size)
 
-                return # Success
+                        tmp.flush()
+
+                    if total_size > 0 and downloaded != total_size:
+                        raise RuntimeError(
+                            f"Incomplete download: expected {total_size} bytes, got {downloaded}"
+                        )
+
+                    temp_path.replace(dest_path)
+
+                return  # Success
 
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Download attempt {attempt+1}/{max_retries} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 * (attempt + 1)) # Backoff
+                logger.warning(f"Download attempt {attempt+1}/{retries} failed: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))  # Backoff
                 else:
-                    raise RuntimeError(f"Failed to download data after {max_retries} attempts") from e
+                    raise RuntimeError(f"Failed to download data after {retries} attempts") from e
+            except Exception as e:
+                logger.warning(f"Download attempt {attempt+1}/{retries} failed: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    raise RuntimeError(f"Failed to download data after {retries} attempts") from e
+            finally:
+                if temp_path is not None and temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
 
     def get_stable_materials(
         self,
@@ -454,25 +555,49 @@ class JARVISClient:
             raise ValueError(
                 f"Unknown stability mode: {mode}. Expected hard/probabilistic."
             )
+        ehull_max_v = self._coerce_nonnegative_finite(ehull_max, default=0.1)
+        min_stability_prob_v = self._coerce_probability(
+            min_stability_prob,
+            default=0.5,
+        )
+        ehull_noise_v = self._coerce_positive_finite(
+            ehull_noise,
+            default=0.03,
+            floor=1e-8,
+        )
+        ehull_noise_slope_v = self._coerce_nonnegative_finite(
+            ehull_noise_adaptive_slope,
+            default=0.35,
+        )
+        min_band_gap_v = self._coerce_optional_finite(min_band_gap)
+        max_band_gap_v = self._coerce_optional_finite(max_band_gap)
+        if (
+            min_band_gap_v is not None
+            and max_band_gap_v is not None
+            and min_band_gap_v > max_band_gap_v
+        ):
+            raise ValueError(
+                "min_band_gap cannot exceed max_band_gap in get_stable_materials."
+            )
 
         result_df = df.copy()
         if canon_mode == "hard":
-            mask = result_df["ehull"].notna() & (result_df["ehull"] <= ehull_max)
+            mask = result_df["ehull"].notna() & (result_df["ehull"] <= ehull_max_v)
         else:
             stab_prob = self._stability_probability(
                 result_df,
-                ehull_max=ehull_max,
-                ehull_noise=ehull_noise,
+                ehull_max=ehull_max_v,
+                ehull_noise=ehull_noise_v,
                 noise_mode=ehull_noise_mode,
-                adaptive_slope=ehull_noise_adaptive_slope,
+                adaptive_slope=ehull_noise_slope_v,
             )
             result_df["stability_probability"] = stab_prob
-            mask = stab_prob.fillna(0.0) >= float(min_stability_prob)
+            mask = stab_prob.fillna(0.0) >= min_stability_prob_v
 
-        if min_band_gap is not None:
-            mask &= result_df["optb88vdw_bandgap"] >= min_band_gap
-        if max_band_gap is not None:
-            mask &= result_df["optb88vdw_bandgap"] <= max_band_gap
+        if min_band_gap_v is not None:
+            mask &= result_df["optb88vdw_bandgap"] >= min_band_gap_v
+        if max_band_gap_v is not None:
+            mask &= result_df["optb88vdw_bandgap"] <= max_band_gap_v
 
         result = result_df[mask].copy()
         if canon_mode == "probabilistic" and "stability_probability" in result.columns:
@@ -480,10 +605,10 @@ class JARVISClient:
             print(
                 "  Found "
                 f"{len(result)} stable materials "
-                f"(P(Ehull<={ehull_max}) >= {min_stability_prob:.2f}, sigma={ehull_noise:.3f}, mode={ehull_noise_mode})"
+                f"(P(Ehull<={ehull_max_v}) >= {min_stability_prob_v:.2f}, sigma={ehull_noise_v:.3f}, mode={ehull_noise_mode})"
             )
         else:
-            print(f"  Found {len(result)} stable materials (ehull <= {ehull_max} eV/atom)")
+            print(f"  Found {len(result)} stable materials (ehull <= {ehull_max_v} eV/atom)")
         return result
 
     def get_heavy_element_materials(
@@ -569,38 +694,72 @@ class JARVISClient:
             raise ValueError(
                 f"Unknown topology mode: {mode}. Expected hard/probabilistic."
             )
+        spillage_threshold_v = self._coerce_nonnegative_finite(
+            spillage_threshold,
+            default=0.5,
+        )
+        min_topology_prob_v = self._coerce_probability(
+            min_topology_prob,
+            default=0.55,
+        )
+        spillage_temp_v = self._coerce_positive_finite(
+            spillage_temperature,
+            default=0.10,
+            floor=1e-8,
+        )
+        ehull_max_v = self._coerce_nonnegative_finite(ehull_max, default=0.1)
+        ehull_noise_v = self._coerce_positive_finite(
+            ehull_noise,
+            default=0.03,
+            floor=1e-8,
+        )
+        ehull_noise_slope_v = self._coerce_nonnegative_finite(
+            ehull_noise_adaptive_slope,
+            default=0.35,
+        )
+        try:
+            low_gap_center_v = float(low_gap_center)
+        except (TypeError, ValueError):
+            low_gap_center_v = 0.3
+        if not np.isfinite(low_gap_center_v):
+            low_gap_center_v = 0.3
+        low_gap_scale_v = self._coerce_positive_finite(
+            low_gap_scale,
+            default=0.2,
+            floor=1e-8,
+        )
 
         if "spillage" in df.columns:
             if canon_mode == "hard":
-                topo_mask = df["spillage"].notna() & (df["spillage"] > spillage_threshold)
+                topo_mask = df["spillage"].notna() & (df["spillage"] > spillage_threshold_v)
                 result = df[topo_mask].copy()
                 print(
-                    f"  Found {len(result)} materials with spillage > {spillage_threshold}"
+                    f"  Found {len(result)} materials with spillage > {spillage_threshold_v}"
                 )
                 return result
 
             work = df.copy()
             spillage = pd.to_numeric(work["spillage"], errors="coerce")
-            temp = max(float(spillage_temperature), 1e-8)
-            spillage_prob = self._sigmoid((spillage.to_numpy(dtype=float) - spillage_threshold) / temp)
+            spillage_prob = self._sigmoid(
+                (spillage.to_numpy(dtype=float) - spillage_threshold_v) / spillage_temp_v
+            )
             spillage_prob = pd.Series(spillage_prob, index=work.index).where(spillage.notna(), 0.0)
 
             if "ehull" in work.columns:
                 stability_prob = self._stability_probability(
                     work,
-                    ehull_max=ehull_max,
-                    ehull_noise=ehull_noise,
+                    ehull_max=ehull_max_v,
+                    ehull_noise=ehull_noise_v,
                     noise_mode=ehull_noise_mode,
-                    adaptive_slope=ehull_noise_adaptive_slope,
+                    adaptive_slope=ehull_noise_slope_v,
                 ).fillna(0.5)
             else:
                 stability_prob = pd.Series(0.5, index=work.index, dtype=float)
 
             if "optb88vdw_bandgap" in work.columns:
                 band_gap = pd.to_numeric(work["optb88vdw_bandgap"], errors="coerce")
-                gap_scale = max(float(low_gap_scale), 1e-8)
                 low_gap_prob = self._sigmoid(
-                    (float(low_gap_center) - band_gap.to_numpy(dtype=float)) / gap_scale
+                    (low_gap_center_v - band_gap.to_numpy(dtype=float)) / low_gap_scale_v
                 )
                 low_gap_prob = pd.Series(low_gap_prob, index=work.index).where(
                     band_gap.notna(), 0.5
@@ -616,6 +775,7 @@ class JARVISClient:
                     "fusion_weights must contain exactly three values "
                     "(spillage, stability, low_gap)."
                 )
+            ws = np.where(np.isfinite(ws), ws, 0.0)
             ws = np.clip(ws, 0.0, None)
             if float(ws.sum()) <= 0:
                 ws = np.asarray([0.70, 0.20, 0.10], dtype=float)
@@ -634,7 +794,11 @@ class JARVISClient:
                     f"Unknown score_calibration: {score_calibration}. Expected none/temperature."
                 )
             if calibration == "temperature":
-                temp_cal = max(1e-6, float(calibration_temperature))
+                temp_cal = self._coerce_positive_finite(
+                    calibration_temperature,
+                    default=1.0,
+                    floor=1e-6,
+                )
                 logit = np.log(np.clip(topo_prob, eps, 1.0 - eps)) - np.log(
                     np.clip(1.0 - topo_prob, eps, 1.0)
                 )
@@ -653,7 +817,7 @@ class JARVISClient:
                     np.quantile(work["topological_probability"].to_numpy(dtype=float), q)
                 )
             else:
-                threshold = float(min_topology_prob)
+                threshold = min_topology_prob_v
             topo_mask = work["topological_probability"] >= threshold
             result = work[topo_mask].copy()
             result = result.sort_values("topological_probability", ascending=False)
@@ -670,11 +834,17 @@ class JARVISClient:
         """Get a pymatgen Structure for a given JARVIS ID."""
         from jarvis.core.atoms import Atoms as JAtoms
 
+        target_jid = str(jid).strip()
+        if not target_jid:
+            raise ValueError("jid must be a non-empty string")
+
         df = self.load_dft_3d()
-        row = df[df["jid"] == jid]
+        if "jid" not in df.columns:
+            raise ValueError("Column 'jid' not found in JARVIS-DFT dataset")
+        row = df[df["jid"].astype(str).str.strip() == target_jid]
 
         if len(row) == 0:
-            raise ValueError(f"Material {jid} not found in JARVIS-DFT")
+            raise ValueError(f"Material {target_jid} not found in JARVIS-DFT")
 
         atoms = JAtoms.from_dict(row.iloc[0]["atoms"])
         return atoms.pymatgen_converter()

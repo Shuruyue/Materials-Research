@@ -18,6 +18,7 @@ Reference:
 """
 
 import math
+from numbers import Integral, Real
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,78 @@ LARGE_PRESET = {
     "radial_hidden": 256,
 }
 
+
+def _is_boolean_like(value: object) -> bool:
+    return isinstance(value, bool) or type(value).__name__ == "bool_"
+
+
+def _coerce_non_negative_int(value: object, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be integer-valued, not boolean")
+    if isinstance(value, Integral):
+        integer = int(value)
+    elif isinstance(value, Real):
+        scalar = float(value)
+        if not math.isfinite(scalar):
+            raise ValueError(f"{name} must be finite")
+        rounded = round(scalar)
+        if abs(scalar - rounded) > 1e-9:
+            raise ValueError(f"{name} must be integer-valued")
+        integer = int(rounded)
+    else:
+        raise ValueError(f"{name} must be integer-valued")
+    if integer < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return integer
+
+
+def _coerce_positive_int(value: object, name: str) -> int:
+    integer = _coerce_non_negative_int(value, name)
+    if integer <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return integer
+
+
+def _coerce_positive_float(value: object, name: str) -> float:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be finite and > 0, not boolean")
+    scalar = float(value)
+    if not math.isfinite(scalar):
+        raise ValueError(f"{name} must be finite")
+    if scalar <= 0.0:
+        raise ValueError(f"{name} must be > 0")
+    return scalar
+
+
+def _infer_species_indices(node_feats: torch.Tensor, n_species: int) -> torch.Tensor:
+    """
+    Infer per-node species indices from common node feature layouts.
+
+    Supported inputs:
+    - `(N,)` integer indices
+    - `(N, 1)` integer-like indices
+    - `(N, C)` one-hot / logits (uses argmax over first `min(C, n_species)` channels)
+    """
+    if node_feats.ndim == 1:
+        idx = node_feats.long()
+    elif node_feats.ndim == 2 and node_feats.size(1) == 1:
+        idx = node_feats[:, 0].long()
+    elif node_feats.ndim == 2:
+        n_channels = int(min(node_feats.size(1), n_species))
+        if n_channels <= 0:
+            raise ValueError("node_feats has no valid channels to infer species indices")
+        idx = node_feats[:, :n_channels].argmax(dim=-1).long()
+    else:
+        raise ValueError(f"Unsupported node_feats shape: {tuple(node_feats.shape)}")
+
+    # Handle one-based atomic number style input (1..n_species).
+    if idx.numel() > 0:
+        idx_min = int(idx.min().item())
+        idx_max = int(idx.max().item())
+        if idx_min >= 1 and idx_max <= n_species:
+            idx = idx - 1
+    return idx.clamp(min=0, max=max(n_species - 1, 0))
+
 class AtomRef(nn.Module):
     """
     Atomic Reference Energy.
@@ -56,9 +129,10 @@ class AtomRef(nn.Module):
     """
     def __init__(self, n_species: int = 86, output_dim: int = 1):
         super().__init__()
-        self.output_dim = output_dim
+        self.n_species = _coerce_positive_int(n_species, "n_species")
+        self.output_dim = _coerce_positive_int(output_dim, "output_dim")
         # Initialize with zeros, let the model learn the offsets
-        self.ref = nn.Embedding(n_species, output_dim)
+        self.ref = nn.Embedding(self.n_species, self.output_dim)
         nn.init.zeros_(self.ref.weight)
 
     def forward(self, node_feats: torch.Tensor, batch: torch.Tensor | None = None) -> torch.Tensor:
@@ -69,9 +143,7 @@ class AtomRef(nn.Module):
         Returns:
             (B, output_dim) summed atomic reference energy per graph
         """
-        # Extract species index (assuming it's the argmax of the first 86 features)
-        # This matches EquivariantGNN.encode logic
-        species_idx = node_feats[:, :86].argmax(dim=-1)  # (N,)
+        species_idx = _infer_species_indices(node_feats, self.n_species)
 
         # Get per-atom reference values
         atom_refs = self.ref(species_idx) # (N, output_dim)
@@ -104,11 +176,13 @@ class BesselRadialBasis(nn.Module):
 
     def __init__(self, r_max: float = 5.0, n_basis: int = 8, trainable: bool = True):
         super().__init__()
-        self.r_max = r_max
-        self.n_basis = n_basis
+        cutoff = _coerce_positive_float(r_max, "r_max")
+        basis_count = _coerce_positive_int(n_basis, "n_basis")
+        self.r_max = cutoff
+        self.n_basis = basis_count
 
         # Bessel function frequencies: n*π/r_max
-        freqs = torch.arange(1, n_basis + 1).float() * math.pi / r_max
+        freqs = torch.arange(1, basis_count + 1).float() * math.pi / cutoff
         if trainable:
             self.freqs = nn.Parameter(freqs)
         else:
@@ -122,17 +196,21 @@ class BesselRadialBasis(nn.Module):
         Returns:
             (E, n_basis) radial basis values
         """
+        if distances.ndim != 1:
+            distances = distances.reshape(-1)
+        distances = torch.nan_to_num(distances, nan=0.0, posinf=self.r_max, neginf=0.0).clamp_min(0.0)
         d = distances.unsqueeze(-1)  # (E, 1)
 
         # Bessel functions
         basis = torch.sin(self.freqs * d) / d.clamp(min=1e-6)  # (E, n_basis)
 
         # Smooth polynomial cutoff: p(r) = 1 - 6(r/rc)^5 + 15(r/rc)^4 - 10(r/rc)^3
-        x = distances / self.r_max
+        x = (distances / self.r_max).clamp(min=0.0, max=1.0)
         cutoff = 1.0 - 6.0 * x**5 + 15.0 * x**4 - 10.0 * x**3
+        cutoff = torch.where(distances <= self.r_max, cutoff, torch.zeros_like(cutoff))
         cutoff = cutoff.unsqueeze(-1)  # (E, 1)
 
-        return basis * cutoff
+        return torch.nan_to_num(basis * cutoff, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class RadialMLP(nn.Module):
@@ -361,10 +439,13 @@ class EquivariantGNN(nn.Module):
         super().__init__()
         from e3nn import o3
 
-        self.max_ell = max_ell
-        self.n_layers = n_layers
-        self.max_radius = max_radius
-        self.n_species = n_species
+        self.max_ell = _coerce_non_negative_int(max_ell, "max_ell")
+        self.n_layers = _coerce_positive_int(n_layers, "n_layers")
+        self.max_radius = _coerce_positive_float(max_radius, "max_radius")
+        self.n_species = _coerce_positive_int(n_species, "n_species")
+        output_dim_i = _coerce_positive_int(output_dim, "output_dim")
+        n_radial_basis_i = _coerce_positive_int(n_radial_basis, "n_radial_basis")
+        radial_hidden_i = _coerce_positive_int(radial_hidden, "radial_hidden")
         self.irreps_hidden_str = irreps_hidden
 
         irreps_hidden = o3.Irreps(irreps_hidden)
@@ -372,15 +453,19 @@ class EquivariantGNN(nn.Module):
 
         # Count scalar multiplicity for embedding dimension
         scalar_mul = sum(mul for mul, ir in irreps_hidden if ir.l == 0)
-        self._embed_dim = embed_dim or scalar_mul
+        if scalar_mul <= 0:
+            raise ValueError("irreps_hidden must include at least one scalar (0e) channel")
+        self._embed_dim = (
+            scalar_mul if embed_dim is None else _coerce_positive_int(embed_dim, "embed_dim")
+        )
 
         # ── AtomRef (Learnable Atomic Reference) ──
         # Adds a baseline energy based on composition
-        self.atom_ref = AtomRef(n_species=n_species, output_dim=output_dim)
+        self.atom_ref = AtomRef(n_species=self.n_species, output_dim=output_dim_i)
 
         # ── Species embedding ──
         # Maps atomic number to scalar features that seed the irreps
-        self.species_embed = nn.Embedding(n_species, self._embed_dim)
+        self.species_embed = nn.Embedding(self.n_species, self._embed_dim)
 
         # Linear projection from scalar embedding to full irreps
         # Scalars go into 0e slots, higher-L initialized to zero
@@ -388,32 +473,33 @@ class EquivariantGNN(nn.Module):
         self.input_proj = o3.Linear(irreps_input, irreps_hidden)
 
         # ── Edge features ──
-        self.sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
+        self.sh_irreps = o3.Irreps.spherical_harmonics(self.max_ell)
         self.radial_basis = BesselRadialBasis(
-            r_max=max_radius, n_basis=n_radial_basis
+            r_max=self.max_radius, n_basis=n_radial_basis_i
         )
 
         # ── Interaction blocks ──
         self.interactions = nn.ModuleList()
-        for _ in range(n_layers):
+        for _ in range(self.n_layers):
             block = InteractionBlock(
                 irreps_in=str(irreps_hidden),
                 irreps_out=str(irreps_hidden),
                 irreps_sh=str(self.sh_irreps),
-                n_radial_basis=n_radial_basis,
-                hidden_dim=radial_hidden,
+                n_radial_basis=n_radial_basis_i,
+                hidden_dim=radial_hidden_i,
             )
             self.interactions.append(block)
 
         # ── Output head ──
         # Extract only scalar (0e) features for invariant prediction
-        self.scalar_dim = scalar_mul
+        self.scalar_dim = int(scalar_mul)
+        hidden_out = max(1, self.scalar_dim // 2)
         self.output_head = nn.Sequential(
-            nn.Linear(scalar_mul, scalar_mul),
+            nn.Linear(self.scalar_dim, self.scalar_dim),
             nn.SiLU(),
-            nn.Linear(scalar_mul, scalar_mul // 2),
+            nn.Linear(self.scalar_dim, hidden_out),
             nn.SiLU(),
-            nn.Linear(scalar_mul // 2, output_dim),
+            nn.Linear(hidden_out, output_dim_i),
         )
 
     def _extract_scalars(self, features: torch.Tensor) -> torch.Tensor:
@@ -448,17 +534,36 @@ class EquivariantGNN(nn.Module):
         """
         from e3nn import o3
 
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError(f"edge_index must have shape (2, E), got {tuple(edge_index.shape)}")
+        if edge_index.dtype not in (torch.int32, torch.int64):
+            raise ValueError(f"edge_index must be integer tensor, got dtype {edge_index.dtype}")
+        if edge_index.size(1) <= 0:
+            raise ValueError("edge_index must contain at least one edge")
+        if edge_vectors.ndim != 2 or edge_vectors.size(1) != 3:
+            raise ValueError(f"edge_vectors must have shape (E, 3), got {tuple(edge_vectors.shape)}")
+        if edge_vectors.size(0) != edge_index.size(1):
+            raise ValueError(
+                f"edge count mismatch between edge_index and edge_vectors: {edge_index.size(1)} != {edge_vectors.size(0)}"
+            )
+        n_nodes = int(node_feats.size(0))
+        edge_min = int(edge_index.min().item())
+        edge_max = int(edge_index.max().item())
+        if edge_min < 0 or edge_max >= n_nodes:
+            raise ValueError(
+                f"edge_index contains out-of-range node ids: min={edge_min}, max={edge_max}, N={n_nodes}"
+            )
+
         # ── Species embedding ──
-        # Extract species index from one-hot encoded node features
-        species_idx = node_feats[:, :86].argmax(dim=-1)  # (N,)
+        species_idx = _infer_species_indices(node_feats, self.n_species)  # (N,)
         h_scalar = self.species_embed(species_idx)  # (N, embed_dim)
         h = self.input_proj(h_scalar)  # (N, irreps_hidden_dim)
 
         # ── Edge features ──
-        distances = edge_vectors.norm(dim=-1)  # (E,)
+        distances = torch.nan_to_num(edge_vectors, nan=0.0, posinf=0.0, neginf=0.0).norm(dim=-1)  # (E,)
         edge_sh = o3.spherical_harmonics(
             self.sh_irreps,
-            edge_vectors,
+            torch.nan_to_num(edge_vectors, nan=0.0, posinf=0.0, neginf=0.0),
             normalize=True,
             normalization="component",
         )  # (E, sh_dim)
@@ -474,6 +579,16 @@ class EquivariantGNN(nn.Module):
         # ── Global mean pooling ──
         if batch is None:
             batch = torch.zeros(h_scalars.size(0), dtype=torch.long, device=h_scalars.device)
+        else:
+            if batch.ndim != 1:
+                raise ValueError(f"batch must be 1D [N], got shape {tuple(batch.shape)}")
+            if batch.shape[0] != h_scalars.shape[0]:
+                raise ValueError(
+                    f"batch size must match number of nodes ({h_scalars.shape[0]}), got {batch.shape[0]}"
+                )
+            if batch.dtype not in (torch.int32, torch.int64):
+                raise ValueError(f"batch must be integer tensor, got dtype {batch.dtype}")
+            batch = batch.long()
 
         from torch_geometric.nn import global_mean_pool
         graph_emb = global_mean_pool(h_scalars, batch)  # (B, scalar_dim)

@@ -21,11 +21,117 @@ Usage:
 """
 
 import argparse
+import math
+import re
 import sys
 import time
+from collections.abc import Mapping
+from numbers import Integral, Real
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+_SAFE_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_STATE_DICT_CONTAINER_KEYS = ("state_dict", "model_state_dict", "model")
+
+
+def _is_safe_run_id(run_id: str | None) -> bool:
+    if not run_id:
+        return True
+    if run_id in {".", ".."}:
+        return False
+    if "/" in run_id or "\\" in run_id:
+        return False
+    return bool(_SAFE_RUN_ID_PATTERN.fullmatch(run_id))
+
+
+def _coerce_int_with_bounds(
+    value: object,
+    *,
+    arg_name: str,
+    min_value: int | None = None,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{arg_name} must be an integer")
+    if isinstance(value, Integral):
+        number = int(value)
+    elif isinstance(value, Real):
+        number_f = float(value)
+        if not math.isfinite(number_f) or not number_f.is_integer():
+            raise ValueError(f"{arg_name} must be an integer")
+        number = int(number_f)
+    else:
+        try:
+            number = int(value)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ValueError(f"{arg_name} must be an integer") from exc
+    if min_value is not None and number < min_value:
+        comparator = "> 0" if min_value == 1 else f">= {min_value}"
+        raise ValueError(f"{arg_name} must be {comparator}")
+    return number
+
+
+def _coerce_finite_float(
+    value: object,
+    *,
+    arg_name: str,
+    min_value: float | None = None,
+) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{arg_name} must be a finite number")
+    try:
+        number = float(value)
+    except Exception as exc:
+        raise ValueError(f"{arg_name} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{arg_name} must be finite")
+    if min_value is not None and number < float(min_value):
+        comparator = f">= {min_value}"
+        raise ValueError(f"{arg_name} must be {comparator}")
+    return number
+
+
+def _looks_like_state_dict(payload: Mapping[object, object]) -> bool:
+    if not payload:
+        return False
+    for key in payload:
+        if not isinstance(key, str) or not key:
+            return False
+    return any(
+        "." in key
+        or key in {"weight", "bias"}
+        or key.endswith(("weight", "bias", "running_mean", "running_var", "num_batches_tracked"))
+        for key in payload
+    )
+
+
+def _extract_classifier_state_dict(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"Invalid classifier checkpoint payload: {type(payload)!r}")
+
+    candidate: Mapping[object, object] | None = None
+    for container_key in _STATE_DICT_CONTAINER_KEYS:
+        nested = payload.get(container_key)
+        if isinstance(nested, Mapping) and _looks_like_state_dict(nested):
+            candidate = nested
+            break
+
+    if candidate is None:
+        if not _looks_like_state_dict(payload):
+            raise TypeError("Invalid classifier checkpoint payload: missing state dict")
+        candidate = payload
+
+    normalized: dict[str, object] = {}
+    for raw_key, value in candidate.items():
+        if not isinstance(raw_key, str) or not raw_key:
+            raise TypeError("Invalid classifier checkpoint payload: non-string state_dict key")
+        key = raw_key[7:] if raw_key.startswith("module.") else raw_key
+        if not key:
+            raise TypeError("Invalid classifier checkpoint payload: empty normalized key")
+        normalized[key] = value
+    if not normalized:
+        raise TypeError("Invalid classifier checkpoint payload: empty state dict")
+    return normalized
 
 
 def load_seed_structures(n_seeds: int = 20):
@@ -87,10 +193,13 @@ def load_classifier(cfg):
             hidden_dim=128,
             n_layers=3,
         ).to(device)
-
-        model.load_state_dict(
-            torch.load(model_path, map_location=device, weights_only=True)
-        )
+        try:
+            checkpoint_payload = torch.load(model_path, map_location=device, weights_only=True)
+        except TypeError:
+            # Compatibility for older torch versions without weights_only support.
+            checkpoint_payload = torch.load(model_path, map_location=device)
+        state_dict = _extract_classifier_state_dict(checkpoint_payload)
+        model.load_state_dict(state_dict)
         model.eval()
         return model, builder
     else:
@@ -100,7 +209,46 @@ def load_classifier(cfg):
         return None, builder
 
 
-def main():
+def _validate_discovery_args(args: argparse.Namespace) -> tuple[bool, str]:
+    positive_int_fields = ("iterations", "candidates", "top", "seeds", "calibration_window")
+    for field in positive_int_fields:
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        try:
+            normalized = _coerce_int_with_bounds(value, arg_name=f"--{field.replace('_', '-')}", min_value=1)
+        except ValueError as exc:
+            return False, str(exc)
+        setattr(args, field, normalized)
+
+    if int(args.top) > int(args.candidates):
+        return False, "--top cannot be greater than --candidates"
+    try:
+        args.acq_kappa = _coerce_finite_float(args.acq_kappa, arg_name="--acq-kappa", min_value=0.0)
+    except ValueError:
+        return False, "--acq-kappa must be finite and >= 0"
+    try:
+        args.acq_jitter = _coerce_finite_float(args.acq_jitter, arg_name="--acq-jitter", min_value=0.0)
+    except ValueError:
+        return False, "--acq-jitter must be finite and >= 0"
+    try:
+        args.acq_best_f = _coerce_finite_float(args.acq_best_f, arg_name="--acq-best-f")
+    except ValueError:
+        return False, "--acq-best-f must be finite"
+    run_id = getattr(args, "run_id", None)
+    if not _is_safe_run_id(run_id):
+        return False, "--run-id contains unsafe characters"
+    results_dir = getattr(args, "results_dir", None)
+    if results_dir is not None and not str(results_dir).strip():
+        return False, "--results-dir must not be empty"
+    if bool(run_id) and bool(results_dir):
+        return False, "--run-id and --results-dir cannot be used together"
+    if bool(getattr(args, "resume", False)) and bool(results_dir):
+        return False, "--resume and --results-dir cannot be used together"
+    return True, ""
+
+
+def _build_parser() -> argparse.ArgumentParser:
     from atlas.active_learning.acquisition import DISCOVERY_ACQUISITION_STRATEGIES
 
     parser = argparse.ArgumentParser(description="ATLAS Discovery Engine")
@@ -172,7 +320,16 @@ def main():
         default=128,
         help="History window size for calibration updates in policy engine",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    ok, message = _validate_discovery_args(args)
+    if not ok:
+        print(f"\n  [ERROR] {message}", file=sys.stderr)
+        return 2
 
     from atlas.config import get_config
     from atlas.training.run_utils import resolve_run_dir, write_run_manifest
@@ -200,7 +357,7 @@ def main():
             results_dir.mkdir(parents=True, exist_ok=True)
             created_new = False
     except Exception as exc:
-        print(f"\n  [ERROR] Failed to resolve results directory: {exc}")
+        print(f"\n  [ERROR] Failed to resolve results directory: {exc}", file=sys.stderr)
         return 2
 
     manifest_path = write_run_manifest(

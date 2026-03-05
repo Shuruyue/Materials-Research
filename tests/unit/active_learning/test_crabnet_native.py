@@ -49,6 +49,21 @@ def test_forward_handles_reversed_input_order_and_fraction_sanitization(monkeypa
     assert torch.isclose(seen_frac[:, 2].sum(), torch.tensor(0.0), atol=1e-6)
 
 
+def test_normalize_input_order_handles_non_finite_fraction_rows(monkeypatch):
+    _patch_dummy(monkeypatch)
+    model = crabnet_native.NativeCrabnetScreener(
+        return_distribution=False,
+        simplex_transform="none",
+        simplex_blend=0.0,
+    )
+
+    frac_like = torch.tensor([[0.7, 0.3, float("nan")]], dtype=torch.float32)
+    src_like = torch.tensor([[26.0, 8.0, 0.0]], dtype=torch.float32)
+    src, frac = model._normalize_input_order(frac_like, src_like)
+    assert torch.equal(src, torch.tensor([[26, 8, 0]], dtype=torch.long))
+    assert frac.dtype == torch.float32
+
+
 def test_escort_simplex_transform_matches_power_geometry(monkeypatch):
     _patch_dummy(monkeypatch)
     model = crabnet_native.NativeCrabnetScreener(
@@ -113,6 +128,45 @@ def test_conformal_temperature_calibration_updates_scale(monkeypatch):
 
     assert t > 0.0
     assert float(model.uncertainty_temperature.item()) == t
+
+
+def test_conformal_temperature_calibration_ignores_invalid_rows(monkeypatch):
+    _patch_dummy(monkeypatch)
+    model = crabnet_native.NativeCrabnetScreener(
+        return_distribution=True,
+        simplex_transform="none",
+        simplex_blend=0.0,
+    )
+    y_true = torch.tensor([1.0, float("nan"), 2.0], dtype=torch.float32)
+    y_pred = torch.tensor([1.2, 0.0, 1.5], dtype=torch.float32)
+    y_std = torch.tensor([0.1, 0.2, 0.0], dtype=torch.float32)
+    t = model.calibrate_uncertainty_temperature(y_true, y_pred, y_std, quantile=0.8)
+    assert abs(t - 2.0) < 1e-6
+    assert abs(float(model.uncertainty_temperature.item()) - 2.0) < 1e-6
+
+
+def test_grouped_calibration_preserves_previous_table_when_inputs_invalid(monkeypatch):
+    _patch_dummy(monkeypatch)
+    model = crabnet_native.NativeCrabnetScreener(
+        return_distribution=True,
+        simplex_transform="none",
+        simplex_blend=0.0,
+        grouped_calibration=True,
+    )
+    model.group_temperature_table = {2: 1.1}
+    y_true = torch.tensor([float("nan"), float("nan")], dtype=torch.float32)
+    y_pred = torch.tensor([0.0, 0.0], dtype=torch.float32)
+    y_std = torch.tensor([0.0, 0.0], dtype=torch.float32)
+    src = torch.tensor([[26, 8, 0], [14, 8, 0]], dtype=torch.long)
+    table = model.calibrate_uncertainty_temperature_grouped(
+        y_true,
+        y_pred,
+        y_std,
+        src,
+        quantile=0.9,
+        min_group_size=2,
+    )
+    assert table == {2: 1.1}
 
 
 def test_log_var_head_mode_is_supported(monkeypatch):
@@ -197,3 +251,40 @@ def test_optimize_escort_power_updates_parameter(monkeypatch):
     q = model.optimize_escort_power(frac, src=src, target_entropy_ratio=0.9, q_min=0.2, q_max=1.5, q_steps=12)
     assert 0.2 <= q <= 1.5
     assert abs(model.escort_power - q) < 1e-12
+
+
+def test_constructor_integer_controls_reject_bool_and_fractional_values(monkeypatch):
+    _patch_dummy(monkeypatch)
+    model = crabnet_native.NativeCrabnetScreener(
+        return_distribution=True,
+        mean_dims=2.7,
+        ensemble_size=True,
+        mc_dropout_samples=3.5,
+    )
+    assert model.mean_dims == 1
+    assert model.ensemble_size == 1
+    assert model.mc_dropout_samples == 0
+
+
+def test_grouped_calibration_table_sanitizes_invalid_group_entries(monkeypatch):
+    _patch_dummy(monkeypatch)
+    model = crabnet_native.NativeCrabnetScreener(
+        return_distribution=True,
+        simplex_transform="none",
+        simplex_blend=0.0,
+        grouped_calibration=True,
+    )
+    model.group_temperature_table = {
+        2: 2.0,
+        "3.5": 4.0,
+        -1: 1.8,
+        "bad": 2.1,
+        True: 5.0,
+    }
+    src = torch.tensor([[26, 8, 0], [26, 8, 1]], dtype=torch.long)
+    std = torch.ones((2, 1), dtype=torch.float32)
+    calibrated = model._apply_uncertainty_calibration(std, src=src)
+
+    assert torch.isclose(calibrated[0, 0], torch.tensor(2.0))
+    assert torch.isclose(calibrated[1, 0], torch.tensor(1.0))
+    assert model.group_temperature_table == {2: 2.0}

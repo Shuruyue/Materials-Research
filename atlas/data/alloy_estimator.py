@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 
@@ -54,11 +55,20 @@ class AlloyPhase:
     volume_fraction: float = field(default=0.0)
 
     def get(self, key: str, default: float = 0.0) -> float:
-        return float(self.properties.get(key, default))
+        value = self.properties.get(key, default)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(parsed):
+            return float(default)
+        return parsed
 
 
 class AlloyEstimator:
     def __init__(self, name: str, phases: list[AlloyPhase]):
+        if not phases:
+            raise ValueError("At least one phase is required")
         self.name = name
         self.phases = phases
         self._normalize_weight_fractions()
@@ -68,33 +78,94 @@ class AlloyEstimator:
     def _normalize_preset_key(preset: str) -> str:
         return preset.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
 
+    @staticmethod
+    def _coerce_finite_real(
+        value: float,
+        *,
+        field_name: str,
+        allow_non_finite: bool = False,
+    ) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name} must be a finite real number, got bool")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a finite real number") from exc
+        if not allow_non_finite and not np.isfinite(parsed):
+            raise ValueError(f"{field_name} must be finite")
+        return float(parsed)
+
+    @staticmethod
+    def _coerce_nonnegative_finite(value: float, *, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(parsed):
+            return float(default)
+        return max(parsed, 0.0)
+
+    @staticmethod
+    def _coerce_positive_finite(
+        value: float,
+        *,
+        default: float = 1e-8,
+        floor: float = 1e-8,
+    ) -> float:
+        nonnegative = AlloyEstimator._coerce_nonnegative_finite(value, default=default)
+        return max(nonnegative, float(floor))
+
+    @staticmethod
+    def _normalize_nonnegative_fractions(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        arr = np.where(np.isfinite(arr) & (arr > 0), arr, 0.0)
+        total = float(np.sum(arr))
+        if arr.size == 0:
+            return arr
+        if total <= 0:
+            return np.ones(arr.size, dtype=float) / float(arr.size)
+        return arr / total
+
     @classmethod
     def available_presets(cls) -> tuple[str, ...]:
         return ("SAC305", "SAC405", "SnPb63", "pure_Sn", "pure_Cu")
 
-    @staticmethod
-    def convert_wt_to_vol(phases: list[AlloyPhase]):
-        weights = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
-        rho = np.array([max(p.get("density_g_cm3", 1e-6), 1e-6) for p in phases], dtype=float)
+    @classmethod
+    def convert_wt_to_vol(cls, phases: list[AlloyPhase]):
+        if not phases:
+            return
+        weights = np.array(
+            [cls._coerce_nonnegative_finite(p.weight_fraction) for p in phases],
+            dtype=float,
+        )
+        rho = np.array(
+            [cls._coerce_positive_finite(p.get("density_g_cm3", 1e-6), default=1e-6, floor=1e-6) for p in phases],
+            dtype=float,
+        )
         vol = weights / rho
-        denom = float(np.sum(vol))
-        if denom <= 0:
-            frac = np.ones(len(phases), dtype=float) / max(len(phases), 1)
-        else:
-            frac = vol / denom
+        frac = cls._normalize_nonnegative_fractions(vol)
         for p, vf in zip(phases, frac):
             p.volume_fraction = float(vf)
 
     def _normalize_weight_fractions(self):
-        total = float(sum(max(p.weight_fraction, 0.0) for p in self.phases))
+        weights = np.array(
+            [self._coerce_nonnegative_finite(p.weight_fraction) for p in self.phases],
+            dtype=float,
+        )
+        total = float(np.sum(weights))
         if total <= 0:
             raise ValueError("Total weight fraction must be > 0")
-        for p in self.phases:
-            p.weight_fraction = float(max(p.weight_fraction, 0.0) / total)
+        normalized = weights / total
+        for p, wf in zip(self.phases, normalized):
+            p.weight_fraction = float(wf)
 
     @classmethod
     def from_preset(cls, preset: str) -> AlloyEstimator:
+        if not isinstance(preset, str):
+            raise ValueError("preset must be a non-empty string")
         key = cls._normalize_preset_key(preset)
+        if not key:
+            raise ValueError("preset must be a non-empty string")
         presets = {
             "sac305": cls._preset_sac305,
             "sac405": cls._preset_sac405,
@@ -109,14 +180,38 @@ class AlloyEstimator:
 
     @classmethod
     def custom(cls, name: str, phases: list[dict]) -> AlloyEstimator:
+        if not isinstance(phases, list) or not phases:
+            raise ValueError("phases must be a non-empty list")
         parsed = []
-        for ph in phases:
+        for i, ph in enumerate(phases):
+            if not isinstance(ph, dict):
+                raise ValueError(f"phases[{i}] must be a mapping")
+            phase_name = str(ph.get("name", "")).strip()
+            if not phase_name:
+                raise ValueError(f"phases[{i}].name must be non-empty")
+            formula = str(ph.get("formula", phase_name)).strip()
+            if not formula:
+                raise ValueError(f"phases[{i}].formula must be non-empty")
+            weight_fraction = cls._coerce_finite_real(
+                ph.get("weight_fraction"),
+                field_name=f"phases[{i}].weight_fraction",
+                allow_non_finite=True,
+            )
+            raw_properties = ph.get("properties", {})
+            if not isinstance(raw_properties, dict):
+                raise ValueError(f"phases[{i}].properties must be a mapping")
+            properties: dict[str, float] = {}
+            for key, value in raw_properties.items():
+                properties[str(key)] = cls._coerce_finite_real(
+                    value,
+                    field_name=f"phases[{i}].properties[{key!r}]",
+                )
             parsed.append(
                 AlloyPhase(
-                    name=str(ph["name"]),
-                    formula=str(ph.get("formula", ph["name"])),
-                    weight_fraction=float(ph["weight_fraction"]),
-                    properties={k: float(v) for k, v in ph.get("properties", {}).items()},
+                    name=phase_name,
+                    formula=formula,
+                    weight_fraction=weight_fraction,
+                    properties=properties,
                 )
             )
         return cls(name=name, phases=parsed)
@@ -293,8 +388,17 @@ class AlloyEstimator:
 
     @staticmethod
     def _safe_reuss(vf: np.ndarray, x: np.ndarray) -> float:
-        x = np.maximum(x, 1e-8)
-        return float(1.0 / np.sum(vf / x))
+        frac = np.asarray(vf, dtype=float)
+        vals = np.asarray(x, dtype=float)
+        valid = np.isfinite(frac) & np.isfinite(vals) & (frac > 0)
+        if not np.any(valid):
+            return 0.0
+        frac = AlloyEstimator._normalize_nonnegative_fractions(frac[valid])
+        vals = np.maximum(vals[valid], 1e-8)
+        denom = float(np.sum(frac / vals))
+        if not np.isfinite(denom) or denom <= 0:
+            return float(np.mean(vals))
+        return float(1.0 / denom)
 
     @staticmethod
     def _wiener_bounds(frac: np.ndarray, values: np.ndarray) -> tuple[float, float]:
@@ -305,35 +409,48 @@ class AlloyEstimator:
         - Wiener, O. (1912), relation between microstructure and effective transport.
           (Arithmetic/parallel upper bound, harmonic/series lower bound)
         """
-        values = np.maximum(values.astype(float), 1e-8)
-        upper = float(np.sum(frac * values))
-        lower = float(1.0 / np.sum(frac / values))
+        weights = np.asarray(frac, dtype=float)
+        vals = np.asarray(values, dtype=float)
+        valid = np.isfinite(weights) & np.isfinite(vals) & (weights > 0)
+        if not np.any(valid):
+            return 0.0, 0.0
+        weights = AlloyEstimator._normalize_nonnegative_fractions(weights[valid])
+        vals = np.maximum(vals[valid], 1e-8)
+        upper = float(np.sum(weights * vals))
+        denom = float(np.sum(weights / vals))
+        if not np.isfinite(denom) or denom <= 0:
+            lower = float(np.min(vals))
+        else:
+            lower = float(1.0 / denom)
         if lower > upper:
             lower, upper = upper, lower
         return lower, upper
 
     @staticmethod
     def _safe_shannon_entropy(frac: np.ndarray) -> float:
-        frac = np.asarray(frac, dtype=float)
-        frac = frac[frac > 1e-12]
-        if frac.size == 0:
+        values = np.asarray(frac, dtype=float)
+        values = values[np.isfinite(values) & (values > 1e-12)]
+        if values.size == 0:
             return 0.0
-        return float(-np.sum(frac * np.log(frac)))
+        values = values / max(float(np.sum(values)), 1e-12)
+        return float(-np.sum(values * np.log(values)))
 
     @classmethod
+    @lru_cache(maxsize=256)
     def _element_atomic_mass(cls, symbol: str) -> float | None:
-        symbol = str(symbol).strip()
-        if not symbol:
+        raw_symbol = str(symbol).strip()
+        if not raw_symbol:
             return None
+        symbol_norm = raw_symbol[0].upper() + raw_symbol[1:].lower()
         try:
             from pymatgen.core import Element
 
-            m = float(Element(symbol).atomic_mass)
+            m = float(Element(symbol_norm).atomic_mass)
             if np.isfinite(m) and m > 0:
                 return m
         except Exception:
             pass
-        fallback = _COMMON_ELEMENT_MOLAR_MASS.get(symbol.upper())
+        fallback = _COMMON_ELEMENT_MOLAR_MASS.get(symbol_norm.upper())
         if fallback is None:
             return None
         return float(fallback)
@@ -364,6 +481,7 @@ class AlloyEstimator:
         return out or None
 
     @classmethod
+    @lru_cache(maxsize=512)
     def _formula_molar_mass(cls, formula: str) -> float | None:
         stoich = cls._parse_formula_stoichiometry(formula)
         if not stoich:
@@ -378,11 +496,13 @@ class AlloyEstimator:
 
     @classmethod
     def _estimate_mole_fractions(cls, phases: list[AlloyPhase]) -> np.ndarray:
-        wf = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
-        wf_sum = float(np.sum(wf))
-        if wf_sum <= 0:
-            return np.ones(len(phases), dtype=float) / max(len(phases), 1)
-        wf = wf / wf_sum
+        if not phases:
+            return np.array([], dtype=float)
+        wf = np.array(
+            [cls._coerce_nonnegative_finite(p.weight_fraction) for p in phases],
+            dtype=float,
+        )
+        wf = cls._normalize_nonnegative_fractions(wf)
 
         molar_masses = []
         for p in phases:
@@ -409,11 +529,13 @@ class AlloyEstimator:
         """
         if not phases:
             return None
-        wf = np.array([max(p.weight_fraction, 0.0) for p in phases], dtype=float)
-        wf_sum = float(np.sum(wf))
-        if wf_sum <= 0:
+        wf = np.array(
+            [AlloyEstimator._coerce_nonnegative_finite(p.weight_fraction) for p in phases],
+            dtype=float,
+        )
+        wf = AlloyEstimator._normalize_nonnegative_fractions(wf)
+        if wf.size == 0:
             return None
-        wf = wf / wf_sum
 
         from collections import defaultdict
 
@@ -500,12 +622,24 @@ class AlloyEstimator:
         *,
         thermal_model: str = "geometric",
     ) -> dict[str, float]:
-        vf = np.array([p.volume_fraction for p in self.phases], dtype=float)
-        wf = np.array([p.weight_fraction for p in self.phases], dtype=float)
+        vf = self._normalize_nonnegative_fractions(
+            np.array([self._coerce_nonnegative_finite(p.volume_fraction) for p in self.phases], dtype=float)
+        )
+        wf = self._normalize_nonnegative_fractions(
+            np.array([self._coerce_nonnegative_finite(p.weight_fraction) for p in self.phases], dtype=float)
+        )
         xf_phase = self._estimate_mole_fractions(self.phases)
         xf_element = self._estimate_element_mole_fractions(self.phases)
 
-        density = float(np.sum(vf * np.array([p.get("density_g_cm3") for p in self.phases])))
+        density = float(
+            np.sum(
+                vf
+                * np.array(
+                    [self._coerce_positive_finite(p.get("density_g_cm3"), default=1e-6, floor=1e-6) for p in self.phases],
+                    dtype=float,
+                )
+            )
+        )
         K = np.array([p.get("bulk_modulus_GPa") for p in self.phases], dtype=float)
         G = np.array([p.get("shear_modulus_GPa") for p in self.phases], dtype=float)
 
@@ -520,7 +654,10 @@ class AlloyEstimator:
         young = float(9.0 * K_vrh * G_vrh / denom) if denom > 1e-8 else 0.0
         poisson = float((3.0 * K_vrh - 2.0 * G_vrh) / (2.0 * denom)) if denom > 1e-8 else 0.0
 
-        kappa = np.array([max(p.get("thermal_conductivity_W_mK"), 1e-8) for p in self.phases], dtype=float)
+        kappa = np.array(
+            [self._coerce_positive_finite(p.get("thermal_conductivity_W_mK"), default=1e-8, floor=1e-8) for p in self.phases],
+            dtype=float,
+        )
         kappa_wiener_lo, kappa_wiener_hi = self._wiener_bounds(vf, kappa)
         thermal_model_key = str(thermal_model).strip().lower()
         if thermal_model_key == "geometric":
@@ -537,7 +674,10 @@ class AlloyEstimator:
         cte = float(np.sum(vf * np.array([p.get("thermal_expansion_1e6_K") for p in self.phases], dtype=float)))
         # Use harmonic averaging for alloy melting point proxy.
         # This is empirically closer to solder liquidus behavior than arithmetic mean.
-        tm = np.array([max(p.get("melting_point_K"), 1e-8) for p in self.phases], dtype=float)
+        tm = np.array(
+            [self._coerce_positive_finite(p.get("melting_point_K"), default=1e-8, floor=1e-8) for p in self.phases],
+            dtype=float,
+        )
         melting = float(1.0 / np.sum(wf / tm))
         melting_arith = float(np.sum(wf * tm))
 
@@ -608,6 +748,7 @@ class AlloyEstimator:
         if experimental:
             print("Experimental Comparison:")
             for k, v in experimental.items():
-                if k in props and v != 0:
-                    err = 100.0 * (props[k] - float(v)) / float(v)
-                    print(f"{k}: pred={props[k]:.3f}, exp={float(v):.3f}, err={err:.2f}%")
+                exp_v = self._coerce_nonnegative_finite(v, default=np.nan)
+                if k in props and np.isfinite(exp_v) and exp_v > 0:
+                    err = 100.0 * (props[k] - exp_v) / exp_v
+                    print(f"{k}: pred={props[k]:.3f}, exp={exp_v:.3f}, err={err:.2f}%")

@@ -54,6 +54,11 @@ new/
 
 # Testing
 .pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+.mypy_cache/
 
 # Gemini / Agent
 .gemini/

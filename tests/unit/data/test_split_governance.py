@@ -2,10 +2,14 @@
 
 import itertools
 
+import numpy as np
 import pytest
 
 from atlas.data.split_governance import (
     SplitManifest,
+    _normalized_ratios,
+    _normalize_search_hyperparams,
+    _sanitize_similarity_matrix,
     build_assignment_records,
     compositional_split,
     compute_split_overlap_counts,
@@ -68,6 +72,20 @@ class TestIIDSplit:
         ids = [f"S{i}" for i in range(10)]
         with pytest.raises(ValueError):
             iid_split(ids, ratios=(0.8, -0.1, 0.3))
+        with pytest.raises(ValueError):
+            iid_split(ids, ratios=(0.8, float("nan"), 0.2))
+        with pytest.raises(ValueError):
+            iid_split(ids, ratios=(True, 0.1, 0.9))
+
+    def test_id_normalization_rejects_whitespace_collisions(self):
+        ids = ["A", " A "]
+        with pytest.raises(ValueError):
+            iid_split(ids, seed=42)
+
+    def test_id_normalization_rejects_boolean_identifiers(self):
+        ids = [True, "S1"]  # type: ignore[list-item]
+        with pytest.raises(ValueError, match="non-boolean identifier"):
+            iid_split(ids, seed=42)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +147,12 @@ class TestCompositionalSplit:
         formulas = ["Li2O"] * 9
         with pytest.raises(ValueError):
             compositional_split(ids, formulas, seed=42)
+
+    def test_fractional_n_restarts_rejected(self):
+        ids = [f"S{i}" for i in range(6)]
+        formulas = ["Li2O", "Li2O", "Fe2O3", "Fe2O3", "NaCl", "NaCl"]
+        with pytest.raises(ValueError):
+            compositional_split(ids, formulas, n_restarts=2.5)
 
     def test_label_balance_regularization_reduces_target_drift(self):
         ids = [f"S{i}" for i in range(12)]
@@ -239,6 +263,31 @@ class TestCompositionalSplit:
         with pytest.raises(ValueError):
             compositional_split(ids, formulas, feature_vectors=feats)
 
+    def test_zero_restarts_is_guarded_to_single_restart(self):
+        ids = [f"S{i}" for i in range(20)]
+        formulas = ["Li2O"] * 5 + ["Na2O"] * 5 + ["Fe2O3"] * 5 + ["Co2O3"] * 5
+        splits = compositional_split(ids, formulas, seed=42, n_restarts=0)
+        all_ids = set(splits["train"]) | set(splits["val"]) | set(splits["test"])
+        assert all_ids == set(ids)
+
+    def test_sanitize_similarity_matrix_stabilizes_nonfinite_entries(self):
+        raw = np.array(
+            [
+                [1.0, np.nan, np.inf],
+                [-np.inf, 1.0, 0.5],
+                [0.2, 0.4, 1.0],
+            ],
+            dtype=float,
+        )
+        out = _sanitize_similarity_matrix(raw, n_groups=3)
+        assert out is not None
+        assert out.shape == (3, 3)
+        assert np.all(np.isfinite(out))
+        assert np.all(out >= 0.0)
+        assert np.all(out <= 1.0)
+        assert np.allclose(out, out.T)
+        assert np.allclose(np.diag(out), 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Prototype split
@@ -286,6 +335,29 @@ class TestPrototypeSplit:
         sgs = ["225"] * 9
         with pytest.raises(ValueError):
             prototype_split(ids, sgs, seed=42)
+
+    def test_spacegroup_values_are_normalized(self):
+        ids = ["S0", "S1", "S2", "S3"]
+        sgs = [" 225 ", "225", " 186 ", "186"]
+        splits = prototype_split(ids, sgs, seed=42, ratios=(0.5, 0.25, 0.25))
+        assignment = {
+            sid: split
+            for split in ("train", "val", "test")
+            for sid in splits[split]
+        }
+        assert assignment["S0"] == assignment["S1"]
+        assert assignment["S2"] == assignment["S3"]
+
+    def test_boolean_spacegroup_values_map_to_unknown_group(self):
+        ids = ["S0", "S1", "S2", "S3"]
+        sgs = [True, False, "225", "225"]  # type: ignore[list-item]
+        splits = prototype_split(ids, sgs, seed=42, ratios=(0.5, 0.25, 0.25))
+        assignment = {
+            sid: split
+            for split in ("train", "val", "test")
+            for sid in splits[split]
+        }
+        assert assignment["S0"] == assignment["S1"]
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +414,12 @@ class TestSplitManifest:
         assert d["split_strategy"] == "compositional"
         assert d["seed"] == 99
 
+    def test_generate_manifest_rejects_unknown_strategy(self):
+        ids = [f"S{i}" for i in range(5)]
+        splits = iid_split(ids, seed=42)
+        with pytest.raises(ValueError):
+            generate_manifest("legacy", splits, seed=42)
+
     def test_assignment_rows_deterministic(self):
         splits = {
             "train": ["S2", "S1"],
@@ -364,3 +442,18 @@ class TestSplitManifest:
         assert overlap["train__val"] == 1
         assert overlap["train__test"] == 0
         assert overlap["val__test"] == 0
+
+
+def test_normalized_ratios_requires_finite_non_boolean_numbers():
+    with pytest.raises(ValueError):
+        _normalized_ratios((0.7, float("inf"), 0.3))
+    with pytest.raises(ValueError):
+        _normalized_ratios((False, 0.2, 0.8))
+
+
+def test_normalize_search_hyperparams_rejects_fractional_and_bool_values():
+    assert _normalize_search_hyperparams(n_restarts=0, local_moves=8) == (1, 8)
+    with pytest.raises(ValueError):
+        _normalize_search_hyperparams(n_restarts=1.1, local_moves=8)
+    with pytest.raises(ValueError):
+        _normalize_search_hyperparams(n_restarts=4, local_moves=True)

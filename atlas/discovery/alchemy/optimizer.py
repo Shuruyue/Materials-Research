@@ -1,8 +1,36 @@
-
+import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from atlas.discovery.alchemy.calculator import AlchemicalMACECalculator
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from atlas.discovery.alchemy.calculator import AlchemicalMACECalculator
+
+logger = logging.getLogger(__name__)
+
+
+def _is_boolean_like(value: object) -> bool:
+    return isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}
+
+
+def _coerce_non_negative_int(value: object, *, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+    if isinstance(value, (int, np.integer)):
+        number = int(value)
+    elif isinstance(value, (float, np.floating)):
+        scalar = float(value)
+        if not np.isfinite(scalar) or not scalar.is_integer():
+            raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+        number = int(scalar)
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be an integer >= 0, got {value!r}") from exc
+    if number < 0:
+        raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+    return number
 
 
 class CompositionOptimizer:
@@ -11,11 +39,16 @@ class CompositionOptimizer:
     Enforces constraints such that weights for species at the same site sum to 1.0.
     """
 
-    def __init__(self, calculator: AlchemicalMACECalculator, learning_rate: float = 0.01):
+    def __init__(self, calculator: "AlchemicalMACECalculator", learning_rate: float = 0.01):
         self.calc = calculator
-        self.lr = learning_rate
+        if _is_boolean_like(learning_rate):
+            raise ValueError("learning_rate must be a finite positive scalar")
+        lr = float(learning_rate)
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError("learning_rate must be a finite positive scalar")
+        self.lr = lr
         self.constraints = self._infer_constraints()
-        print(f"DEBUG: Inferred constraints: {self.constraints}")
+        logger.debug("Inferred composition constraints: %s", self.constraints)
 
     def _infer_constraints(self) -> dict[int, list[int]]:
         """
@@ -29,7 +62,7 @@ class CompositionOptimizer:
         # It matches the alchemical_weights tensor order.
         # alchemical_pairs[i] corresponds to weights[i]
 
-        atom_to_weights = {}
+        atom_to_weights: dict[int, list[int]] = {}
 
         for weight_idx, pairs in enumerate(mgr.alchemical_pairs):
             # Each 'pairs' list corresponds to one weight channel.
@@ -41,9 +74,9 @@ class CompositionOptimizer:
             atom_indices = set()
             for pair in pairs:
                 if hasattr(pair, "atom_index"):
-                    atom_indices.add(pair.atom_index)
+                    atom_indices.add(int(pair.atom_index))
                 else:
-                    atom_indices.add(pair[0])
+                    atom_indices.add(int(pair[0]))
 
             for atom_id in atom_indices:
                 if atom_id not in atom_to_weights:
@@ -56,7 +89,32 @@ class CompositionOptimizer:
         # For now, let's strictly handle Sum(w) = 1 groups (2+ species).
         # And for single species, keep w in [0, 1].
 
+        for atom_id in list(atom_to_weights.keys()):
+            atom_to_weights[atom_id] = sorted(set(atom_to_weights[atom_id]))
         return atom_to_weights
+
+    @staticmethod
+    def _project_to_simplex(vector: np.ndarray) -> np.ndarray:
+        """
+        Euclidean projection onto probability simplex.
+
+        Reference:
+        - Duchi et al. (2008), "Efficient Projections onto the l1-Ball..." (ICML)
+        """
+        v = np.asarray(vector, dtype=np.float64).reshape(-1)
+        if v.size == 0:
+            return v.astype(np.float32)
+
+        u = np.sort(v)[::-1]
+        cssv = np.cumsum(u) - 1.0
+        index = np.arange(1, v.size + 1)
+        cond = u - cssv / index > 0.0
+        if not np.any(cond):
+            return np.full(v.shape, 1.0 / float(v.size), dtype=np.float32)
+        rho = int(index[cond][-1])
+        theta = cssv[rho - 1] / float(rho)
+        projected = np.maximum(v - theta, 0.0)
+        return projected.astype(np.float32)
 
     def step(self):
         """
@@ -72,15 +130,24 @@ class CompositionOptimizer:
         # We need to call get_potential_energy to trigger calculate()
         # But we don't want to move atoms, so just call it.
         atoms = self.calc.atoms
-        if atoms is not None and atoms.calc is None:
-            # Ensure linkage.
+        if atoms is None:
+            raise RuntimeError("Calculator has no attached atoms.")
+        if atoms.calc is not self.calc:
             atoms.calc = self.calc
 
-        energy = atoms.get_potential_energy()
-        grad = self.calc.results["alchemical_grad"] # numpy array
+        try:
+            energy = float(atoms.get_potential_energy())
+            grad = np.asarray(self.calc.results["alchemical_grad"], dtype=np.float32).reshape(-1)
+        finally:
+            self.calc.calculate_alchemical_grad = False
 
         # 2. Update Weights
-        current_weights = self.calc.alchemy_manager.alchemical_weights.detach().cpu().numpy()
+        current_weights = self.calc.alchemy_manager.alchemical_weights.detach().cpu().numpy().astype(np.float32)
+        if grad.shape != current_weights.shape:
+            raise ValueError(
+                f"Gradient shape mismatch: expected {current_weights.shape}, got {grad.shape}"
+            )
+        grad = np.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         new_weights = current_weights - self.lr * grad
 
         # 3. Project Constraints
@@ -88,7 +155,6 @@ class CompositionOptimizer:
 
         # 4. Update Calculator
         self.calc.set_alchemical_weights(new_weights)
-        self.calc.calculate_alchemical_grad = False # Reset
 
         return energy, new_weights
 
@@ -100,34 +166,38 @@ class CompositionOptimizer:
         # We need to handle this carefully.
         # Use simple projection: Clip negative, then Normalize groups.
 
-        # 1. Global Clip [0, 1]
-        weights = np.clip(weights, 0.0, 1.0)
+        projected = np.asarray(weights, dtype=np.float32).reshape(-1)
+        expected = int(self.calc.alchemy_manager.alchemical_weights.numel())
+        if projected.size != expected:
+            raise ValueError(f"weights size mismatch: got {projected.size}, expected {expected}")
+        projected = np.nan_to_num(projected, nan=0.0, posinf=1.0, neginf=0.0)
+        projected = np.clip(projected, 0.0, 1.0)
 
         # 2. Group Normalization
         for _atom_idx, weight_indices in self.constraints.items():
+            if not weight_indices:
+                continue
+            if min(weight_indices) < 0 or max(weight_indices) >= projected.size:
+                raise ValueError(
+                    f"constraint contains out-of-range weight index for atom {_atom_idx}: {weight_indices}"
+                )
             if len(weight_indices) > 1:
                 # Sum of these weights should be 1.0
-                subset = weights[weight_indices]
-                total = np.sum(subset)
-
-                if total > 1e-6:
-                    weights[weight_indices] = subset / total
-                else:
-                    # If all zero, reset to uniform? Or keep zero?
-                    # Keep as is, or warn.
-                    pass
+                subset = projected[weight_indices]
+                projected[weight_indices] = self._project_to_simplex(subset)
             elif len(weight_indices) == 1:
                 # Single species. Unconstrained optimization in [0, 1]?
                 # Usually implies vacancy optimization if we let it drift.
                 # If we want it fixed 1.0, it shouldn't be in alchemical_weights optimization?
                 # Let's assume [0, 1] optimization (vacancy).
-                pass
+                projected[weight_indices] = np.clip(projected[weight_indices], 0.0, 1.0)
 
-        return weights
+        return projected
 
     def run(self, steps=50, verbose=True):
+        total_steps = _coerce_non_negative_int(steps, name="steps")
         traj = []
-        for i in range(steps):
+        for i in range(total_steps):
             e, w = self.step()
             traj.append({"energy": e, "weights": w.copy()})
             if verbose:

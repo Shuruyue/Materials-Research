@@ -7,6 +7,7 @@ from atlas.active_learning.pareto_utils import (
     hypervolume_2d,
     mc_hv_improvements_shared,
     non_dominated_sort,
+    pareto_front,
 )
 
 
@@ -128,3 +129,50 @@ def test_shared_hv_improvement_3d_respects_feasibility_threshold():
     assert improvements[0] > 0.0
     assert improvements[1] > 0.0
     assert improvements[2] == 0.0
+
+
+def test_pareto_front_empty_preserves_dimension():
+    points = np.zeros((0, 3), dtype=float)
+    front = pareto_front(points)
+    assert front.shape == (0, 3)
+
+
+def test_non_dominated_sort_treats_nonfinite_points_as_worst():
+    points = np.array(
+        [
+            [0.9, 0.9],
+            [0.8, 0.8],
+            [np.nan, 1.0],
+        ],
+        dtype=float,
+    )
+    fronts = non_dominated_sort(points)
+    rank_map: dict[int, int] = {}
+    for rank, front in enumerate(fronts):
+        for idx in front:
+            rank_map[int(idx)] = rank
+    assert rank_map[2] > rank_map[0]
+
+
+def test_hypervolume_ignores_nonfinite_rows():
+    clean = np.array([[0.8, 0.4], [0.4, 0.8]], dtype=float)
+    dirty = np.vstack([clean, np.array([[np.nan, 0.9], [np.inf, 0.2]], dtype=float)])
+    ref = np.array([0.0, 0.0], dtype=float)
+    clean_hv = hypervolume(clean, ref)
+    dirty_hv = hypervolume(dirty, ref)
+    np.testing.assert_allclose(dirty_hv, clean_hv, rtol=0.0, atol=1e-12)
+
+
+def test_non_dominated_sort_all_nonfinite_returns_single_terminal_front():
+    points = np.array([[np.nan, 1.0], [np.inf, -np.inf]], dtype=float)
+    fronts = non_dominated_sort(points)
+    assert len(fronts) == 1
+    np.testing.assert_array_equal(np.sort(fronts[0]), np.array([0, 1], dtype=int))
+
+
+def test_hypervolume_single_point_3d_matches_exact_box_volume():
+    point = np.array([[0.9, 0.8, 0.7]], dtype=float)
+    ref = np.array([0.1, 0.2, 0.3], dtype=float)
+    hv = hypervolume(point, ref, hv_mc_samples=256, hv_mc_seed=123, iteration=1)
+    expected = float((0.9 - 0.1) * (0.8 - 0.2) * (0.7 - 0.3))
+    np.testing.assert_allclose(hv, expected, rtol=0.0, atol=1e-12)

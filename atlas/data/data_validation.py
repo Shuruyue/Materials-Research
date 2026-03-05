@@ -212,6 +212,23 @@ ProvenanceRecord = dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert nested structures to strict-JSON-safe payloads."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 @dataclass
 class ValidationReport:
     """Aggregated validation report."""
@@ -259,8 +276,9 @@ class ValidationReport:
 
     def to_json(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _json_safe(self.to_dict())
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
         return path
 
     def to_markdown(self, path: Path) -> Path:
@@ -368,7 +386,7 @@ def _stable_hash(obj: Any) -> str:
         payload = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):
         payload = str(obj)
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _sample_id(rec: dict[str, Any], index: int) -> str:
@@ -459,7 +477,10 @@ def check_duplicates(
     """Return mapping of duplicate key -> list of indices."""
     seen: dict[str, list[int]] = {}
     for i, r in enumerate(records):
-        key = str(r.get(key_field, ""))
+        raw = r.get(key_field, "")
+        if raw is None:
+            continue
+        key = str(raw).strip()
         if not key:
             continue
         seen.setdefault(key, []).append(i)
@@ -904,6 +925,19 @@ def _to_clean_array(values: list[float]) -> np.ndarray:
     return np.asarray(clean, dtype=float)
 
 
+def _coerce_positive_int(value: Any, *, default: int, minimum: int = 1) -> int:
+    """Safely coerce user-provided integer hyperparameters."""
+    if isinstance(value, bool):
+        return int(default)
+    with contextlib.suppress(TypeError, ValueError):
+        parsed = float(value)
+        if math.isfinite(parsed):
+            rounded = int(round(parsed))
+            if abs(parsed - rounded) <= 1e-9 and rounded >= int(minimum):
+                return rounded
+    return int(default)
+
+
 def _median_heuristic_bandwidth(values: np.ndarray) -> float:
     """Median-heuristic kernel bandwidth for 1D RBF-MMD."""
     if values.size < 2:
@@ -1061,12 +1095,13 @@ def compute_mmd_rbf(
     new = _to_clean_array(values_new)
     if old.size < 2 or new.size < 2:
         return 0.0
+    max_points_i = _coerce_positive_int(max_points, default=512, minimum=16)
 
     rng = np.random.RandomState(0)
-    if old.size > max_points:
-        old = old[rng.choice(old.size, size=max_points, replace=False)]
-    if new.size > max_points:
-        new = new[rng.choice(new.size, size=max_points, replace=False)]
+    if old.size > max_points_i:
+        old = old[rng.choice(old.size, size=max_points_i, replace=False)]
+    if new.size > max_points_i:
+        new = new[rng.choice(new.size, size=max_points_i, replace=False)]
 
     sigma = _median_heuristic_bandwidth(np.concatenate([old, new]))
     gamma = 1.0 / (2.0 * sigma * sigma)
@@ -1207,20 +1242,21 @@ def compute_drift(
     if hi <= lo:
         return 0.0
 
-    bin_width = (hi - lo) / n_bins
+    n_bins_i = _coerce_positive_int(n_bins, default=50, minimum=2)
+    bin_width = (hi - lo) / n_bins_i
     eps = 1e-8
 
     def _hist(vals: list[float]) -> list[float]:
-        counts = [0.0] * n_bins
+        counts = [0.0] * n_bins_i
         for v in vals:
-            idx = min(int((v - lo) / bin_width), n_bins - 1)
+            idx = min(int((v - lo) / bin_width), n_bins_i - 1)
             counts[idx] += 1
         total = sum(counts)
         return [(c / total) + eps for c in counts]
 
     p = _hist(clean_new)
     q = _hist(clean_old)
-    kl = sum(p[i] * math.log(p[i] / q[i]) for i in range(n_bins))
+    kl = sum(p[i] * math.log(p[i] / q[i]) for i in range(n_bins_i))
     return max(0.0, kl)
 
 
@@ -1665,11 +1701,16 @@ def _load_records_from_input(path: Path) -> list[dict[str, Any]]:
     if suffix == ".jsonl":
         rows: list[dict[str, Any]] = []
         with open(path, encoding="utf-8") as f:
-            for line in f:
+            for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"--input .jsonl contains invalid JSON at line {lineno}: {exc.msg}"
+                    ) from exc
                 if isinstance(obj, dict):
                     rows.append(obj)
         return rows

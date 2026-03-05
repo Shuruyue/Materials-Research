@@ -7,13 +7,231 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-from collections.abc import Sequence
+import re
+import sys
+from collections.abc import Mapping, Sequence
+from numbers import Integral, Real
 from pathlib import Path
 
 import torch
 
 from atlas.benchmark.runner import MatbenchRunner
 from atlas.training.preflight import run_preflight
+
+_SAFE_PROPERTY_GROUP = re.compile(r"^[A-Za-z0-9._-]+$")
+_STATE_DICT_CONTAINER_KEYS = ("model_state_dict", "state_dict", "model")
+
+
+def _normalize_optional_text(value: object) -> str:
+    return str(value).strip()
+
+
+def _coerce_int_with_min(value: object, *, arg_name: str, minimum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{arg_name} must be an integer")
+    if isinstance(value, Integral):
+        number = int(value)
+    elif isinstance(value, Real):
+        number_f = float(value)
+        if not number_f.is_integer():
+            raise ValueError(f"{arg_name} must be an integer")
+        number = int(number_f)
+    else:
+        try:
+            number = int(value)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ValueError(f"{arg_name} must be an integer") from exc
+    if number < int(minimum):
+        comparator = "> 0" if minimum == 1 else f">= {minimum}"
+        raise ValueError(f"{arg_name} must be {comparator}")
+    return number
+
+
+def _coerce_probability_in_range(
+    value: object,
+    *,
+    arg_name: str,
+    lo: float,
+    hi: float,
+    inclusive_lo: bool = True,
+    inclusive_hi: bool = True,
+) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{arg_name} must be a finite float")
+    if isinstance(value, Real):
+        out = float(value)
+    else:
+        try:
+            out = float(value)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ValueError(f"{arg_name} must be a finite float") from exc
+    if not (out == out and out not in {float("inf"), float("-inf")}):
+        raise ValueError(f"{arg_name} must be finite")
+
+    lo_ok = out >= lo if inclusive_lo else out > lo
+    hi_ok = out <= hi if inclusive_hi else out < hi
+    if not (lo_ok and hi_ok):
+        left = "[" if inclusive_lo else "("
+        right = "]" if inclusive_hi else ")"
+        raise ValueError(f"{arg_name} must be in {left}{lo}, {hi}{right}")
+    return float(out)
+
+
+def _parse_model_kwargs(model_kwargs_json: str) -> dict:
+    payload = model_kwargs_json or "{}"
+    try:
+        kwargs = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--model-kwargs must be valid JSON object: {exc}") from exc
+    if not isinstance(kwargs, dict):
+        raise ValueError("--model-kwargs must decode to a JSON object")
+    return kwargs
+
+
+def _looks_like_state_dict(payload: Mapping[object, object]) -> bool:
+    if not payload:
+        return False
+    for key in payload:
+        if not isinstance(key, str) or not key:
+            return False
+    return any(
+        "." in key
+        or key in {"weight", "bias"}
+        or key.endswith(("weight", "bias", "running_mean", "running_var", "num_batches_tracked"))
+        for key in payload
+    )
+
+
+def _extract_state_dict(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise ValueError(
+            "Unsupported checkpoint format. Expected state_dict mapping or mapping with model_state_dict/state_dict/model."
+        )
+
+    candidate: Mapping[object, object] | None = None
+    for container_key in _STATE_DICT_CONTAINER_KEYS:
+        nested = payload.get(container_key)
+        if isinstance(nested, Mapping) and _looks_like_state_dict(nested):
+            candidate = nested
+            break
+    if candidate is None:
+        if not _looks_like_state_dict(payload):
+            raise ValueError(
+                "Unsupported checkpoint format. Expected state_dict mapping or mapping with model_state_dict/state_dict/model."
+            )
+        candidate = payload
+
+    normalized: dict[str, object] = {}
+    for raw_key, value in candidate.items():
+        if not isinstance(raw_key, str) or not raw_key:
+            raise ValueError("Unsupported checkpoint format. Found non-string state_dict key.")
+        key = raw_key[7:] if raw_key.startswith("module.") else raw_key
+        if not key:
+            raise ValueError("Unsupported checkpoint format. Found empty normalized state_dict key.")
+        normalized[key] = value
+    return normalized
+
+
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    def _require(condition: bool, message: str) -> None:
+        if not condition:
+            parser.error(message)
+
+    args.task = _normalize_optional_text(args.task)
+    args.property = _normalize_optional_text(args.property)
+    args.model_module = _normalize_optional_text(args.model_module)
+    args.model_class = _normalize_optional_text(args.model_class)
+    args.checkpoint = _normalize_optional_text(args.checkpoint)
+    args.output = _normalize_optional_text(args.output)
+    args.output_dir = _normalize_optional_text(args.output_dir)
+    args.preflight_property_group = _normalize_optional_text(args.preflight_property_group)
+
+    if args.task:
+        _require(args.task in MatbenchRunner.TASKS, f"Unknown --task '{args.task}'")
+    if args.checkpoint:
+        ckpt = Path(args.checkpoint)
+        _require(ckpt.exists(), f"--checkpoint not found: {ckpt}")
+        _require(ckpt.is_file(), f"--checkpoint must be a file: {ckpt}")
+    try:
+        args.batch_size = _coerce_int_with_min(args.batch_size, arg_name="--batch-size", minimum=1)
+        args.bootstrap_samples = _coerce_int_with_min(
+            args.bootstrap_samples,
+            arg_name="--bootstrap-samples",
+            minimum=0,
+        )
+        args.bootstrap_seed = _coerce_int_with_min(args.bootstrap_seed, arg_name="--bootstrap-seed", minimum=0)
+        args.conformal_max_calibration_samples = _coerce_int_with_min(
+            args.conformal_max_calibration_samples,
+            arg_name="--conformal-max-calibration-samples",
+            minimum=0,
+        )
+        args.preflight_max_samples = _coerce_int_with_min(
+            args.preflight_max_samples,
+            arg_name="--preflight-max-samples",
+            minimum=0,
+        )
+        args.preflight_split_seed = _coerce_int_with_min(
+            args.preflight_split_seed,
+            arg_name="--preflight-split-seed",
+            minimum=0,
+        )
+        args.preflight_timeout_sec = _coerce_int_with_min(
+            args.preflight_timeout_sec,
+            arg_name="--preflight-timeout-sec",
+            minimum=1,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    try:
+        args.min_coverage_required = _coerce_probability_in_range(
+            args.min_coverage_required,
+            arg_name="--min-coverage-required",
+            lo=0.0,
+            hi=1.0,
+            inclusive_lo=True,
+            inclusive_hi=True,
+        )
+        args.conformal_coverage = _coerce_probability_in_range(
+            args.conformal_coverage,
+            arg_name="--conformal-coverage",
+            lo=0.0,
+            hi=1.0,
+            inclusive_lo=False,
+            inclusive_hi=False,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    try:
+        jobs = _coerce_int_with_min(args.jobs, arg_name="--jobs", minimum=-10**9)
+    except ValueError as exc:
+        parser.error(str(exc))
+    _require(int(jobs) != 0, "--jobs must be non-zero (-1 means all cores)")
+    args.jobs = int(jobs)
+    if not args.skip_preflight:
+        property_group = args.preflight_property_group
+        _require(bool(property_group), "--preflight-property-group must not be empty")
+        _require(
+            _SAFE_PROPERTY_GROUP.fullmatch(property_group) is not None,
+            "--preflight-property-group contains unsupported characters",
+        )
+    if args.folds is not None:
+        _require(len(args.folds) > 0, "--folds requires at least one fold index")
+        try:
+            normalized_folds = [
+                _coerce_int_with_min(v, arg_name="--folds entries", minimum=0)
+                for v in args.folds
+            ]
+        except ValueError as exc:
+            parser.error(str(exc))
+        args.folds = sorted(set(normalized_folds))
+    if args.output and args.output_dir:
+        _require(False, "--output and --output-dir cannot be used together")
+    if args.skip_preflight and not args.dry_run:
+        parser.error("--skip-preflight is only allowed together with --dry-run.")
+    if args.preflight_only and args.skip_preflight:
+        parser.error("--preflight-only cannot be used with --skip-preflight.")
 
 
 def _load_model(
@@ -28,9 +246,7 @@ def _load_model(
         raise AttributeError(f"Class '{class_name}' not found in module '{module_name}'")
     model_cls = getattr(module, class_name)
 
-    kwargs = json.loads(model_kwargs_json or "{}")
-    if not isinstance(kwargs, dict):
-        raise ValueError("--model-kwargs must decode to a JSON object")
+    kwargs = _parse_model_kwargs(model_kwargs_json)
 
     model = model_cls(**kwargs)
 
@@ -42,15 +258,12 @@ def _load_model(
 
     if checkpoint:
         ckpt_path = Path(checkpoint)
-        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        if isinstance(payload, dict) and "model_state_dict" in payload:
-            state_dict = payload["model_state_dict"]
-        elif isinstance(payload, dict):
-            state_dict = payload
-        else:
-            raise ValueError(
-                "Unsupported checkpoint format. Expected state_dict or dict with model_state_dict."
-            )
+        try:
+            payload = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            # Compatibility fallback for older torch releases.
+            payload = torch.load(ckpt_path, map_location="cpu")
+        state_dict = _extract_state_dict(payload)
         incompatible = model.load_state_dict(state_dict, strict=bool(strict_checkpoint))
         if hasattr(incompatible, "missing_keys"):
             load_info["missing_keys"] = list(incompatible.missing_keys)
@@ -121,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-property-group", type=str, default="priority7")
     parser.add_argument("--preflight-max-samples", type=int, default=0)
     parser.add_argument("--preflight-split-seed", type=int, default=42)
+    parser.add_argument("--preflight-timeout-sec", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -133,10 +347,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for task, prop in MatbenchRunner.TASKS.items():
             print(f"{task}: default_property={prop}")
         return 0
+    _validate_cli_args(parser, args)
 
-    if args.skip_preflight and not args.dry_run:
-        print("[ERROR] --skip-preflight is only allowed together with --dry-run.")
-        return 2
     if not args.skip_preflight:
         project_root = Path(__file__).resolve().parents[2]
         preflight = run_preflight(
@@ -145,9 +357,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_samples=args.preflight_max_samples,
             split_seed=args.preflight_split_seed,
             dry_run=args.dry_run,
+            timeout_sec=args.preflight_timeout_sec,
         )
         if preflight.return_code != 0:
-            print(f"[ERROR] Preflight failed with return code {preflight.return_code}")
+            detail = f" ({preflight.error_message})" if preflight.error_message else ""
+            print(f"[ERROR] Preflight failed with return code {preflight.return_code}{detail}", file=sys.stderr)
             return preflight.return_code
     if args.preflight_only:
         print("[Benchmark] Preflight-only mode completed.")

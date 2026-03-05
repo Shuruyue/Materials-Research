@@ -28,8 +28,10 @@ class _DummyController:
         self.use_synthesis_objective = True
         self.iteration = 3
         self.relaxer = None
+        self.last_n_top = None
 
     def _score_and_select_legacy(self, candidates, n_top):
+        self.last_n_top = n_top
         out = list(candidates)
         out.sort(key=lambda c: c.formula)
         return out
@@ -62,6 +64,7 @@ class _DummyController:
 
     def _select_top_diverse(self, candidates, n_top, *, objective_map=None):
         del objective_map
+        self.last_n_top = n_top
         return list(candidates[:n_top])
 
     def _finalize_ranked_candidates(self, candidates, top):
@@ -123,3 +126,17 @@ def test_policy_engine_cmoeic_sets_artifact_fields_and_risk_gate():
 
     assert by_formula["B"].reject_reason == "risk_gate"
     assert by_formula["B"].acquisition_value < by_formula["A"].acquisition_value
+
+
+def test_policy_engine_sanitizes_non_positive_n_top():
+    controller = _DummyController()
+    cfg = ActiveLearningPolicyConfig(policy_name="legacy")
+    engine = PolicyEngine(config=cfg, state=PolicyState())
+
+    c1 = Candidate(structure=None, formula="B")
+    c2 = Candidate(structure=None, formula="A")
+    _ = engine.score_and_select(controller, [c1, c2], n_top=0)
+    assert controller.last_n_top == 1
+
+    _ = engine.score_and_select(controller, [c1, c2], n_top=1.7)
+    assert controller.last_n_top == 1

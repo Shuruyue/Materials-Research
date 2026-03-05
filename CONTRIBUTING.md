@@ -6,16 +6,14 @@ Thank you for your interest in contributing to ATLAS!
 
 ```bash
 # Clone and create virtual environment
-git clone https://github.com/<your-org>/atlas-materials-research.git
-cd atlas-materials-research
+git clone https://github.com/atlas-materials/atlas.git
+cd atlas
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 # source .venv/bin/activate  # macOS/Linux
 
-# Install in editable mode with dev dependencies
-pip install -r requirements.txt
-pip install -e ".[test]"
-pip install ruff
+# Install in editable mode with full dev profile
+pip install -r requirements-dev.txt
 ```
 
 ## Code Quality

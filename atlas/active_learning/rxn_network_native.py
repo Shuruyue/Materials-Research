@@ -137,22 +137,28 @@ class NativeReactionNetworkEvaluator:
         require_native: bool = False,
     ):
         self.cost_function = self._canonicalize_cost_function(cost_function)
-        self.max_num_pathways = max(1, int(max_num_pathways))
-        self.k_shortest_paths = max(self.max_num_pathways, int(k_shortest_paths))
+        self.max_num_pathways = self._coerce_int(max_num_pathways, default=5, min_value=1)
+        self.k_shortest_paths = max(
+            self.max_num_pathways,
+            self._coerce_int(k_shortest_paths, default=25, min_value=1),
+        )
         self.precursors = list(precursors) if precursors else []
 
-        self.use_balanced_solver = bool(use_balanced_solver)
-        self.max_num_combos = int(max_num_combos)
-        self.find_intermediate_rxns = bool(find_intermediate_rxns)
-        self.intermediate_rxn_energy_cutoff = float(intermediate_rxn_energy_cutoff)
-        self.use_basic_enumerator = bool(use_basic_enumerator)
-        self.use_minimize_enumerator = bool(use_minimize_enumerator)
-        self.filter_interdependent = bool(filter_interdependent)
-        self.chunk_size = int(chunk_size)
+        self.use_balanced_solver = self._coerce_bool(use_balanced_solver, default=True)
+        self.max_num_combos = self._coerce_int(max_num_combos, default=4, min_value=1)
+        self.find_intermediate_rxns = self._coerce_bool(find_intermediate_rxns, default=True)
+        self.intermediate_rxn_energy_cutoff = self._safe_float(intermediate_rxn_energy_cutoff, default=0.0)
+        self.use_basic_enumerator = self._coerce_bool(use_basic_enumerator, default=True)
+        self.use_minimize_enumerator = self._coerce_bool(use_minimize_enumerator, default=False)
+        self.filter_interdependent = self._coerce_bool(filter_interdependent, default=True)
+        self.chunk_size = self._coerce_int(chunk_size, default=100000, min_value=1)
 
-        self.risk_aversion = max(1e-8, float(risk_aversion))
-        self.uncertainty_default = max(0.0, float(uncertainty_default))
-        self.fallback_mode = str(fallback_mode).strip().lower()
+        self.risk_aversion = max(1e-8, self._coerce_nonnegative_finite(risk_aversion, default=2.0))
+        self.uncertainty_default = self._coerce_nonnegative_finite(uncertainty_default, default=0.05)
+        fallback_key = str(fallback_mode).strip().lower()
+        if fallback_key not in {"conservative", "energy_prior"}:
+            fallback_key = "conservative"
+        self.fallback_mode = fallback_key
         self.objective_weights = self._normalize_weights(objective_weights)
 
         self._entries = None
@@ -162,7 +168,7 @@ class NativeReactionNetworkEvaluator:
         self._cached_cost_function_obj = None
 
         self.native_available = bool(HAS_NATIVE_RXN_NETWORK)
-        if require_native and not self.native_available:
+        if self._coerce_bool(require_native, default=False) and not self.native_available:
             raise RuntimeError(
                 "rxn_network native stack is unavailable; "
                 f"import error: {NATIVE_IMPORT_ERROR!r}"
@@ -180,6 +186,44 @@ class NativeReactionNetworkEvaluator:
         return "softplus"
 
     @staticmethod
+    def _coerce_nonnegative_finite(value: object, default: float) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out):
+            return float(default)
+        return float(max(out, 0.0))
+
+    @staticmethod
+    def _coerce_int(value: object, default: int, *, min_value: int = 0) -> int:
+        fallback = int(max(default, min_value))
+        if isinstance(value, bool):
+            return fallback
+        try:
+            numeric = float(value)
+        except Exception:
+            return fallback
+        if not math.isfinite(numeric) or not numeric.is_integer():
+            return fallback
+        return int(max(int(numeric), min_value))
+
+    @staticmethod
+    def _coerce_bool(value: object, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            key = value.strip().lower()
+            if key in {"1", "true", "yes", "y", "on"}:
+                return True
+            if key in {"0", "false", "no", "n", "off"}:
+                return False
+            return bool(default)
+        return bool(value)
+
+    @staticmethod
     def _normalize_weights(weights: dict[str, float] | None) -> dict[str, float]:
         defaults = {
             "average_cost": 0.30,
@@ -194,12 +238,18 @@ class NativeReactionNetworkEvaluator:
 
         merged = defaults.copy()
         for key, value in weights.items():
+            key_str = str(key)
+            if key_str not in defaults:
+                continue
             try:
-                merged[str(key)] = max(0.0, float(value))
+                weight = float(value)
             except Exception:
                 continue
+            if not math.isfinite(weight):
+                continue
+            merged[key_str] = max(0.0, weight)
         total = sum(merged.values())
-        if total <= 0:
+        if total <= 0 or not math.isfinite(total):
             return defaults
         return {k: v / total for k, v in merged.items()}
 
@@ -235,9 +285,12 @@ class NativeReactionNetworkEvaluator:
         try:
             if value is None:
                 return default
-            return float(value)
+            out = float(value)
         except Exception:
             return default
+        if not math.isfinite(out):
+            return default
+        return out
 
     @staticmethod
     def _to_path_list(pathways: object | None) -> list[object]:
@@ -413,24 +466,46 @@ class NativeReactionNetworkEvaluator:
     def _path_step_costs(path: object) -> np.ndarray:
         costs = getattr(path, "costs", None)
         if isinstance(costs, list) and costs:
-            return np.asarray([float(c) for c in costs], dtype=float)
+            vals = [NativeReactionNetworkEvaluator._safe_float(c, default=float("nan")) for c in costs]
+            arr = np.asarray(vals, dtype=float)
+            finite = arr[np.isfinite(arr)]
+            if finite.size:
+                return finite
         reactions = getattr(path, "reactions", [])
         if reactions:
             vals = []
             for rxn in reactions:
-                vals.append(float(getattr(rxn, "energy_per_atom", 0.0)))
-            return np.asarray(vals, dtype=float)
+                vals.append(NativeReactionNetworkEvaluator._safe_float(getattr(rxn, "energy_per_atom", 0.0), 0.0))
+            arr = np.asarray(vals, dtype=float)
+            finite = arr[np.isfinite(arr)]
+            if finite.size:
+                return finite
         return np.asarray([0.0], dtype=float)
 
     @staticmethod
     def _entropic_risk(step_costs: np.ndarray, risk_aversion: float) -> float:
-        if step_costs.size == 0:
+        costs = np.asarray(step_costs, dtype=float).reshape(-1)
+        costs = costs[np.isfinite(costs)]
+        if costs.size == 0:
             return 0.0
         eta = max(float(risk_aversion), 1e-8)
         if eta <= 1e-6:
-            return float(np.mean(step_costs))
-        shifted = step_costs - float(np.min(step_costs))
-        return float(np.min(step_costs) + np.log(np.mean(np.exp(eta * shifted))) / eta)
+            return float(np.mean(costs))
+
+        min_cost = float(np.min(costs))
+        shifted = costs - min_cost
+        scaled = eta * shifted
+        pivot = float(np.max(scaled))
+        if not math.isfinite(pivot):
+            return float(np.mean(costs))
+
+        # Numerically stable log-mean-exp:
+        # log(mean(exp(scaled))) = pivot + log(mean(exp(scaled - pivot))).
+        exp_terms = np.exp(scaled - pivot)
+        mean_exp = float(np.mean(exp_terms))
+        if not math.isfinite(mean_exp) or mean_exp <= 0.0:
+            return float(np.mean(costs))
+        return float(min_cost + (pivot + math.log(mean_exp)) / eta)
 
     def _extract_metrics(self, path: object) -> _PathMetrics:
         step_costs = self._path_step_costs(path)
@@ -463,6 +538,14 @@ class NativeReactionNetworkEvaluator:
         )
 
     @staticmethod
+    def _sanitize_objective_points(points: np.ndarray, finite_penalty: float = 1e6) -> np.ndarray:
+        arr = np.asarray(points, dtype=float)
+        if arr.ndim != 2:
+            return np.zeros((0, 0), dtype=float)
+        # Treat all non-finite objectives as dominated worst cases in minimization space.
+        return np.nan_to_num(arr, nan=finite_penalty, posinf=finite_penalty, neginf=finite_penalty)
+
+    @staticmethod
     def _dominates(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> bool:
         return bool(np.all(a <= b + eps) and np.any(a < b - eps))
 
@@ -472,6 +555,7 @@ class NativeReactionNetworkEvaluator:
         Fast non-dominated sorting (NSGA-II style), O(MN^2).
         快速非支配排序，复杂度 O(MN^2)。
         """
+        points = cls._sanitize_objective_points(points)
         n = points.shape[0]
         if n == 0:
             return [], np.zeros(0, dtype=int)
@@ -538,13 +622,20 @@ class NativeReactionNetworkEvaluator:
 
     @staticmethod
     def _minmax_normalize(values: np.ndarray) -> np.ndarray:
-        if values.size == 0:
-            return values
-        vmin = float(np.min(values))
-        vmax = float(np.max(values))
+        arr = np.asarray(values, dtype=float)
+        if arr.size == 0:
+            return arr
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            return np.zeros_like(arr, dtype=float)
+        safe = arr.copy()
+        max_finite = float(np.max(safe[finite]))
+        safe[~finite] = max_finite
+        vmin = float(np.min(safe))
+        vmax = float(np.max(safe))
         if vmax - vmin <= 1e-12:
-            return np.zeros_like(values, dtype=float)
-        return (values - vmin) / (vmax - vmin)
+            return np.zeros_like(safe, dtype=float)
+        return (safe - vmin) / (vmax - vmin)
 
     def _scalar_penalty(self, metrics: list[_PathMetrics]) -> np.ndarray:
         avg_cost = self._minmax_normalize(np.asarray([m.average_cost for m in metrics], dtype=float))
@@ -573,19 +664,21 @@ class NativeReactionNetworkEvaluator:
 
         # Pareto objectives are all converted to minimization coordinates.
         # 将目标统一映射到“最小化”坐标系以执行 Pareto 排序。
-        points = np.asarray(
-            [
+        points = self._sanitize_objective_points(
+            np.asarray(
                 [
-                    m.average_cost,
-                    -m.driving_force,
-                    m.num_steps,
-                    m.uncertainty,
-                    m.intermediate_complexity,
-                    m.risk_excess,
-                ]
-                for m in metrics
-            ],
-            dtype=float,
+                    [
+                        m.average_cost,
+                        -m.driving_force,
+                        m.num_steps,
+                        m.uncertainty,
+                        m.intermediate_complexity,
+                        m.risk_excess,
+                    ]
+                    for m in metrics
+                ],
+                dtype=float,
+            )
         )
 
         fronts, rank = self._non_dominated_sort(points)

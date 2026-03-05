@@ -12,6 +12,17 @@ license = {text = "MIT"}
 authors = [
     {name = "ATLAS Team"}
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
 dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.11.0",
@@ -44,13 +55,31 @@ jupyter = [
 ]
 benchmark = [
     "matbench>=0.6",
-    "matminer>=0.9",
+    "matminer==0.7.4",
 ]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "mock>=5.1.0",
+    "jupyter>=1.0",
+    "ipywidgets>=8.0",
+    "ruff>=0.6.0",
+    "build>=1.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/atlas-materials/atlas"
+Repository = "https://github.com/atlas-materials/atlas"
+Documentation = "https://github.com/atlas-materials/atlas#readme"
+Issues = "https://github.com/atlas-materials/atlas/issues"
 
 [project.scripts]
 benchmark = "atlas.benchmark.cli:main"
 validate-data = "atlas.data.data_validation:main"
 make-splits = "atlas.data.split_governance:main"
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -133,6 +133,18 @@ def test_stability_component_hybrid_with_uq_is_positive():
     assert controller._stability_component(cand) > 0.0
 
 
+def test_stability_component_falls_back_when_candidate_uq_non_finite():
+    controller = _controller_stub("hybrid")
+    cand = Candidate(
+        structure=None,
+        formula="NF",
+        stability_score=0.73,
+        energy_mean=float("nan"),
+        energy_std=0.1,
+    )
+    assert controller._stability_component(cand) == 0.73
+
+
 def test_score_and_select_uses_feasibility_constraint_term():
     controller = _controller_stub("hybrid")
     a = Candidate(
@@ -156,6 +168,38 @@ def test_score_and_select_uses_feasibility_constraint_term():
     ranked = controller._score_and_select([a, b], n_top=2)
     assert ranked[0].formula == "A"
     assert a.acquisition_value > b.acquisition_value
+
+
+def test_historical_energy_observations_filters_non_finite_rows():
+    controller = _controller_stub("hybrid")
+    controller.all_candidates = [
+        Candidate(structure=None, formula="A", energy_mean=-1.0, energy_std=0.1),
+        Candidate(structure=None, formula="B", energy_mean=float("nan"), energy_std=0.2),
+        Candidate(structure=None, formula="C", energy_mean=float("inf"), energy_std=0.2),
+        Candidate(structure=None, formula="D", energy_mean=-0.8, energy_std=float("nan")),
+    ]
+    means, stds = controller._historical_energy_observations()
+    assert means is not None and stds is not None
+    assert means.numel() == 2
+    assert stds.numel() == 2
+    assert torch.all(torch.isfinite(means))
+    assert torch.all(torch.isfinite(stds))
+    assert float(stds[1].item()) == 0.0
+
+
+def test_current_best_f_falls_back_when_history_is_non_finite():
+    controller = _controller_stub("hybrid")
+    controller.dynamic_best_f = True
+    controller.acquisition_best_f = -0.4
+    obs = torch.tensor([float("nan"), float("inf")], dtype=torch.float32)
+    assert controller._current_best_f(obs) == -0.4
+
+
+def test_current_acquisition_kappa_falls_back_when_schedule_invalid():
+    controller = _controller_stub("hybrid")
+    controller.acquisition_kappa = 2.5
+    with patch("atlas.active_learning.controller.schedule_ucb_kappa", return_value=float("nan")):
+        assert controller._current_acquisition_kappa() == 2.5
 
 
 def test_dynamic_best_f_changes_hybrid_stability_score():

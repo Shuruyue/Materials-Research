@@ -260,3 +260,126 @@ def test_objective_feasibility_coupling_changes_feasibility_mass():
     coupled = acq._apply_objective_feasibility_coupling(base_feas, mean_obj)
     assert np.isfinite(coupled).all()
     assert not np.allclose(base_feas, coupled)
+
+
+def test_gp_surrogate_config_validation_sanitizes_invalid_values():
+    acq = GPSurrogateAcquirer(
+        config=GPSurrogateConfig(
+            min_points=-3,
+            kappa=float("nan"),
+            alpha=-1.0,
+            random_state="bad",  # type: ignore[arg-type]
+            blend_ratio=3.0,
+            feasibility_power=-2.0,
+            acquisition_mode="bad-mode",
+            kappa_schedule="bad-schedule",
+            kappa_min=-5.0,
+            kappa_decay=-0.4,
+            ucb_delta=float("nan"),
+            ucb_dimension=0,
+            ei_jitter=float("nan"),
+            feasibility_mode="bad-feas",
+            feasibility_threshold=3.0,
+            feasibility_kappa=-0.5,
+            use_feasibility_classifier="yes",  # type: ignore[arg-type]
+            feasibility_label_threshold=-0.2,
+            coupling_strength=-1.0,
+            min_coupling_points=0,
+            normalize_output="no",  # type: ignore[arg-type]
+            include_energy_feature="off",  # type: ignore[arg-type]
+        )
+    )
+    cfg = acq.config
+    assert cfg.min_points >= 2
+    assert cfg.kappa >= 0.0
+    assert cfg.alpha > 0.0
+    assert cfg.acquisition_mode in {"ucb", "ei", "logei"}
+    assert cfg.kappa_schedule in {"fixed", "anneal", "gp_ucb"}
+    assert cfg.ucb_dimension >= 1
+    assert 0.0 < cfg.ucb_delta < 1.0
+    assert cfg.ei_jitter >= 0.0
+    assert cfg.feasibility_mode in {"chance", "mean", "lcb"}
+    assert 0.0 <= cfg.feasibility_threshold <= 1.0
+    assert cfg.feasibility_kappa >= 0.0
+    assert cfg.coupling_strength >= 0.0
+    assert cfg.min_coupling_points >= 2
+    assert np.isfinite(acq.current_kappa)
+
+
+def test_gp_surrogate_config_unknown_bool_string_falls_back_to_default():
+    acq = GPSurrogateAcquirer(
+        config=GPSurrogateConfig(
+            normalize_output="unexpected",  # type: ignore[arg-type]
+            include_energy_feature="maybe",  # type: ignore[arg-type]
+        )
+    )
+    assert acq.config.normalize_output is True
+    assert acq.config.include_energy_feature is False
+
+
+def test_gp_surrogate_safe_float_non_finite_uses_default():
+    acq = GPSurrogateAcquirer(config=GPSurrogateConfig())
+    assert acq._safe_float(float("nan"), default=1.23) == 1.23
+    assert acq._safe_float(float("inf"), default=-4.56) == -4.56
+
+
+def test_gp_surrogate_config_non_integral_integer_fields_fallback_to_defaults():
+    acq = GPSurrogateAcquirer(
+        config=GPSurrogateConfig(
+            min_points=7.5,  # type: ignore[arg-type]
+            random_state=3.2,  # type: ignore[arg-type]
+            ucb_dimension=4.7,  # type: ignore[arg-type]
+            min_coupling_points=9.9,  # type: ignore[arg-type]
+        )
+    )
+    cfg = acq.config
+    assert cfg.min_points == 8
+    assert cfg.random_state == 42
+    assert cfg.ucb_dimension == 5
+    assert cfg.min_coupling_points == 12
+
+
+def test_candidate_to_features_clips_probability_like_descriptors():
+    acq = GPSurrogateAcquirer(config=GPSurrogateConfig())
+    c = DummyCandidateWithEnergy(
+        topo_probability=2.0,
+        stability_score=-1.0,
+        heuristic_topo_score=5.0,
+        novelty_score=-3.0,
+        energy_per_atom=-0.5,
+        energy_mean=-0.5,
+        energy_std=0.1,
+    )
+    feat = acq.candidate_to_features(c)
+    np.testing.assert_allclose(feat[:4], np.array([1.0, 0.0, 1.0, 0.0], dtype=float), rtol=0.0, atol=1e-12)
+
+
+def test_gp_surrogate_suggest_handles_non_finite_feature_rows():
+    acq = GPSurrogateAcquirer(config=GPSurrogateConfig(min_points=6, normalize_output=False))
+    cands = _dummy_candidates_with_energy(12)
+    acq.update(cands)
+    if acq._objective_model is None:
+        return
+
+    marker = DummyCandidateWithEnergy(
+        topo_probability=0.5,
+        stability_score=0.5,
+        heuristic_topo_score=0.5,
+        novelty_score=999.0,
+        energy_per_atom=-0.5,
+        energy_mean=-0.5,
+        energy_std=0.05,
+    )
+    probe = list(cands) + [marker]
+    original_feature_fn = acq.candidate_to_features
+
+    def _patched_features(candidate):
+        if getattr(candidate, "novelty_score", None) == 999.0:
+            return np.asarray([np.nan, np.nan, np.nan, np.nan, np.nan], dtype=float)
+        return original_feature_fn(candidate)
+
+    acq.candidate_to_features = _patched_features  # type: ignore[method-assign]
+    scores = acq.suggest_constrained_utility(probe)
+    assert scores is not None
+    assert np.isfinite(scores).all()
+    assert scores[-1] <= float(np.min(scores[:-1]))

@@ -105,6 +105,8 @@ SAMPLING_STRATEGIES = ("random", "kcenter_formula", "kcenter_hybrid")
 FALLBACK_SPLIT_STRATEGIES = ("iid", "compositional", "prototype")
 
 _FORMULA_TOKEN_RE = re.compile(r"[A-Z][a-z]?")
+_FORMULA_WITH_COUNT_RE = re.compile(r"([A-Z][a-z]?)([0-9]*\.?[0-9]*)")
+_MISSING_LABEL_TOKENS = frozenset({"", "na", "nan", "none", "null"})
 
 
 def resolve_phase2_property_group(group: str) -> list[str]:
@@ -120,7 +122,7 @@ def resolve_phase2_property_group(group: str) -> list[str]:
 
 
 def _normalize_sampling_strategy(strategy: str) -> str:
-    canon = strategy.strip().lower()
+    canon = str(strategy).strip().lower()
     if canon not in SAMPLING_STRATEGIES:
         choices = ", ".join(SAMPLING_STRATEGIES)
         raise ValueError(f"Unknown sampling strategy '{strategy}'. Choices: {choices}")
@@ -128,11 +130,72 @@ def _normalize_sampling_strategy(strategy: str) -> str:
 
 
 def _normalize_fallback_split_strategy(strategy: str) -> str:
-    canon = strategy.strip().lower()
+    canon = str(strategy).strip().lower()
     if canon not in FALLBACK_SPLIT_STRATEGIES:
         choices = ", ".join(FALLBACK_SPLIT_STRATEGIES)
         raise ValueError(f"Unknown fallback split strategy '{strategy}'. Choices: {choices}")
     return canon
+
+
+def _normalize_split_name(split: str) -> str:
+    canon = str(split).strip().lower()
+    if canon not in {"train", "val", "test"}:
+        raise ValueError(f"Unknown split '{split}'. Choices: train, val, test")
+    return canon
+
+
+def _normalize_split_ratio(split_ratio: tuple[Any, Any, Any]) -> tuple[float, float, float]:
+    if any(isinstance(value, bool) for value in split_ratio):
+        raise ValueError(f"split_ratio cannot contain boolean values: {split_ratio}")
+    try:
+        ratios = np.asarray(split_ratio, dtype=float)
+    except Exception as exc:
+        raise ValueError(f"split_ratio must be a 3-tuple of numbers, got {split_ratio}") from exc
+    if ratios.shape != (3,):
+        raise ValueError(f"split_ratio must have 3 values, got {split_ratio}")
+    if not np.all(np.isfinite(ratios)):
+        raise ValueError(f"split_ratio must be finite, got {split_ratio}")
+    if np.any(ratios < 0):
+        raise ValueError(f"split_ratio cannot contain negatives: {split_ratio}")
+    total = float(ratios.sum())
+    if total <= 0:
+        raise ValueError(f"split_ratio sum must be positive: {split_ratio}")
+    return (float(ratios[0]), float(ratios[1]), float(ratios[2]))
+
+
+def _coerce_optional_positive_int(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer > 0 when provided")
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer > 0 when provided") from exc
+    if not np.isfinite(scalar):
+        raise ValueError(f"{field_name} must be finite")
+    rounded = round(scalar)
+    if abs(scalar - rounded) > 1e-9:
+        raise ValueError(f"{field_name} must be integer-valued")
+    out = int(rounded)
+    if out <= 0:
+        raise ValueError(f"{field_name} must be > 0 when provided")
+    return out
+
+
+def _coerce_seed(value: Any, *, default: int = 42) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if not np.isfinite(scalar):
+        return int(default)
+    rounded = round(scalar)
+    if abs(scalar - rounded) > 1e-9:
+        return int(default)
+    return int(rounded)
 
 
 def _formula_fraction_vector(formula: str) -> np.ndarray:
@@ -164,22 +227,29 @@ def _formula_fraction_vector(formula: str) -> np.ndarray:
         return vec
     except Exception:
         # Fallback parser if Composition fails on malformed formulas.
-        symbols = _FORMULA_TOKEN_RE.findall(formula)
-        if not symbols:
+        tokens = _FORMULA_WITH_COUNT_RE.findall(formula)
+        if not tokens:
+            symbols = _FORMULA_TOKEN_RE.findall(formula)
+            tokens = [(sym, "") for sym in symbols]
+        if not tokens:
             return vec
         try:
             from pymatgen.core import Element
         except Exception:
             return vec
-        for sym in symbols:
+        total = 0.0
+        for sym, raw_count in tokens:
+            count = float(raw_count) if raw_count else 1.0
+            if not np.isfinite(count) or count <= 0:
+                continue
             try:
                 z = Element(sym).Z
             except Exception:
                 continue
-            vec[z - 1] += 1.0
-        norm = float(vec.sum())
-        if norm > 0:
-            vec /= norm
+            vec[z - 1] += float(count)
+            total += float(count)
+        if total > 0:
+            vec /= total
         return vec
 
 
@@ -191,7 +261,11 @@ def _kcenter_coreset_indices(features: np.ndarray, k: int, seed: int) -> np.ndar
     - Gonzalez (1985), "Clustering to minimize the maximum intercluster distance"
       2-approximation for metric k-center.
     """
-    n = int(features.shape[0])
+    feat = np.asarray(features, dtype=float)
+    if feat.ndim != 2:
+        raise ValueError(f"features must be 2D, got shape {feat.shape}")
+    feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+    n = int(feat.shape[0])
     if k >= n:
         return np.arange(n, dtype=np.int64)
     if k <= 0:
@@ -202,14 +276,14 @@ def _kcenter_coreset_indices(features: np.ndarray, k: int, seed: int) -> np.ndar
     selected = np.empty(k, dtype=np.int64)
     selected[0] = first
 
-    diff0 = features - features[first]
+    diff0 = feat - feat[first]
     min_d2 = np.einsum("ij,ij->i", diff0, diff0, optimize=True)
     min_d2[first] = -1.0
 
     for t in range(1, k):
         nxt = int(np.argmax(min_d2))
         selected[t] = nxt
-        diff = features - features[nxt]
+        diff = feat - feat[nxt]
         d2 = np.einsum("ij,ij->i", diff, diff, optimize=True)
         min_d2 = np.minimum(min_d2, d2)
         min_d2[selected[: t + 1]] = -1.0
@@ -232,9 +306,34 @@ def _property_presence_vector(
         if not col:
             continue
         value = row_data.get(col)
-        if value is not None and value != "na" and pd.notna(value):
+        if _is_present_label_value(value):
             out[i] = 1.0
     return out
+
+
+def _is_present_label_value(value: Any) -> bool:
+    """Return True when a property label should count as present."""
+    if value is None:
+        return False
+    with contextlib.suppress(TypeError):
+        if pd.isna(value):
+            return False
+    if isinstance(value, str):
+        return value.strip().lower() not in _MISSING_LABEL_TOKENS
+    return True
+
+
+def _valid_label_mask(series: pd.Series) -> pd.Series:
+    """Vectorized label-presence mask for DataFrame columns."""
+    mask = series.notna()
+    if series.dtype == object:
+        lowered = (
+            series.astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        mask &= ~lowered.isin(_MISSING_LABEL_TOKENS)
+    return mask
 
 
 def _worker_process_row(
@@ -261,7 +360,7 @@ def _worker_process_row(
             jarvis_col = rev_map.get(prop_name)
             if jarvis_col and jarvis_col in row_data:
                 val = row_data.get(jarvis_col)
-                if val is not None and val != "na":
+                if _is_present_label_value(val):
                     try:
                         props[prop_name] = float(val)
                     except (ValueError, TypeError):
@@ -317,11 +416,14 @@ class CrystalPropertyDataset:
         graph_compute_3body: bool = True,
     ):
         self.properties = list(dict.fromkeys(properties or DEFAULT_PROPERTIES))
-        self.max_samples = max_samples
+        self.max_samples = _coerce_optional_positive_int(
+            max_samples,
+            field_name="max_samples",
+        )
         self.stability_filter = stability_filter
-        self.split = split
-        self.split_seed = split_seed
-        self.split_ratio = split_ratio
+        self.split = _normalize_split_name(split)
+        self.split_seed = _coerce_seed(split_seed, default=42)
+        self.split_ratio = _normalize_split_ratio(split_ratio)
         env_manifest = os.environ.get("ATLAS_SPLIT_MANIFEST", "").strip()
         manifest_candidate = split_manifest_path
         if manifest_candidate is None and env_manifest:
@@ -333,12 +435,20 @@ class CrystalPropertyDataset:
         self.split_manifest_path = Path(manifest_candidate) if manifest_candidate else None
         self.assignment_col = assignment_col
         self.enforce_manifest_split = enforce_manifest_split
-        self.min_labeled_properties = max(1, int(min_labeled_properties))
+        min_labels = _coerce_optional_positive_int(
+            min_labeled_properties,
+            field_name="min_labeled_properties",
+        )
+        self.min_labeled_properties = int(min_labels or 1)
         self.sampling_strategy = _normalize_sampling_strategy(sampling_strategy)
         self.fallback_split_strategy = _normalize_fallback_split_strategy(fallback_split_strategy)
         self.enforce_nonempty_split = bool(enforce_nonempty_split)
         self.graph_cutoff = float(graph_cutoff)
-        self.graph_max_neighbors = int(graph_max_neighbors)
+        graph_neighbors = _coerce_optional_positive_int(
+            graph_max_neighbors,
+            field_name="graph_max_neighbors",
+        )
+        self.graph_max_neighbors = int(graph_neighbors or 12)
         self.graph_compute_3body = bool(graph_compute_3body)
 
         known_properties = set(PROPERTY_MAP.values())
@@ -349,13 +459,14 @@ class CrystalPropertyDataset:
                 f"Unknown properties: {', '.join(unknown)}. Supported properties: {choices}"
             )
 
-        if self.graph_cutoff <= 0:
+        if not np.isfinite(self.graph_cutoff) or self.graph_cutoff <= 0:
             raise ValueError("graph_cutoff must be > 0.")
         if self.graph_max_neighbors <= 0:
             raise ValueError("graph_max_neighbors must be > 0.")
 
         self._data_list = None
         self._df = None
+        self._prepare_summary: dict[str, Any] = {}
 
         # Parallel workers: leave 1 core free
         # self.n_workers = max(1, multiprocessing.cpu_count() - 1)
@@ -406,7 +517,7 @@ class CrystalPropertyDataset:
         valid_count = pd.Series(0, index=df.index, dtype=np.int32)
         for col in jarvis_cols:
             if col in df.columns:
-                valid_count += (df[col].notna() & (df[col] != "na")).astype(np.int32)
+                valid_count += _valid_label_mask(df[col]).astype(np.int32)
 
         valid_mask = valid_count >= self.min_labeled_properties
 
@@ -430,6 +541,8 @@ class CrystalPropertyDataset:
         # Parallel Graph Construction
         data_list = []
         rows = df_split.to_dict("records")
+        worker_failures = 0
+        worker_exceptions = 0
 
         print(f"  Building {self.split} graphs with {self.n_workers} workers...")
 
@@ -455,23 +568,51 @@ class CrystalPropertyDataset:
                         data = future.result()
                         if data is not None:
                             data_list.append(data)
+                        else:
+                            worker_failures += 1
                     except Exception:
-                        pass
+                        worker_exceptions += 1
         else:
             # Sequential fallback
             for row in tqdm(rows, desc="  Converting (Sequential)"):
-                data = _worker_process_row(
-                    row,
-                    self.properties,
-                    rev_map,
-                    self.graph_cutoff,
-                    self.graph_max_neighbors,
-                    self.graph_compute_3body,
-                )
-                if data is not None:
-                    data_list.append(data)
+                try:
+                    data = _worker_process_row(
+                        row,
+                        self.properties,
+                        rev_map,
+                        self.graph_cutoff,
+                        self.graph_max_neighbors,
+                        self.graph_compute_3body,
+                    )
+                    if data is not None:
+                        data_list.append(data)
+                    else:
+                        worker_failures += 1
+                except Exception:
+                    worker_exceptions += 1
 
         print(f"  Successfully built {len(data_list)} graphs")
+        total_rows = len(rows)
+        failed_total = int(worker_failures + worker_exceptions)
+        self._prepare_summary = {
+            "split": self.split,
+            "requested": total_rows,
+            "built": int(len(data_list)),
+            "failed": failed_total,
+            "worker_failures": int(worker_failures),
+            "worker_exceptions": int(worker_exceptions),
+            "failure_rate": (float(failed_total) / float(total_rows)) if total_rows > 0 else 0.0,
+        }
+        if failed_total > 0:
+            logger.warning(
+                "Graph conversion for split '%s' dropped %d/%d samples "
+                "(worker_failures=%d, worker_exceptions=%d).",
+                self.split,
+                failed_total,
+                total_rows,
+                int(worker_failures),
+                int(worker_exceptions),
+            )
 
         # Cache
         torch.save(data_list, cache_file)
@@ -727,10 +868,22 @@ class CrystalPropertyDataset:
                 table = pd.read_csv(assignment_path)
                 if "sample_id" not in table.columns or self.assignment_col not in table.columns:
                     continue
-                return {
-                    str(sample_id): str(split_name)
-                    for sample_id, split_name in zip(table["sample_id"], table[self.assignment_col])
-                }
+                mapping: dict[str, str] = {}
+                for sample_id, split_name in zip(table["sample_id"], table[self.assignment_col]):
+                    if pd.isna(sample_id) or pd.isna(split_name):
+                        continue
+                    sid = str(sample_id).strip()
+                    split = str(split_name).strip().lower()
+                    if not sid or split not in {"train", "val", "test"}:
+                        continue
+                    if sid in mapping and mapping[sid] != split:
+                        raise ValueError(
+                            f"Conflicting split assignment for sample_id='{sid}' "
+                            f"in {assignment_path}: {mapping[sid]} vs {split}"
+                        )
+                    mapping[sid] = split
+                if mapping:
+                    return mapping
             if assignment_path.suffix.lower() == ".json":
                 with open(assignment_path, encoding="utf-8") as f:
                     payload = json.load(f)
@@ -738,11 +891,24 @@ class CrystalPropertyDataset:
                     rows = [r for r in payload if isinstance(r, dict)]
                     if not rows:
                         continue
-                    return {
-                        str(row.get("sample_id")): str(row.get(self.assignment_col))
-                        for row in rows
-                        if row.get("sample_id") is not None and row.get(self.assignment_col) is not None
-                    }
+                    mapping: dict[str, str] = {}
+                    for row in rows:
+                        sample_id = row.get("sample_id")
+                        split_name = row.get(self.assignment_col)
+                        if sample_id is None or split_name is None:
+                            continue
+                        sid = str(sample_id).strip()
+                        split = str(split_name).strip().lower()
+                        if not sid or split not in {"train", "val", "test"}:
+                            continue
+                        if sid in mapping and mapping[sid] != split:
+                            raise ValueError(
+                                f"Conflicting split assignment for sample_id='{sid}' "
+                                f"in {assignment_path}: {mapping[sid]} vs {split}"
+                            )
+                        mapping[sid] = split
+                    if mapping:
+                        return mapping
 
         raise FileNotFoundError(
             f"Could not find assignment file for manifest: {manifest_path}. "
@@ -791,3 +957,7 @@ class CrystalPropertyDataset:
                         "max": float(arr.max()),
                     }
         return stats
+
+    def prepare_summary(self) -> dict[str, Any]:
+        """Return summary stats from the most recent ``prepare`` call."""
+        return dict(self._prepare_summary)

@@ -12,6 +12,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+_TASK_TYPES = {"scalar", "evidential", "tensor"}
+_TENSOR_TYPES = {"elastic", "dielectric", "piezoelectric"}
+
+
+def _normalize_task_names(tasks: list[str] | tuple[str, ...] | str | None) -> list[str] | None:
+    if tasks is None:
+        return None
+    if isinstance(tasks, str):
+        candidates = [tasks]
+    else:
+        try:
+            candidates = list(tasks)
+        except TypeError as exc:
+            raise ValueError("tasks must be a task name string or an iterable of task names") from exc
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_name in candidates:
+        name = str(raw_name).strip()
+        if not name:
+            raise ValueError("tasks contains an empty task name")
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    return normalized
+
 
 class EvidentialHead(nn.Module):
     """
@@ -81,7 +107,11 @@ class TensorHead(nn.Module):
         hidden_dim: int = 128,
     ):
         super().__init__()
-        self.tensor_type = tensor_type
+        self.tensor_type = str(tensor_type).strip().lower()
+        if self.tensor_type not in _TENSOR_TYPES:
+            raise ValueError(
+                f"Unsupported tensor_type: {tensor_type}. Choices: {', '.join(sorted(_TENSOR_TYPES))}"
+            )
 
         # Number of independent components
         n_components = {
@@ -89,7 +119,7 @@ class TensorHead(nn.Module):
             "dielectric": 6,     # εij: symmetric 3×3 → 6 independent
             "piezoelectric": 18,  # eijk: 3×6 → 18 independent
         }
-        self.n_out = n_components.get(tensor_type, 21)
+        self.n_out = n_components[self.tensor_type]
 
         self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
@@ -116,9 +146,23 @@ class TensorHead(nn.Module):
                 dielectric: (B, 3, 3)
                 piezoelectric: (B, 3, 6)
         """
+        if components.ndim != 2:
+            raise ValueError(
+                f"components must be rank-2 [B, n_components], got shape {tuple(components.shape)}"
+            )
+        if components.shape[0] <= 0:
+            raise ValueError("components must contain at least one sample")
+        if components.shape[1] != self.n_out:
+            raise ValueError(
+                f"components second dimension must match expected n_components={self.n_out}, "
+                f"got {components.shape[1]}"
+            )
+        if not torch.isfinite(components).all():
+            raise ValueError("components contains NaN or Inf values")
+
         if self.tensor_type == "elastic":
             return self._to_elastic_tensor(components)
-        elif self.tensor_type == "dielectric" or self.tensor_type == "dielectric":
+        elif self.tensor_type == "dielectric":
             return self._to_dielectric_tensor(components)
         else:
             return self._to_piezoelectric_tensor(components)
@@ -128,13 +172,13 @@ class TensorHead(nn.Module):
         """Reconstruct 3x6 piezoelectric tensor from 18 components."""
         # Just reshape (B, 18) -> (B, 3, 6)
         B = components.size(0)
-        return components.view(B, 3, 6)
+        return components.reshape(B, 3, 6)
 
     @staticmethod
     def _to_elastic_tensor(components: torch.Tensor) -> torch.Tensor:
         """Reconstruct symmetric 6×6 elastic tensor from 21 components."""
         B = components.size(0)
-        C = torch.zeros(B, 6, 6, device=components.device)
+        C = torch.zeros(B, 6, 6, device=components.device, dtype=components.dtype)
         idx = 0
         for i in range(6):
             for j in range(i, 6):
@@ -147,7 +191,7 @@ class TensorHead(nn.Module):
     def _to_dielectric_tensor(components: torch.Tensor) -> torch.Tensor:
         """Reconstruct symmetric 3×3 dielectric tensor from 6 components."""
         B = components.size(0)
-        eps = torch.zeros(B, 3, 3, device=components.device)
+        eps = torch.zeros(B, 3, 3, device=components.device, dtype=components.dtype)
         idx = 0
         for i in range(3):
             for j in range(i, 3):
@@ -176,6 +220,12 @@ class MultiTaskGNN(nn.Module):
         embed_dim: int = 128,
     ):
         super().__init__()
+        try:
+            encode_fn = encoder.encode
+        except AttributeError as exc:
+            raise ValueError("encoder must expose a callable encode(...) method") from exc
+        if not callable(encode_fn):
+            raise ValueError("encoder must expose a callable encode(...) method")
         self.encoder = encoder
         self.embed_dim = embed_dim
 
@@ -187,18 +237,29 @@ class MultiTaskGNN(nn.Module):
                 "bulk_modulus": {"type": "scalar"},
                 "shear_modulus": {"type": "scalar"},
             }
+        if not isinstance(tasks, dict) or not tasks:
+            raise ValueError("tasks must be a non-empty dict[str, dict].")
 
         self.heads = nn.ModuleDict()
         for name, cfg in tasks.items():
-            if cfg["type"] == "scalar":
-                self.heads[name] = ScalarHead(embed_dim)
-            elif cfg["type"] == "evidential":
-                self.heads[name] = EvidentialHead(embed_dim)
-            elif cfg["type"] == "tensor":
+            task_name = str(name)
+            if not isinstance(cfg, dict):
+                raise ValueError(f"Task config for '{task_name}' must be a dict.")
+            task_type = str(cfg.get("type", "scalar")).strip().lower()
+            if task_type not in _TASK_TYPES:
+                raise ValueError(
+                    f"Unsupported task type for '{task_name}': {task_type}. "
+                    f"Choices: {', '.join(sorted(_TASK_TYPES))}"
+                )
+            if task_type == "scalar":
+                self.heads[task_name] = ScalarHead(embed_dim)
+            elif task_type == "evidential":
+                self.heads[task_name] = EvidentialHead(embed_dim)
+            elif task_type == "tensor":
                 tensor_type = cfg.get("tensor_type", "elastic")
-                self.heads[name] = TensorHead(embed_dim, tensor_type=tensor_type)
+                self.heads[task_name] = TensorHead(embed_dim, tensor_type=tensor_type)
 
-        self.task_names = list(tasks.keys())
+        self.task_names = list(dict.fromkeys(str(k) for k in tasks))
 
     def forward(
         self,
@@ -227,18 +288,21 @@ class MultiTaskGNN(nn.Module):
             extra_kwargs["edge_vectors"] = edge_vectors
         if edge_index_3body is not None:
             extra_kwargs["edge_index_3body"] = edge_index_3body
-        if encoder_kwargs:
+        if isinstance(encoder_kwargs, dict) and encoder_kwargs:
             extra_kwargs.update(encoder_kwargs)
 
         if extra_kwargs:
-            signature = inspect.signature(self.encoder.encode)
-            supports_var_kwargs = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in signature.parameters.values()
-            )
-            if not supports_var_kwargs:
-                allowed = set(signature.parameters.keys())
-                extra_kwargs = {k: v for k, v in extra_kwargs.items() if k in allowed}
+            try:
+                signature = inspect.signature(self.encoder.encode)
+                supports_var_kwargs = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in signature.parameters.values()
+                )
+                if not supports_var_kwargs:
+                    allowed = set(signature.parameters.keys())
+                    extra_kwargs = {k: v for k, v in extra_kwargs.items() if k in allowed}
+            except (TypeError, ValueError):
+                extra_kwargs = {}
 
         if extra_kwargs:
             embedding = self.encoder.encode(
@@ -253,18 +317,32 @@ class MultiTaskGNN(nn.Module):
 
         # Task-specific predictions
         predictions = {}
-        for name in (tasks or self.task_names):
-            if name in self.heads:
-                predictions[name] = self.heads[name](embedding)
+        selected_tasks = _normalize_task_names(tasks) or self.task_names
+        unknown_tasks = [name for name in selected_tasks if name not in self.heads]
+        if unknown_tasks:
+            raise ValueError(
+                "Unknown task(s) requested: "
+                f"{unknown_tasks}. Available tasks: {sorted(self.heads.keys())}"
+            )
+        for name in selected_tasks:
+            predictions[name] = self.heads[name](embedding)
 
         return predictions
 
     def add_task(self, name: str, task_type: str = "scalar", **kwargs):
         """Dynamically add a new prediction task."""
-        if task_type == "scalar":
-            self.heads[name] = ScalarHead(self.embed_dim, **kwargs)
-        elif task_type == "evidential":
-            self.heads[name] = EvidentialHead(self.embed_dim, **kwargs)
-        elif task_type == "tensor":
-            self.heads[name] = TensorHead(self.embed_dim, **kwargs)
-        self.task_names.append(name)
+        task_name = str(name)
+        task_kind = str(task_type).strip().lower()
+        if task_kind not in _TASK_TYPES:
+            raise ValueError(
+                f"Unsupported task type: {task_type}. Choices: {', '.join(sorted(_TASK_TYPES))}"
+            )
+        if task_name in self.heads:
+            raise ValueError(f"Task '{task_name}' already exists.")
+        if task_kind == "scalar":
+            self.heads[task_name] = ScalarHead(self.embed_dim, **kwargs)
+        elif task_kind == "evidential":
+            self.heads[task_name] = EvidentialHead(self.embed_dim, **kwargs)
+        elif task_kind == "tensor":
+            self.heads[task_name] = TensorHead(self.embed_dim, **kwargs)
+        self.task_names.append(task_name)

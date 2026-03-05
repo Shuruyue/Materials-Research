@@ -11,6 +11,7 @@ Tests the Trainer class core functionality:
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -18,6 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import atlas.training.trainer as trainer_module
 from atlas.training.trainer import Trainer
 
 # ── Fixtures ──────────────────────────────────────────────────
@@ -108,6 +110,19 @@ class TestTrainerInit:
         trainer = Trainer(**trainer_components)
         assert trainer.best_val_loss == float("inf")
 
+    def test_invalid_grad_clip_norm_raises(self, trainer_components):
+        trainer_components["grad_clip_norm"] = float("inf")
+        with pytest.raises(ValueError, match="grad_clip_norm"):
+            Trainer(**trainer_components)
+
+    def test_signature_failure_falls_back_to_empty_params(self, trainer_components, monkeypatch):
+        def _raise_signature(*_args, **_kwargs):
+            raise TypeError("signature not supported")
+
+        monkeypatch.setattr(trainer_module, "signature", _raise_signature)
+        trainer = Trainer(**trainer_components)
+        assert trainer._forward_params == set()
+
 
 # ── Training ──────────────────────────────────────────────────
 
@@ -140,6 +155,11 @@ class TestTrainEpoch:
         )
         assert any_changed
 
+    def test_train_epoch_rejects_empty_loader(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        with pytest.raises(ValueError, match="train loader is empty"):
+            trainer.train_epoch([])
+
 
 # ── Validation ────────────────────────────────────────────────
 
@@ -157,6 +177,11 @@ class TestValidation:
         loader = _make_fake_loader(n_batches=3)
         metrics = trainer.validate(loader)
         assert np.isfinite(metrics["val_loss"])
+
+    def test_validate_rejects_empty_loader(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        with pytest.raises(ValueError, match="validation loader is empty"):
+            trainer.validate([])
 
 
 # ── Checkpointing ─────────────────────────────────────────────
@@ -177,6 +202,75 @@ class TestCheckpointing:
         assert ckpt["epoch"] == 5
         assert ckpt["val_loss"] == 0.42
         assert "model_state_dict" in ckpt
+
+    def test_checkpoint_includes_resume_state(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        trainer.history["train_loss"] = [1.0, 0.9]
+        trainer.best_val_loss = 0.5
+        trainer.patience_counter = 2
+        trainer._save_checkpoint("resume_state.pt", epoch=2, val_loss=0.5)
+        ckpt = trainer.load_checkpoint("resume_state.pt")
+        assert ckpt["schema_version"] == 1
+        assert "trainer_state" in ckpt
+        assert ckpt["trainer_state"]["best_val_loss"] == 0.5
+        assert ckpt["trainer_state"]["patience_counter"] == 2
+
+    def test_load_checkpoint_restores_optimizer_and_trainer_state(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        trainer.history["train_loss"] = [1.1, 0.8]
+        trainer.best_val_loss = 0.4
+        trainer.patience_counter = 1
+        trainer._save_checkpoint("restore_state.pt", epoch=3, val_loss=0.4)
+
+        trainer.optimizer.param_groups[0]["lr"] = 0.123
+        trainer.best_val_loss = 9.9
+        trainer.patience_counter = 0
+        trainer.history = {"train_loss": [], "val_loss": [], "lr": [], "epoch_time": []}
+
+        trainer.load_checkpoint(
+            "restore_state.pt",
+            restore_optimizer=True,
+            restore_trainer_state=True,
+        )
+        assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(0.01)
+        assert trainer.best_val_loss == pytest.approx(0.4)
+        assert trainer.patience_counter == 1
+        assert trainer.history["train_loss"] == [1.1, 0.8]
+
+    def test_load_checkpoint_rejects_non_mapping_payload(self, trainer_components, monkeypatch):
+        trainer = Trainer(**trainer_components)
+        trainer._save_checkpoint("bad_payload.pt", epoch=1, val_loss=0.1)
+        monkeypatch.setattr(trainer_module.torch, "load", lambda *args, **kwargs: ["bad"])
+        with pytest.raises(TypeError, match="mapping"):
+            trainer.load_checkpoint("bad_payload.pt")
+
+    def test_load_checkpoint_requires_optional_states_when_requested(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        payload = {"model_state_dict": trainer.model.state_dict()}
+        torch.save(payload, trainer.save_dir / "minimal.pt")
+        with pytest.raises(KeyError, match="optimizer_state_dict"):
+            trainer.load_checkpoint("minimal.pt", restore_optimizer=True)
+        with pytest.raises(KeyError, match="trainer_state"):
+            trainer.load_checkpoint("minimal.pt", restore_trainer_state=True)
+
+    def test_load_checkpoint_rejects_non_integral_epoch_and_patience_counter(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        torch.save(
+            {"model_state_dict": trainer.model.state_dict(), "epoch": 1.25},
+            trainer.save_dir / "invalid_epoch.pt",
+        )
+        with pytest.raises(ValueError, match="checkpoint epoch"):
+            trainer.load_checkpoint("invalid_epoch.pt")
+
+        torch.save(
+            {
+                "model_state_dict": trainer.model.state_dict(),
+                "trainer_state": {"best_val_loss": 0.5, "patience_counter": 2.4, "history": {}},
+            },
+            trainer.save_dir / "invalid_patience_counter.pt",
+        )
+        with pytest.raises(ValueError, match="trainer_state.patience_counter"):
+            trainer.load_checkpoint("invalid_patience_counter.pt", restore_trainer_state=True)
 
     def test_save_history(self, trainer_components):
         trainer = Trainer(**trainer_components)
@@ -230,3 +324,128 @@ class TestFit:
         assert (trainer.save_dir / "mymodel_best.pt").exists()
         assert (trainer.save_dir / "mymodel_final.pt").exists()
         assert (trainer.save_dir / "mymodel_history.json").exists()
+
+    def test_fit_rejects_invalid_args(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        train_loader = _make_fake_loader(n_batches=1)
+        val_loader = _make_fake_loader(n_batches=1)
+        with pytest.raises(ValueError, match="n_epochs"):
+            trainer.fit(train_loader, val_loader, n_epochs=0, verbose=False)
+        with pytest.raises(ValueError, match="n_epochs"):
+            trainer.fit(train_loader, val_loader, n_epochs=1.5, verbose=False)
+        with pytest.raises(ValueError, match="patience"):
+            trainer.fit(train_loader, val_loader, n_epochs=1, patience=-1, verbose=False)
+        with pytest.raises(ValueError, match="patience"):
+            trainer.fit(train_loader, val_loader, n_epochs=1, patience=True, verbose=False)
+        with pytest.raises(ValueError, match="min_delta"):
+            trainer.fit(train_loader, val_loader, n_epochs=1, min_delta=float("nan"), verbose=False)
+        with pytest.raises(ValueError, match="checkpoint_name"):
+            trainer.fit(train_loader, val_loader, n_epochs=1, checkpoint_name="  ", verbose=False)
+
+
+class TestLossResolution:
+    class _EmptyLossDict(nn.Module):
+        def forward(self, _pred, _target):
+            return {}
+
+    def test_compute_loss_rejects_empty_loss_dict(self, trainer_components):
+        trainer_components["loss_fn"] = self._EmptyLossDict()
+        trainer = Trainer(**trainer_components)
+        batch = _make_fake_batch(n_nodes=4, feat_dim=4)
+        pred = torch.randn(4)
+        with pytest.raises(ValueError, match="empty dict"):
+            trainer._compute_loss(pred, batch)
+
+    def test_compute_loss_rejects_missing_targets_for_dict_predictions(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        batch = SimpleNamespace(y=None)
+        pred = {"band_gap": torch.tensor([1.0])}
+        with pytest.raises(ValueError, match="No targets resolved"):
+            trainer._compute_loss(pred, batch)
+
+    def test_align_prediction_target_recovers_from_pooling_runtime_error(self, monkeypatch):
+        import torch_geometric.nn as pyg_nn
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("pooling failed")
+
+        monkeypatch.setattr(pyg_nn, "global_mean_pool", _boom)
+        pred = torch.randn(3, 1)
+        target = torch.randn(2)
+        batch = SimpleNamespace(batch=torch.tensor([0, 1, 1], dtype=torch.long))
+        aligned_pred, aligned_target = Trainer._align_prediction_target(pred, target, batch)
+        assert aligned_pred.shape == pred.shape
+        assert aligned_target.shape == target.shape
+
+
+class TestTrainerStabilityGuards:
+    class _NaNLoss(nn.Module):
+        def forward(self, pred, _target):
+            return pred.mean() * torch.tensor(float("nan"), device=pred.device)
+
+    def test_train_epoch_raises_on_non_finite_loss(self, trainer_components):
+        trainer_components["loss_fn"] = self._NaNLoss()
+        trainer = Trainer(**trainer_components)
+        loader = _make_fake_loader(n_batches=1)
+        with pytest.raises(ValueError, match="Non-finite loss"):
+            trainer.train_epoch(loader)
+
+    def test_fit_raises_on_non_finite_val_loss(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        trainer.train_epoch = MagicMock(return_value=0.1)
+        trainer.validate = MagicMock(return_value={"val_loss": float("nan")})
+        with pytest.raises(ValueError, match="val_loss"):
+            trainer.fit([], [], n_epochs=2, verbose=False)
+
+    def test_validate_raises_on_non_finite_loss(self, trainer_components):
+        trainer_components["loss_fn"] = self._NaNLoss()
+        trainer = Trainer(**trainer_components)
+        loader = _make_fake_loader(n_batches=1)
+        with pytest.raises(ValueError, match="validation"):
+            trainer.validate(loader)
+
+    def test_save_checkpoint_rejects_invalid_epoch_and_val_loss(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        with pytest.raises(ValueError, match="epoch"):
+            trainer._save_checkpoint("bad.pt", epoch=-1, val_loss=0.1)
+        with pytest.raises(ValueError, match="epoch"):
+            trainer._save_checkpoint("bad.pt", epoch=1.5, val_loss=0.1)
+        with pytest.raises(ValueError, match="epoch"):
+            trainer._save_checkpoint("bad.pt", epoch=True, val_loss=0.1)
+        with pytest.raises(ValueError, match="val_loss"):
+            trainer._save_checkpoint("bad.pt", epoch=1, val_loss=float("nan"))
+        with pytest.raises(ValueError, match="simple file name"):
+            trainer._save_checkpoint("../bad.pt", epoch=1, val_loss=0.1)
+
+
+class TestPatienceSemantics:
+    def test_patience_zero_continues_while_improving(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        trainer.train_epoch = MagicMock(return_value=0.1)
+        trainer.validate = MagicMock(
+            side_effect=[
+                {"val_loss": 1.0},
+                {"val_loss": 0.9},
+                {"val_loss": 0.8},
+            ]
+        )
+        history = trainer.fit([], [], n_epochs=3, patience=0, verbose=False)
+        assert len(history["val_loss"]) == 3
+
+    def test_patience_zero_stops_on_first_non_improvement(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        trainer.train_epoch = MagicMock(return_value=0.1)
+        trainer.validate = MagicMock(
+            side_effect=[
+                {"val_loss": 1.0},
+                {"val_loss": 1.1},
+                {"val_loss": 0.9},
+            ]
+        )
+        history = trainer.fit([], [], n_epochs=3, patience=0, verbose=False)
+        assert len(history["val_loss"]) == 2
+
+    def test_fit_rejects_path_like_checkpoint_name(self, trainer_components):
+        trainer = Trainer(**trainer_components)
+        with pytest.raises(ValueError, match="checkpoint_name"):
+            trainer.fit([], [], n_epochs=1, checkpoint_name="../escape", verbose=False)

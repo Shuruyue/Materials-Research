@@ -1,29 +1,76 @@
 """
-MACE Inference & Structure Relaxation Module
-
-Wraps a trained MACE model (or uses the pre-trained MACE-MP-0 foundation model)
-for fast structure relaxation and stability assessment.
-
-Optimization:
-- Robust Relaxation: Handles cell filter selection (Frechet/Exp) and errors.
-- Trajectory Saving: Optional saving of optimization path for debugging.
-- Logging: Use Python logging instead of print.
-- Device Management: improved GPU/CPU selection.
+MACE inference and structure relaxation utilities.
 """
 
+from __future__ import annotations
+
 import logging
+import math
 import warnings
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from atlas.config import get_config
 from atlas.utils.registry import RELAXERS
 
-# Configure logging
 logger = logging.getLogger(__name__)
+
+_VALID_MODEL_SIZES = {"small", "medium", "large"}
+_VALID_DTYPES = {"float32", "float64"}
+_VALID_CELL_FILTERS = {"frechet", "exp", "unit", "fixed", None}
+
+
+def _is_boolean_like(value: object) -> bool:
+    return isinstance(value, bool) or type(value).__name__ in {"bool", "bool_"}
+
+
+def _coerce_non_negative_int(value: object, *, name: str) -> int:
+    if _is_boolean_like(value):
+        raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+    if isinstance(value, Integral):
+        number = int(value)
+    elif isinstance(value, Real):
+        scalar = float(value)
+        if not math.isfinite(scalar) or not scalar.is_integer():
+            raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+        number = int(scalar)
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be an integer >= 0, got {value!r}") from exc
+    if number < 0:
+        raise ValueError(f"{name} must be an integer >= 0, got {value!r}")
+    return number
+
+
+def _normalize_device(device: str) -> str:
+    if _is_boolean_like(device):
+        raise ValueError(f"Invalid device string: {device!r}")
+    text = str(device).strip()
+    if text == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    try:
+        parsed = torch.device(text)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid device string: {device!r}") from exc
+
+    if parsed.type == "cuda":
+        if not torch.cuda.is_available():
+            logger.warning("CUDA requested but unavailable. Falling back to CPU.")
+            return "cpu"
+        if parsed.index is not None and parsed.index >= torch.cuda.device_count():
+            logger.warning(
+                "CUDA device index %s out of range. Falling back to cuda:0.",
+                parsed.index,
+            )
+            return "cuda:0"
+    return str(parsed)
+
 
 @RELAXERS.register("mlip_arena_mace")
 class MACERelaxer:
@@ -31,8 +78,8 @@ class MACERelaxer:
     Fast structure relaxation using MACE potentials.
 
     Can use either:
-    1. A custom-trained MACE model (from Phase 1A)
-    2. The pre-trained MACE-MP-0 foundation model (zero-shot, covers all elements)
+    1. A custom-trained MACE model.
+    2. The pre-trained MACE-MP foundation model.
     """
 
     def __init__(
@@ -43,28 +90,23 @@ class MACERelaxer:
         model_size: str = "large",
         default_dtype: str = "float32",
     ):
-        """
-        Args:
-            model_path: path to trained MACE model (.pt file)
-            device: "cuda", "cpu", or "auto"
-            use_foundation: if True and no model_path, use MACE-MP-0 foundation model
-            model_size: "small", "medium", or "large" (default: "large")
-            default_dtype: precision for calculation
-        """
-        self.cfg = get_config()
-        self.model_path = model_path
+        if model_size not in _VALID_MODEL_SIZES:
+            raise ValueError(
+                f"model_size must be one of {sorted(_VALID_MODEL_SIZES)}, got {model_size!r}"
+            )
+        if default_dtype not in _VALID_DTYPES:
+            raise ValueError(
+                f"default_dtype must be one of {sorted(_VALID_DTYPES)}, got {default_dtype!r}"
+            )
+
+        self.model_path = Path(model_path).expanduser() if model_path is not None else None
         self._calculator = None
-        self.use_foundation = use_foundation
+        self.use_foundation = bool(use_foundation)
         self.model_size = model_size
         self.dtype = default_dtype
+        self.device = _normalize_device(device)
 
-        # Device resolution
-        if device == "auto":
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
-
-        logger.info(f"MACERelaxer initialized on {self.device}")
+        logger.info("MACERelaxer initialized on %s", self.device)
 
     @property
     def calculator(self):
@@ -72,143 +114,158 @@ class MACERelaxer:
         if self._calculator is not None:
             return self._calculator
 
-        # Suppress warnings from MACE/torch on load
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            if self.model_path and Path(self.model_path).exists():
-                # Use custom-trained model
-                logger.info(f"Loading custom MACE model: {self.model_path}")
-                try:
-                    from mace.calculators import MACECalculator
-                    self._calculator = MACECalculator(
-                        model_paths=self.model_path,
-                        device=self.device,
-                        default_dtype=self.dtype,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to load custom MACE model: {e}")
-                    self._calculator = None
+            if self.model_path is not None:
+                if self.model_path.exists() and self.model_path.is_file():
+                    logger.info("Loading custom MACE model: %s", self.model_path)
+                    try:
+                        from mace.calculators import MACECalculator
 
-            elif self.use_foundation:
-                # Use pre-trained foundation model (MACE-MP-0)
-                logger.info("Loading MACE-MP-0 foundation model (universal)...")
+                        self._calculator = MACECalculator(
+                            model_paths=str(self.model_path),
+                            device=self.device,
+                            default_dtype=self.dtype,
+                        )
+                        return self._calculator
+                    except Exception as exc:
+                        logger.error("Failed to load custom MACE model: %s", exc)
+                else:
+                    logger.warning(
+                        "model_path does not exist or is not a file: %s", self.model_path
+                    )
+
+            if self.use_foundation:
+                logger.info("Loading MACE-MP foundation model (%s).", self.model_size)
                 try:
                     from mace.calculators import mace_mp
-                    # "large" is most accurate (MACE-MP-0)
+
                     self._calculator = mace_mp(
                         model=self.model_size,
                         device=self.device,
                         default_dtype=self.dtype,
                     )
-                except Exception as e:
-                    logger.warning(f"Could not load MACE-MP-0: {e}")
-                    logger.warning("Falling back to heuristic energy estimates")
-                    self._calculator = None
-            else:
-                logger.info("No MACE model available, using heuristics.")
-                self._calculator = None
+                    return self._calculator
+                except Exception as exc:
+                    logger.warning("Could not load MACE-MP foundation model: %s", exc)
 
-        return self._calculator
+        logger.warning("No MACE calculator available; using heuristic fallback.")
+        self._calculator = None
+        return None
+
+    def _resolve_cell_filter(self, atoms, cell_filter: str | None):
+        from ase.constraints import ExpCellFilter, UnitCellFilter
+
+        normalized = None if cell_filter is None else str(cell_filter).lower()
+        if normalized not in _VALID_CELL_FILTERS:
+            raise ValueError(
+                f"cell_filter must be one of {sorted(x for x in _VALID_CELL_FILTERS if x is not None)}"
+                f" or None, got {cell_filter!r}"
+            )
+
+        if normalized in (None, "fixed"):
+            return atoms
+        if normalized == "exp":
+            return ExpCellFilter(atoms)
+        if normalized == "unit":
+            return UnitCellFilter(atoms)
+
+        # normalized == "frechet"
+        try:
+            from ase.filters import FrechetCellFilter
+
+            return FrechetCellFilter(atoms)
+        except ImportError:
+            logger.warning("FrechetCellFilter unavailable; falling back to ExpCellFilter.")
+            return ExpCellFilter(atoms)
 
     def relax_structure(
         self,
         structure,
         fmax: float = 0.05,
         steps: int = 200,
-        cell_filter: str = "frechet",  # 'frechet', 'exp', or None
+        cell_filter: str | None = "frechet",
         trajectory_file: str | Path | None = None,
     ) -> dict[str, Any]:
         """
         Relax a crystal structure using MACE potential.
 
-        Args:
-            structure: pymatgen Structure
-            fmax: force convergence criterion (eV/Å)
-            steps: max optimization steps
-            cell_filter: filter type for variable cell relaxation
-            trajectory_file: path to save relaxation trajectory (.traj)
-
         Returns:
             dict with: relaxed_structure, energy_per_atom, converged, n_steps
         """
-        from ase.constraints import ExpCellFilter, FixSymmetry, UnitCellFilter
-        from ase.optimize import BFGS, FIRE, LBFGS, BFGSLineSearch, LBFGSLineSearch
+        from ase.constraints import FixSymmetry
+        from ase.optimize import BFGSLineSearch
 
         from atlas.utils.structure import ase_to_pymatgen, pymatgen_to_ase
 
-        # Helper for Frechet filter (more stable)
-        try:
-            from ase.filters import FrechetCellFilter
-            HAS_FRECHET = True
-        except ImportError:
-            HAS_FRECHET = False
+        if not math.isfinite(float(fmax)) or float(fmax) <= 0:
+            raise ValueError(f"fmax must be finite and > 0, got {fmax!r}")
+        step_count = _coerce_non_negative_int(steps, name="steps")
 
         atoms = pymatgen_to_ase(structure)
+        if len(atoms) == 0:
+            return self._heuristic_result(structure, "Cannot relax empty structure")
 
         if self.calculator is None:
             return self._heuristic_result(structure, "No calculator loaded")
 
         atoms.calc = self.calculator
 
-        # Setup relaxation
+        trajectory = None
+        if trajectory_file is not None:
+            path = Path(trajectory_file).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            trajectory = str(path)
+
         try:
-            # 1. Symmetry Constraint (inspired by MLIP-Arena)
-            if structure.get_space_group_info()[1] > 1:
+            try:
+                space_group_number = structure.get_space_group_info()[1]
+            except Exception:
+                space_group_number = 0
+
+            if space_group_number > 1:
                 try:
                     atoms.set_constraint(FixSymmetry(atoms))
-                    logger.debug("Applied FixSymmetry constraint.")
-                except Exception as sym_e:
-                    logger.debug(f"Could not apply FixSymmetry: {sym_e}")
+                except Exception as exc:
+                    logger.debug("FixSymmetry not applied: %s", exc)
 
-            # 2. Choose filter
-            if cell_filter == "frechet" and HAS_FRECHET:
-                ecf = FrechetCellFilter(atoms)
-            elif cell_filter == "exp" or (cell_filter == "frechet" and not HAS_FRECHET):
-                ecf = ExpCellFilter(atoms)
-            elif cell_filter == "unit":
-                ecf = UnitCellFilter(atoms)
-            else:
-                 # Fixed cell
-                ecf = atoms
+            target = self._resolve_cell_filter(atoms, cell_filter)
+            optimizer = BFGSLineSearch(target, trajectory=trajectory, logfile=None)
+            converged = bool(optimizer.run(fmax=float(fmax), steps=step_count))
 
-            # 3. Choose optimizer (MLIP-Arena robust choice mapping)
-            optimizers = {
-                "bfgs": BFGS,
-                "fire": FIRE,
-                "lbfgs": LBFGS,
-                "bfgs_ls": BFGSLineSearch,
-                "lbfgs_ls": LBFGSLineSearch
-            }
-            # Defaulting to BFGSLineSearch as recommended by MLIP-Arena for general robust optimization
-            opt_class = optimizers.get("bfgs_ls", BFGSLineSearch)
-
-            opt = opt_class(ecf, trajectory=trajectory_file, logfile=None)
-
-            # Run
-            converged = opt.run(fmax=fmax, steps=steps)
-
-            # Extract results
-            energy = atoms.get_potential_energy()
-            n_atoms = len(atoms)
-            forces = atoms.get_forces()
+            energy = float(atoms.get_potential_energy())
+            forces = np.asarray(atoms.get_forces(), dtype=float)
+            if not np.isfinite(energy):
+                raise ValueError("Non-finite potential energy from calculator")
+            if forces.size > 0 and not np.isfinite(forces).all():
+                raise ValueError("Non-finite forces from calculator")
 
             relaxed_struct = ase_to_pymatgen(atoms)
+            n_atoms = len(atoms)
+            if n_atoms <= 0:
+                raise ValueError("Relaxation returned empty atoms object")
+
+            init_vol = float(getattr(structure, "volume", 0.0) or 0.0)
+            if math.isfinite(init_vol) and init_vol > 1e-12:
+                volume_change = float(relaxed_struct.volume / init_vol)
+            else:
+                volume_change = 1.0
 
             return {
                 "relaxed_structure": relaxed_struct,
-                "energy_per_atom": energy / n_atoms,
+                "energy_per_atom": float(energy / n_atoms),
                 "energy_total": energy,
                 "converged": converged,
-                "n_steps": opt.nsteps,
-                "forces_max": np.max(np.abs(forces)) if len(forces) > 0 else 0.0,
-                "volume_change": relaxed_struct.volume / structure.volume,
+                "n_steps": int(getattr(optimizer, "nsteps", 0)),
+                "forces_max": float(np.max(np.abs(forces))) if forces.size > 0 else 0.0,
+                "volume_change": volume_change,
             }
 
-        except Exception as e:
-            # If relaxation crashes (e.g. SCF non-convergence or segfault), return input
-            logger.warning(f"Relaxation failed for {structure.composition.reduced_formula}: {e}")
-            return self._heuristic_result(structure, str(e))
+        except Exception as exc:
+            formula = getattr(getattr(structure, "composition", None), "reduced_formula", "unknown")
+            logger.warning("Relaxation failed for %s: %s", formula, exc)
+            return self._heuristic_result(structure, str(exc))
 
     def _heuristic_result(self, structure, error_msg: str) -> dict[str, Any]:
         """Return a standardized failure result."""
@@ -224,74 +281,60 @@ class MACERelaxer:
         }
 
     def score_stability(self, structure) -> float:
-        """
-        Quick stability score (0–1).
-        1.0 = highly stable (< -0.5 eV/atom below hull proxy)
-        """
-        # Quick relax with loose criteria
+        """Quick stability score in [0, 1] from relaxed per-atom energy."""
         res = self.relax_structure(structure, fmax=0.1, steps=50)
-        e_pa = res["energy_per_atom"]
+        e_pa = res.get("energy_per_atom")
+        if e_pa is None or not np.isfinite(e_pa):
+            return 0.5
 
-        if e_pa is None: return 0.5
-
-        # Approx convex hull energy for stable materials is typically -5 to -9 eV/atom
-        # but pure MACE energy depends on reference states.
-        # MACE-MP-0 is trained on MP formation energies? No, usually total energies.
-        # So we need reference energies to get formation energy.
-        # WITHOUT reference energies, raw e_pa is hard to interpret absolutely.
-        #
-        # Heuristic:
-        # Deeply negative usually means stable bonding.
-        # We rely on relative ranking for Active Learning.
-
-        # Map raw energy to 0-1 score (sigmoid-like)
-        # Assume "good" energy is < -3.0 eV/atom (very rough)
-
-        if e_pa > 0: return 0.0 # Unbound
-
-        # Simple linear map for now, relative to a "deep" minimum
-        # This needs calibration with real data
-        score = min(1.0, max(0.0, -e_pa / 8.0))
-        return score
+        e_pa_f = float(e_pa)
+        if e_pa_f > 0:
+            return 0.0
+        return float(np.clip(-e_pa_f / 8.0, 0.0, 1.0))
 
     def batch_relax(
         self,
-        structures: list,
+        structures: list[Any],
         fmax: float = 0.05,
         steps: int = 100,
-        n_jobs: int = 1
-    ) -> list[dict]:
+        n_jobs: int = 1,
+    ) -> list[dict[str, Any]]:
         """
         Relax a batch of structures.
-        Parallelism is tricky with GPU calculators. Serial is safest.
+        Parallel GPU calculators are non-trivial; serial path is the default.
         """
-        results = []
-        # TQDM optimization
+        n_jobs_i = _coerce_non_negative_int(n_jobs, name="n_jobs")
+        if n_jobs_i == 0:
+            raise ValueError(f"n_jobs must be >= 1, got {n_jobs!r}")
+        if n_jobs_i != 1:
+            logger.warning("n_jobs=%s requested; MACERelaxer currently runs serially.", n_jobs)
+
+        results: list[dict[str, Any]] = []
         try:
             from tqdm import tqdm
+
             iterator = tqdm(structures, desc="Relaxing", leave=False)
         except ImportError:
             iterator = structures
 
         for i, struct in enumerate(iterator):
-            # Pass trajectory file if debugging needed?
-            # trajectory_file=f"traj_{i}.traj"
             res = self.relax_structure(struct, fmax=fmax, steps=steps)
             res["index"] = i
             results.append(res)
-
         return results
 
     def _heuristic_energy(self, structure) -> float:
-        """Rough energy estimate based on pauling electronegativity."""
+        """Rough energy estimate based on Pauling electronegativity."""
         try:
             from pymatgen.core import Element
-            energies = []
+
+            values: list[float] = []
             for site in structure:
                 elem = Element(str(site.specie))
                 eneg = elem.X or 2.0
-                e_approx = -1.0 * eneg
-                energies.append(e_approx)
-            return float(np.mean(energies))
+                values.append(float(-1.0 * eneg))
+            if not values:
+                return -2.0
+            return float(np.mean(values))
         except Exception:
             return -2.0

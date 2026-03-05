@@ -117,6 +117,63 @@ def _as_float(value: Any) -> float | None:
     return out
 
 
+def _as_nonempty_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in {"nan", "<na>", "none"}:
+        return None
+    return text
+
+
+def _coerce_finite_float(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a finite real number, got bool")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a finite real number") from exc
+    if not np.isfinite(parsed):
+        raise ValueError(f"{field_name} must be finite")
+    if minimum is not None and parsed < float(minimum):
+        raise ValueError(f"{field_name} must be >= {minimum}")
+    if maximum is not None and parsed > float(maximum):
+        raise ValueError(f"{field_name} must be <= {maximum}")
+    return float(parsed)
+
+
+def _coerce_int_like(
+    value: Any,
+    *,
+    field_name: str,
+    default: int = 0,
+    minimum: int | None = None,
+) -> int:
+    if value is None:
+        out = int(default)
+    elif isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer, got bool")
+    else:
+        try:
+            fv = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be an integer") from exc
+        if not np.isfinite(fv) or abs(fv - round(fv)) > 1e-12:
+            raise ValueError(f"{field_name} must be an integer")
+        out = int(round(fv))
+    if minimum is not None and out < int(minimum):
+        raise ValueError(f"{field_name} must be >= {minimum}")
+    return out
+
+
 @dataclass
 class ReliabilityState:
     """
@@ -212,10 +269,10 @@ class TopoDB:
             if col not in out.columns:
                 out[col] = np.nan
 
-        out["jid"] = out["jid"].astype("string")
-        out["formula"] = out["formula"].astype("string")
-        out["source"] = out["source"].astype("string").fillna("custom")
-        out["topo_class"] = out["topo_class"].astype("string").str.upper()
+        out["jid"] = out["jid"].astype("string").str.strip()
+        out["formula"] = out["formula"].astype("string").str.strip()
+        out["source"] = out["source"].astype("string").fillna("custom").str.strip()
+        out["topo_class"] = out["topo_class"].astype("string").str.strip().str.upper()
 
         numeric_cols = [
             "space_group",
@@ -551,6 +608,108 @@ class TopoDB:
 
         return probs, confs
 
+    @staticmethod
+    def _normalize_base_weights(base_weights: tuple[float, float, float]) -> np.ndarray:
+        ws = np.asarray(base_weights, dtype=float)
+        if ws.shape != (3,):
+            raise ValueError("base_weights must contain three values (si, spillage, ml)")
+        ws = np.clip(ws, 0.0, None)
+        if float(ws.sum()) <= 0:
+            ws = np.asarray([0.45, 0.35, 0.20], dtype=float)
+        return ws / ws.sum()
+
+    @staticmethod
+    def _canonical_mode(
+        value: str,
+        *,
+        allowed: set[str],
+        name: str,
+    ) -> str:
+        mode = str(value).strip().lower()
+        if mode not in allowed:
+            choices = ",".join(sorted(allowed))
+            raise ValueError(f"{name} must be one of {{{choices}}}")
+        return mode
+
+    @staticmethod
+    def _parse_reliability_override(
+        channel_reliability_override: dict[str, Any] | None,
+    ) -> dict[str, float]:
+        if not channel_reliability_override:
+            return {}
+        parsed: dict[str, float] = {}
+        for channel, raw in channel_reliability_override.items():
+            channel_key = str(channel).strip().lower()
+            if channel_key not in _EVIDENCE_CHANNELS:
+                continue
+            rel: float | None = None
+            if isinstance(raw, ReliabilityState):
+                rel = float(raw.mean)
+            elif isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                with np.errstate(invalid="ignore"):
+                    alpha = float(raw[0])
+                    beta = float(raw[1])
+                if np.isfinite(alpha) and np.isfinite(beta) and (alpha + beta) > 0:
+                    rel = float(alpha / (alpha + beta))
+            else:
+                with np.errstate(invalid="ignore"):
+                    rv = float(raw)
+                if np.isfinite(rv):
+                    rel = rv
+            if rel is not None:
+                parsed[channel_key] = float(np.clip(rel, 1e-6, 1.0))
+        return parsed
+
+    def _prepare_inference_configuration(
+        self,
+        *,
+        base_weights: tuple[float, float, float],
+        weight_constraint: str,
+        score_calibration: str,
+        calibration_scheme: str,
+        correlation_mode: str,
+        channel_reliability_override: dict[str, Any] | None,
+    ) -> tuple[dict[str, float], str, str, str, np.ndarray, dict[str, float]]:
+        ws = self._normalize_base_weights(base_weights)
+        channel_weight = {ch: float(ws[i]) for i, ch in enumerate(_EVIDENCE_CHANNELS)}
+
+        weight_constraint_mode = self._canonical_mode(
+            weight_constraint,
+            allowed={"nonnegative", "unconstrained"},
+            name="weight_constraint",
+        )
+        calibration_mode = self._canonical_mode(
+            score_calibration,
+            allowed={"none", "temperature"},
+            name="score_calibration",
+        )
+        calibration_scheme_mode = self._canonical_mode(
+            calibration_scheme,
+            allowed={"in_sample", "cross_fit"},
+            name="calibration_scheme",
+        )
+        correlation_mode_canon = self._canonical_mode(
+            correlation_mode,
+            allowed={"correlated", "independent"},
+            name="correlation_mode",
+        )
+
+        corr_full = (
+            self._channel_corr.copy()
+            if correlation_mode_canon == "correlated"
+            else np.eye(len(_EVIDENCE_CHANNELS), dtype=float)
+        )
+        corr_full = self._normalize_correlation_matrix(corr_full)
+        override_reliability = self._parse_reliability_override(channel_reliability_override)
+        return (
+            channel_weight,
+            weight_constraint_mode,
+            calibration_mode,
+            calibration_scheme_mode,
+            corr_full,
+            override_reliability,
+        )
+
     def channel_reliability(self) -> dict[str, float]:
         return {k: float(v.mean) for k, v in self._channel_reliability.items()}
 
@@ -589,6 +748,17 @@ class TopoDB:
         References:
         - Dawid & Skene (1979), soft reliability estimation.
         """
+        min_samples = _coerce_int_like(
+            min_samples,
+            field_name="min_samples",
+            minimum=1,
+        )
+        corr_shrinkage = _coerce_finite_float(
+            corr_shrinkage,
+            field_name="corr_shrinkage",
+            minimum=0.0,
+            maximum=1.0,
+        )
         if truth_col not in self.df.columns or len(self.df) == 0:
             return self.channel_reliability()
 
@@ -640,7 +810,7 @@ class TopoDB:
         self._channel_corr = self._normalize_correlation_matrix(corr)
         return self.channel_reliability()
 
-    def infer_topology_probabilities(  # noqa: C901
+    def infer_topology_probabilities(
         self,
         *,
         base_weights: tuple[float, float, float] = (0.45, 0.35, 0.20),
@@ -696,6 +866,68 @@ class TopoDB:
         if len(self.df) == 0:
             return self.df.copy()
 
+        prior_alpha = _coerce_finite_float(
+            prior_alpha,
+            field_name="prior_alpha",
+            minimum=1e-8,
+        )
+        prior_beta = _coerce_finite_float(
+            prior_beta,
+            field_name="prior_beta",
+            minimum=1e-8,
+        )
+        evidence_strength = _coerce_finite_float(
+            evidence_strength,
+            field_name="evidence_strength",
+            minimum=1e-8,
+        )
+        corr_shrinkage = _coerce_finite_float(
+            corr_shrinkage,
+            field_name="corr_shrinkage",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        correlation_penalty = _coerce_finite_float(
+            correlation_penalty,
+            field_name="correlation_penalty",
+            minimum=0.0,
+        )
+        calibration_bins = _coerce_int_like(
+            calibration_bins,
+            field_name="calibration_bins",
+            minimum=2,
+        )
+        calibration_folds = _coerce_int_like(
+            calibration_folds,
+            field_name="calibration_folds",
+            minimum=2,
+        )
+        calibration_seed = _coerce_int_like(
+            calibration_seed,
+            field_name="calibration_seed",
+        )
+        min_calibration_samples = _coerce_int_like(
+            min_calibration_samples,
+            field_name="min_calibration_samples",
+            minimum=1,
+        )
+        calibration_min_samples = _coerce_int_like(
+            calibration_min_samples,
+            field_name="calibration_min_samples",
+            minimum=1,
+        )
+        decision_threshold = _coerce_finite_float(
+            decision_threshold,
+            field_name="decision_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        ood_scale = _coerce_finite_float(
+            ood_scale,
+            field_name="ood_scale",
+            minimum=1e-8,
+        )
+
         work = self._normalize_frame(self.df.copy())
         if calibrate_reliability:
             self.calibrate_channel_reliability(
@@ -717,53 +949,21 @@ class TopoDB:
             ml_uncertainty_scale=ml_uncertainty_scale,
         )
 
-        ws = np.asarray(base_weights, dtype=float)
-        if ws.shape != (3,):
-            raise ValueError("base_weights must contain three values (si, spillage, ml)")
-        ws = np.clip(ws, 0.0, None)
-        if float(ws.sum()) <= 0:
-            ws = np.asarray([0.45, 0.35, 0.20], dtype=float)
-        ws = ws / ws.sum()
-        channel_weight = {ch: float(ws[i]) for i, ch in enumerate(_EVIDENCE_CHANNELS)}
-        if weight_constraint not in {"nonnegative", "unconstrained"}:
-            raise ValueError("weight_constraint must be one of {'nonnegative','unconstrained'}")
-        calibration_mode = str(score_calibration).strip().lower()
-        if calibration_mode not in {"none", "temperature"}:
-            raise ValueError("score_calibration must be one of {'none','temperature'}")
-        calibration_scheme_canon = str(calibration_scheme).strip().lower()
-        if calibration_scheme_canon not in {"in_sample", "cross_fit"}:
-            raise ValueError("calibration_scheme must be one of {'in_sample','cross_fit'}")
-        mode = str(correlation_mode).strip().lower()
-        if mode not in {"correlated", "independent"}:
-            raise ValueError("correlation_mode must be one of {'correlated','independent'}")
-        corr_full = (
-            self._channel_corr.copy()
-            if mode == "correlated"
-            else np.eye(len(_EVIDENCE_CHANNELS), dtype=float)
+        (
+            channel_weight,
+            weight_constraint,
+            calibration_mode,
+            calibration_scheme_canon,
+            corr_full,
+            override_reliability,
+        ) = self._prepare_inference_configuration(
+            base_weights=base_weights,
+            weight_constraint=weight_constraint,
+            score_calibration=score_calibration,
+            calibration_scheme=calibration_scheme,
+            correlation_mode=correlation_mode,
+            channel_reliability_override=channel_reliability_override,
         )
-        corr_full = self._normalize_correlation_matrix(corr_full)
-        override_reliability: dict[str, float] = {}
-        if channel_reliability_override:
-            for ch, raw in channel_reliability_override.items():
-                ch_key = str(ch).strip().lower()
-                if ch_key not in _EVIDENCE_CHANNELS:
-                    continue
-                rel: float | None = None
-                if isinstance(raw, ReliabilityState):
-                    rel = float(raw.mean)
-                elif isinstance(raw, (tuple, list)) and len(raw) >= 2:
-                    with np.errstate(invalid="ignore"):
-                        a = float(raw[0])
-                        b = float(raw[1])
-                    if np.isfinite(a) and np.isfinite(b) and (a + b) > 0:
-                        rel = float(a / (a + b))
-                else:
-                    with np.errstate(invalid="ignore"):
-                        rv = float(raw)
-                    if np.isfinite(rv):
-                        rel = rv
-                if rel is not None:
-                    override_reliability[ch_key] = float(np.clip(rel, 1e-6, 1.0))
 
         n = len(work)
         p_out = np.zeros(n, dtype=float)
@@ -1048,6 +1248,34 @@ class TopoDB:
 
         score = p_topo + lambda_u * uncertainty_width - lambda_ood * ood_score
         """
+        min_probability = _coerce_finite_float(
+            min_probability,
+            field_name="min_probability",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        max_ood = _coerce_finite_float(
+            max_ood,
+            field_name="max_ood",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        uncertainty_weight = _coerce_finite_float(
+            uncertainty_weight,
+            field_name="uncertainty_weight",
+        )
+        ood_penalty = _coerce_finite_float(
+            ood_penalty,
+            field_name="ood_penalty",
+        )
+        top_k_value: int | None = None
+        if top_k is not None:
+            top_k_value = _coerce_int_like(
+                top_k,
+                field_name="top_k",
+                minimum=0,
+            )
+
         work = self.df.copy()
         if recompute_if_missing and (
             "topological_probability" not in work.columns
@@ -1068,8 +1296,8 @@ class TopoDB:
             (prob >= float(min_probability)) & (ood <= float(max_ood))
         ].copy()
         ranked = ranked.sort_values("acquisition_score", ascending=False).reset_index(drop=True)
-        if top_k is not None:
-            ranked = ranked.head(int(top_k)).reset_index(drop=True)
+        if top_k_value is not None:
+            ranked = ranked.head(top_k_value).reset_index(drop=True)
         return ranked
 
     def load_seed_data(self):
@@ -1112,8 +1340,17 @@ class TopoDB:
             conn.close()
 
     def fuzzy_search(self, query: str, cutoff: float = 0.6) -> pd.DataFrame:
+        query_text = _as_nonempty_str(query)
+        if query_text is None:
+            return self._empty_df()
+        cutoff_value = _coerce_finite_float(
+            cutoff,
+            field_name="cutoff",
+            minimum=0.0,
+            maximum=1.0,
+        )
         formulas = self.df["formula"].astype(str).tolist()
-        matches = difflib.get_close_matches(query, formulas, n=5, cutoff=cutoff)
+        matches = difflib.get_close_matches(query_text, formulas, n=5, cutoff=cutoff_value)
         if not matches:
             return self._empty_df()
         return self.df[self.df["formula"].isin(matches)].copy()
@@ -1127,21 +1364,44 @@ class TopoDB:
     ) -> pd.DataFrame:
         df = self.df.copy()
 
-        if exact_formula:
-            df = df[df["formula"] == exact_formula]
+        exact = _as_nonempty_str(exact_formula)
+        if exact is not None:
+            df = df[df["formula"] == exact]
 
         if topo_class:
-            df = df[df["topo_class"] == str(topo_class).upper()]
+            topo = _as_nonempty_str(topo_class)
+            if topo is not None:
+                df = df[df["topo_class"] == topo.upper()]
 
         if band_gap_range:
+            if not isinstance(band_gap_range, (tuple, list)) or len(band_gap_range) != 2:
+                raise ValueError("band_gap_range must be a tuple/list of length 2")
             lo, hi = band_gap_range
+            lo_value = (
+                _coerce_finite_float(lo, field_name="band_gap_range[0]") if lo is not None else None
+            )
+            hi_value = (
+                _coerce_finite_float(hi, field_name="band_gap_range[1]") if hi is not None else None
+            )
+            if (
+                lo_value is not None
+                and hi_value is not None
+                and lo_value > hi_value
+            ):
+                raise ValueError("band_gap_range lower bound must be <= upper bound")
             if lo is not None:
-                df = df[df["band_gap"] >= lo]
+                df = df[df["band_gap"] >= lo_value]
             if hi is not None:
-                df = df[df["band_gap"] <= hi]
+                df = df[df["band_gap"] <= hi_value]
 
         if elements:
-            required = {str(e) for e in elements}
+            required = {
+                str(e).strip().capitalize()
+                for e in elements
+                if _as_nonempty_str(e) is not None
+            }
+            if not required:
+                return self._empty_df()
 
             def has_elements(formula: str) -> bool:
                 present = set(self._parse_formula_counts(formula).keys())
@@ -1152,14 +1412,30 @@ class TopoDB:
         return df.reset_index(drop=True)
 
     def add_material(self, formula: str, topo_class: str, properties: dict):
-        jid = properties.get("jid", f"mat-{len(self.df):06d}")
+        formula_text = _as_nonempty_str(formula)
+        if formula_text is None:
+            raise ValueError("formula must be a non-empty string")
+        raw_jid = _as_nonempty_str(properties.get("jid"))
+        jid = raw_jid or f"mat-{len(self.df):06d}"
+        topo_label = _as_nonempty_str(topo_class)
+        if topo_label is None:
+            topo_label = "TRIVIAL"
+        space_group = _coerce_int_like(
+            properties.get("space_group", 0),
+            field_name="space_group",
+            default=0,
+            minimum=0,
+        )
+        band_gap_raw = _as_float(properties.get("band_gap", 0.0))
+        band_gap = 0.0 if band_gap_raw is None else float(band_gap_raw)
+
         mat = TopoMaterial(
             jid=jid,
-            formula=formula,
-            space_group=int(properties.get("space_group", 0)),
-            topo_class=str(topo_class).upper(),
-            band_gap=float(properties.get("band_gap", 0.0)),
-            source=str(properties.get("source", "custom")),
+            formula=formula_text,
+            space_group=space_group,
+            topo_class=topo_label.upper(),
+            band_gap=band_gap,
+            source=_as_nonempty_str(properties.get("source")) or "custom",
             spillage=_as_float(properties.get("spillage")),
             si_score=_as_float(properties.get("si_score")),
             ml_probability=_as_float(properties.get("ml_probability")),

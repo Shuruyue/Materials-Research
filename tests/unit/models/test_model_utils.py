@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
+import atlas.models as models_pkg
 from atlas.models import utils as model_utils
 from atlas.models.cgcnn import CGCNN
 from atlas.models.m3gnet import M3GNet
@@ -183,3 +185,71 @@ def test_load_phase2_model_with_m3gnet_checkpoint(tmp_path):
     )
     assert "formation_energy" in out
     assert out["formation_energy"].shape == (2, 1)
+
+
+def test_normalize_state_dict_keys_conflict_raises():
+    state = {
+        "module.cgcnn.weight": torch.tensor([1.0]),
+        "weight": torch.tensor([2.0]),
+    }
+    with pytest.raises(ValueError, match="Conflicting state_dict keys"):
+        model_utils._normalize_state_dict_keys(state)
+
+
+def test_load_scalar_normalizer_malformed_payload_returns_none():
+    payload = {"normalizer": {"mean": "bad", "std": "bad"}}
+    norm = model_utils._load_scalar_normalizer(payload)
+    assert norm is None
+
+
+def test_load_phase2_model_rejects_invalid_state_dict_payload(tmp_path):
+    checkpoint_path = tmp_path / "bad_phase2.pt"
+    torch.save({"model_state_dict": ["not", "a", "dict"]}, checkpoint_path)
+    with pytest.raises(ValueError, match="invalid 'model_state_dict'"):
+        model_utils.load_phase2_model(checkpoint_path, device="cpu")
+
+
+def test_load_phase2_model_rejects_boolean_checkpoint_path():
+    with pytest.raises(ValueError, match="checkpoint_path"):
+        model_utils.load_phase2_model(True, device="cpu")  # type: ignore[arg-type]
+
+
+def test_load_phase1_model_rejects_missing_checkpoint_file(tmp_path):
+    missing = tmp_path / "missing.pt"
+    with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
+        model_utils.load_phase1_model(missing, device="cpu")
+
+
+def test_models_package_lazy_export_is_cached():
+    models_pkg.__dict__.pop("CrystalGraphBuilder", None)
+    first = models_pkg.CrystalGraphBuilder
+    second = models_pkg.CrystalGraphBuilder
+    assert first is second
+
+
+def test_models_package_unknown_attribute_raises():
+    with pytest.raises(AttributeError):
+        getattr(models_pkg, "DefinitelyMissingSymbol")
+
+
+def test_models_package_export_mismatch_raises_helpful_error(monkeypatch):
+    models_pkg.__dict__.pop("MessagePassingLayer", None)
+    monkeypatch.setattr(models_pkg, "import_module", lambda _name: object())
+    with pytest.raises(AttributeError, match="does not define expected export"):
+        getattr(models_pkg, "MessagePassingLayer")
+
+
+def test_models_package_lazy_import_error_is_recorded(monkeypatch):
+    models_pkg.__dict__.pop("BrokenModelExport", None)
+    monkeypatch.setattr(
+        models_pkg,
+        "_EXPORTS",
+        {
+            **dict(models_pkg._EXPORTS),  # type: ignore[attr-defined]
+            "BrokenModelExport": ("atlas.__missing_model_module_for_test__", "X"),
+        },
+    )
+    with pytest.raises(ImportError, match="Unable to import dependency"):
+        getattr(models_pkg, "BrokenModelExport")
+    errors = models_pkg.get_import_errors()
+    assert "BrokenModelExport" in errors

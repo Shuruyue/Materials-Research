@@ -283,6 +283,9 @@ class DiscoveryController:
         self.relax_max_retries = int(self.policy_config.relax_max_retries)
         self.relax_circuit_breaker_failures = int(self.policy_config.relax_circuit_breaker_failures)
         self.relax_circuit_breaker_cooldown_iters = int(self.policy_config.relax_circuit_breaker_cooldown_iters)
+        self.relax_retry_backoff_sec = float(self.policy_config.relax_retry_backoff_sec)
+        self.relax_retry_backoff_max_sec = float(self.policy_config.relax_retry_backoff_max_sec)
+        self.relax_retry_jitter = float(self.policy_config.relax_retry_jitter)
         if not self.experimental_algorithms_enabled:
             # Conservative mode for production reliability.
             # 生产保守模式：关闭实验性策略，保留确定性核心流程。
@@ -305,6 +308,7 @@ class DiscoveryController:
                 logger.warning(f"Failed to initialize StructureMatcher; fallback to formula dedup. Error: {exc}")
                 self._structure_matcher = None
         self._acquisition_generator = torch.Generator().manual_seed(int(self.cfg.train.seed) + 17)
+        self._retry_rng = np.random.RandomState(int(self.cfg.train.seed) + 271)
         self.method_key = getattr(self.profile, "method_key", "graph_equivariant")
         self.fallback_methods = tuple(getattr(self.profile, "fallback_methods", ()))
         self.use_gp_active = self.method_key == "gp_active_learning"
@@ -335,11 +339,17 @@ class DiscoveryController:
             self.enable_structure_dedup,
         )
         logger.info(
-            "Policy engine: name=%s risk_mode=%s cost_aware=%s calibration_window=%s",
+            (
+                "Policy engine: name=%s risk_mode=%s cost_aware=%s calibration_window=%s "
+                "retry_backoff=(base=%.3fs,max=%.3fs,jitter=%.2f)"
+            ),
             self.policy_config.policy_name,
             self.policy_config.risk_mode,
             self.policy_config.cost_aware,
             self.policy_config.calibration_window,
+            self.relax_retry_backoff_sec,
+            self.relax_retry_backoff_max_sec,
+            self.relax_retry_jitter,
         )
 
         if results_dir is not None:
@@ -447,6 +457,11 @@ class DiscoveryController:
         """
         fallback = float(self.acquisition_best_f)
         if not self.dynamic_best_f or observed_mean is None or observed_mean.numel() == 0:
+            return fallback
+
+        observed_mean = observed_mean.reshape(-1).to(dtype=torch.float32)
+        observed_mean = observed_mean[torch.isfinite(observed_mean)]
+        if observed_mean.numel() == 0:
             return fallback
 
         q = min(max(float(self.dynamic_best_f_quantile), 0.0), 1.0)
@@ -619,6 +634,9 @@ class DiscoveryController:
                     "relax_max_retries": self.relax_max_retries,
                     "relax_circuit_breaker_failures": self.relax_circuit_breaker_failures,
                     "relax_circuit_breaker_cooldown_iters": self.relax_circuit_breaker_cooldown_iters,
+                    "relax_retry_backoff_sec": self.relax_retry_backoff_sec,
+                    "relax_retry_backoff_max_sec": self.relax_retry_backoff_max_sec,
+                    "relax_retry_jitter": self.relax_retry_jitter,
                 }
             )
 
@@ -770,6 +788,30 @@ class DiscoveryController:
             return "interrupt"
         return "exception"
 
+    def _retry_sleep_seconds(self, attempt_idx: int) -> float:
+        """
+        Exponential retry backoff with optional proportional jitter.
+
+        Design notes:
+        - Backoff reduces contention and timeout cascades under transient load.
+        - Optional jitter avoids synchronized retries ("thundering herd").
+        """
+        base = max(0.0, float(getattr(self, "relax_retry_backoff_sec", 0.0)))
+        cap = max(base, float(getattr(self, "relax_retry_backoff_max_sec", base)))
+        jitter = float(np.clip(getattr(self, "relax_retry_jitter", 0.0), 0.0, 1.0))
+        if base <= 0.0:
+            return 0.0
+        delay = min(cap, base * (2.0 ** max(0, int(attempt_idx))))
+        if jitter <= 0.0:
+            return float(delay)
+
+        lo = max(0.0, delay * (1.0 - jitter))
+        hi = delay * (1.0 + jitter)
+        rng = getattr(self, "_retry_rng", None)
+        if rng is not None and hasattr(rng, "uniform"):
+            return float(rng.uniform(lo, hi))
+        return float(np.random.uniform(lo, hi))
+
     def _relax_candidates(self, raw_candidates: list[dict]) -> list[Candidate]:
         candidates = []
         buckets: dict[str, int] = {}
@@ -809,6 +851,10 @@ class DiscoveryController:
                             last_exc = exc
                             code = self._bucket_error(exc)
                             buckets[code] = buckets.get(code, 0) + 1
+                            if _attempt < retries:
+                                sleep_sec = self._retry_sleep_seconds(_attempt)
+                                if sleep_sec > 0.0:
+                                    time.sleep(sleep_sec)
                     if not relax_ok:
                         fail_count += 1
                         stability = 0.0
@@ -930,7 +976,15 @@ class DiscoveryController:
         - fall back to deterministic stability_score otherwise
         """
         strategy = self.acquisition_strategy
-        has_energy_uq = candidate.energy_mean is not None and candidate.energy_std is not None
+        mean_value = self._safe_float(candidate.energy_mean, default=float("nan"))
+        std_value = self._safe_float(candidate.energy_std, default=float("nan"))
+        has_energy_uq = (
+            candidate.energy_mean is not None
+            and candidate.energy_std is not None
+            and math.isfinite(mean_value)
+            and math.isfinite(std_value)
+            and std_value >= 0.0
+        )
         kappa_t = self._current_acquisition_kappa()
         obs_mean, obs_std = self._historical_energy_observations()
         best_f_t = self._current_best_f(obs_mean)
@@ -941,8 +995,8 @@ class DiscoveryController:
         if not has_energy_uq:
             return float(candidate.stability_score)
 
-        mean = torch.tensor([float(candidate.energy_mean)], dtype=torch.float32)
-        std = torch.tensor([float(candidate.energy_std)], dtype=torch.float32).clamp(min=1e-9)
+        mean = torch.tensor([mean_value], dtype=torch.float32)
+        std = torch.tensor([std_value], dtype=torch.float32).clamp(min=1e-9)
 
         if strategy == "hybrid":
             if self.use_noisy_ei and obs_mean is not None:
@@ -1011,7 +1065,7 @@ class DiscoveryController:
         Ref:
         - Srinivas et al. (2010), GP-UCB: https://arxiv.org/abs/0912.3995
         """
-        return schedule_ucb_kappa(
+        kappa = schedule_ucb_kappa(
             iteration=getattr(self, "iteration", 1),
             base_kappa=getattr(self, "acquisition_kappa", 2.0),
             mode=getattr(self, "acquisition_kappa_schedule", "fixed"),
@@ -1020,6 +1074,9 @@ class DiscoveryController:
             kappa_min=getattr(self, "acquisition_kappa_min", 1.0),
             decay=getattr(self, "acquisition_kappa_decay", 0.08),
         )
+        if not math.isfinite(kappa) or kappa <= 0.0:
+            return max(1e-6, self._safe_float(getattr(self, "acquisition_kappa", 2.0), 2.0))
+        return float(kappa)
 
     def _historical_energy_observations(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         means: list[float] = []
@@ -1028,8 +1085,14 @@ class DiscoveryController:
         for c in history:
             if c.energy_mean is None:
                 continue
-            means.append(float(c.energy_mean))
-            stds.append(float(c.energy_std) if c.energy_std is not None else 0.0)
+            mean_val = self._safe_float(c.energy_mean, default=float("nan"))
+            if not math.isfinite(mean_val):
+                continue
+            std_val = self._safe_float(c.energy_std, default=0.0) if c.energy_std is not None else 0.0
+            if not math.isfinite(std_val) or std_val < 0.0:
+                std_val = 0.0
+            means.append(float(mean_val))
+            stds.append(float(std_val))
         if not means:
             return None, None
         return (
@@ -1998,6 +2061,9 @@ class DiscoveryController:
                 "relax_max_retries": self.policy_config.relax_max_retries,
                 "relax_circuit_breaker_failures": self.policy_config.relax_circuit_breaker_failures,
                 "relax_circuit_breaker_cooldown_iters": self.policy_config.relax_circuit_breaker_cooldown_iters,
+                "relax_retry_backoff_sec": self.policy_config.relax_retry_backoff_sec,
+                "relax_retry_backoff_max_sec": self.policy_config.relax_retry_backoff_max_sec,
+                "relax_retry_jitter": self.policy_config.relax_retry_jitter,
             },
             "policy_state": self.policy_state.to_dict(),
             "acquisition": {

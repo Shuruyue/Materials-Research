@@ -1,5 +1,7 @@
 """Tests for acquisition strategy normalization and scoring."""
 
+import math
+
 import pytest
 import torch
 
@@ -169,6 +171,31 @@ def test_log_nei_is_finite_with_observation_uncertainty():
     assert log_nei.item() <= 0.0
 
 
+def test_nei_reduces_to_ei_when_observation_noise_is_zero():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    obs_mean = torch.tensor([-1.1, -0.9, -1.0], dtype=torch.float64)
+    obs_std = torch.zeros_like(obs_mean)
+
+    nei = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=obs_mean,
+        observed_std=obs_std,
+        nei_mc_samples=1024,
+    )
+    ei_ref = score_acquisition(
+        mean,
+        std,
+        strategy="ei",
+        maximize=False,
+        best_f=-1.1,
+    )
+    assert torch.allclose(nei, ei_ref)
+
+
 def test_nei_observation_std_shape_mismatch_raises():
     mean = torch.tensor([-0.8], dtype=torch.float64)
     std = torch.tensor([0.2], dtype=torch.float64)
@@ -181,6 +208,40 @@ def test_nei_observation_std_shape_mismatch_raises():
             observed_mean=torch.tensor([-1.0, -0.9], dtype=torch.float64),
             observed_std=torch.tensor([0.1], dtype=torch.float64),
         )
+
+
+def test_nei_filters_nonfinite_observations_before_sampling():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    dirty_obs_mean = torch.tensor([-1.1, float("nan"), -0.9, float("inf")], dtype=torch.float64)
+    dirty_obs_std = torch.tensor([0.05, 0.10, 0.08, 0.07], dtype=torch.float64)
+    clean_obs_mean = torch.tensor([-1.1, -0.9], dtype=torch.float64)
+    clean_obs_std = torch.tensor([0.05, 0.08], dtype=torch.float64)
+    g1 = torch.Generator().manual_seed(7)
+    g2 = torch.Generator().manual_seed(7)
+
+    dirty = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=dirty_obs_mean,
+        observed_std=dirty_obs_std,
+        nei_mc_samples=64,
+        generator=g1,
+    )
+    clean = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=clean_obs_mean,
+        observed_std=clean_obs_std,
+        nei_mc_samples=64,
+        generator=g2,
+    )
+    assert torch.isfinite(dirty).all()
+    assert torch.allclose(dirty, clean)
 
 
 def test_score_acquisition_supports_broadcast_shapes():
@@ -203,6 +264,50 @@ def test_schedule_ucb_kappa_gp_ucb_grows_with_time():
     assert k50 >= k1
 
 
+def test_schedule_ucb_kappa_sanitizes_nonfinite_inputs():
+    out = schedule_ucb_kappa(
+        3,
+        base_kappa=float("nan"),
+        mode="gp_ucb",
+        dimension=0,
+        delta=float("inf"),
+        kappa_min=-1.0,
+        decay=float("nan"),
+    )
+    assert math.isfinite(out)
+    assert out >= 0.0
+
+
+def test_upper_confidence_bound_clamps_negative_kappa_to_zero():
+    mean = torch.tensor([1.5], dtype=torch.float32)
+    std = torch.tensor([0.4], dtype=torch.float32)
+    score = score_acquisition(mean, std, strategy="ucb", maximize=True, kappa=-3.0)
+    assert score.item() == pytest.approx(mean.item(), rel=0.0, abs=1e-12)
+
+
+def test_score_acquisition_sanitizes_nonfinite_bestf_and_negative_jitter():
+    mean = torch.tensor([0.5], dtype=torch.float64)
+    std = torch.tensor([0.1], dtype=torch.float64)
+    score = score_acquisition(
+        mean,
+        std,
+        strategy="ei",
+        maximize=True,
+        best_f=float("nan"),
+        jitter=-1.0,
+    )
+    assert torch.isfinite(score).all()
+    assert score.item() >= 0.0
+
+
+def test_score_acquisition_sanitizes_nonfinite_mean_for_mean_strategy():
+    mean = torch.tensor([float("nan"), float("inf"), float("-inf")], dtype=torch.float32)
+    std = torch.tensor([0.1, 0.1, 0.1], dtype=torch.float32)
+    score = score_acquisition(mean, std, strategy="mean", maximize=True)
+    assert torch.isfinite(score).all()
+    assert torch.all(score == 0.0)
+
+
 def test_score_acquisition_uses_dynamic_kappa_schedule():
     mean = torch.tensor([0.5], dtype=torch.float64)
     std = torch.tensor([0.1], dtype=torch.float64)
@@ -219,3 +324,58 @@ def test_score_acquisition_uses_dynamic_kappa_schedule():
         iteration=10,
     )
     assert annealed.item() != pytest.approx(fixed.item())
+
+
+def test_score_acquisition_sanitizes_non_integral_controls():
+    mean = torch.tensor([-0.8], dtype=torch.float64)
+    std = torch.tensor([0.2], dtype=torch.float64)
+    obs_mean = torch.tensor([-1.1, -0.9, -1.0], dtype=torch.float64)
+    obs_std = torch.tensor([0.05, 0.10, 0.08], dtype=torch.float64)
+
+    g1 = torch.Generator().manual_seed(17)
+    g2 = torch.Generator().manual_seed(17)
+    sampled = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=obs_mean,
+        observed_std=obs_std,
+        nei_mc_samples=63.7,
+        generator=g1,
+    )
+    baseline = score_acquisition(
+        mean,
+        std,
+        strategy="nei",
+        maximize=False,
+        observed_mean=obs_mean,
+        observed_std=obs_std,
+        nei_mc_samples=128,
+        generator=g2,
+    )
+    assert torch.allclose(sampled, baseline)
+
+    score_bad_iter = score_acquisition(
+        torch.tensor([0.5], dtype=torch.float64),
+        torch.tensor([0.1], dtype=torch.float64),
+        strategy="ucb",
+        maximize=True,
+        kappa=3.0,
+        kappa_schedule="anneal",
+        kappa_min=1.0,
+        kappa_decay=0.2,
+        iteration=10.5,
+    )
+    score_iter_1 = score_acquisition(
+        torch.tensor([0.5], dtype=torch.float64),
+        torch.tensor([0.1], dtype=torch.float64),
+        strategy="ucb",
+        maximize=True,
+        kappa=3.0,
+        kappa_schedule="anneal",
+        kappa_min=1.0,
+        kappa_decay=0.2,
+        iteration=1,
+    )
+    assert torch.allclose(score_bad_iter, score_iter_1)

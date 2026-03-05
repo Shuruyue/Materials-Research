@@ -114,18 +114,66 @@ class PropertyEstimator:
         "max_efg", "max_ir_mode", "min_ir_mode",
         "Tc_supercon", "density", "avg_elec_mass", "avg_hole_mass",
     ]
+    _ELEMENT_MASS_CACHE: dict[str, float | None] = {}
 
     def __init__(self):
         self.cfg = get_config()
         self._formula_mass_cache: dict[str, tuple[float, float] | None] = {}
+        self._formula_stoich_cache: dict[str, dict[str, float] | None] = {}
 
     # ------------------------------------------------------------------
     # Statistical / numerical helpers
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _coerce_nonnegative_finite(value: float, *, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(parsed):
+            return float(default)
+        return max(parsed, 0.0)
+
+    @staticmethod
+    def _coerce_positive_finite(
+        value: float,
+        *,
+        default: float,
+        floor: float = 1e-8,
+    ) -> float:
+        parsed = PropertyEstimator._coerce_nonnegative_finite(value, default=default)
+        return max(parsed, float(floor))
+
+    @staticmethod
+    def _coerce_correlation(value: float, *, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = float(default)
+        if not np.isfinite(parsed):
+            parsed = float(default)
+        return float(np.clip(parsed, 0.0, 0.95))
+
+    @staticmethod
+    def _coerce_search_limit(value: int, *, default: int = 50, minimum: int = 1) -> int:
+        if isinstance(value, bool):
+            return int(default)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return int(default)
+        if not np.isfinite(parsed) or abs(parsed - round(parsed)) > 1e-12:
+            return int(default)
+        out = int(round(parsed))
+        if out < int(minimum):
+            return int(default)
+        return out
+
+    @staticmethod
     def _normal_cdf(x: np.ndarray) -> np.ndarray:
         arr = np.asarray(x, dtype=float)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=12.0, neginf=-12.0)
         flat = arr.ravel()
         out = np.asarray(
             [0.5 * (1.0 + math.erf(float(v) / math.sqrt(2.0))) for v in flat],
@@ -163,22 +211,42 @@ class PropertyEstimator:
 
     @classmethod
     def _element_mass(cls, symbol: str) -> float | None:
+        key = str(symbol).strip()
+        if not key:
+            return None
+        if key in cls._ELEMENT_MASS_CACHE:
+            return cls._ELEMENT_MASS_CACHE[key]
         try:
             from pymatgen.core import Element  # type: ignore
 
-            e = Element(symbol)
+            e = Element(key)
             if e.atomic_mass is None:
+                cls._ELEMENT_MASS_CACHE[key] = None
                 return None
-            return float(e.atomic_mass)
+            mass = float(e.atomic_mass)
+            cls._ELEMENT_MASS_CACHE[key] = mass if np.isfinite(mass) else None
+            return cls._ELEMENT_MASS_CACHE[key]
         except Exception:
-            return _ATOMIC_MASS_FALLBACK.get(symbol)
+            mass = _ATOMIC_MASS_FALLBACK.get(key)
+            cls._ELEMENT_MASS_CACHE[key] = mass
+            return mass
+
+    def _formula_stoichiometry(self, formula: str) -> dict[str, float] | None:
+        """Cached formula parser with defensive copy semantics."""
+        key = str(formula).strip()
+        if key in self._formula_stoich_cache:
+            cached = self._formula_stoich_cache[key]
+            return None if cached is None else dict(cached)
+        stoich = self._parse_formula_stoichiometry(key)
+        self._formula_stoich_cache[key] = None if stoich is None else dict(stoich)
+        return None if stoich is None else dict(stoich)
 
     def _formula_mass_tuple(self, formula: str) -> tuple[float, float] | None:
         """Return (molar_mass_amu, n_atoms) for a formula."""
         key = str(formula).strip()
         if key in self._formula_mass_cache:
             return self._formula_mass_cache[key]
-        stoich = self._parse_formula_stoichiometry(key)
+        stoich = self._formula_stoichiometry(key)
         if not stoich:
             self._formula_mass_cache[key] = None
             return None
@@ -239,7 +307,7 @@ class PropertyEstimator:
         for i, f in enumerate(formulas.astype(str).tolist()):
             if i >= n:
                 break
-            stoich = self._parse_formula_stoichiometry(f)
+            stoich = self._formula_stoichiometry(f)
             if not stoich:
                 continue
             counts = np.asarray(list(stoich.values()), dtype=float)
@@ -267,10 +335,10 @@ class PropertyEstimator:
         s = np.asarray(sigmas, dtype=float)
         if vals.ndim != 2 or s.shape != vals.shape:
             raise ValueError("values/sigmas must be same-shape 2D arrays.")
-        valid = np.isfinite(vals)
+        valid = np.isfinite(vals) & np.isfinite(s) & (s > 0)
         method_count = valid.sum(axis=1).astype(float)
 
-        rho = float(np.clip(correlation, 0.0, 0.95))
+        rho = PropertyEstimator._coerce_correlation(correlation, default=0.0)
         if rho <= 1e-12:
             inv_var = np.zeros_like(vals, dtype=float)
             inv_var[valid] = 1.0 / np.maximum(s[valid], 1e-8) ** 2
@@ -303,6 +371,10 @@ class PropertyEstimator:
             sd = np.maximum(s[i, idx], 1e-8)
             cov = np.outer(sd, sd) * rho
             np.fill_diagonal(cov, sd**2)
+            cov = np.nan_to_num(cov, nan=0.0, posinf=0.0, neginf=0.0)
+            trace = float(np.trace(cov))
+            jitter = 1e-10 * trace / max(m, 1) if np.isfinite(trace) and trace > 0 else 1e-10
+            cov[np.diag_indices(m)] += jitter
             try:
                 inv_cov = np.linalg.inv(cov)
             except np.linalg.LinAlgError:
@@ -363,6 +435,45 @@ class PropertyEstimator:
         - Formula-aware average atomic mass for Debye estimation.
         - Mixture-based melting estimate using class probability.
         """
+        sigma_floor = self._coerce_positive_finite(
+            bandgap_sigma_floor,
+            default=0.05,
+            floor=1e-8,
+        )
+        sigma_hse = self._coerce_positive_finite(
+            bandgap_sigma_hse,
+            default=0.12,
+            floor=sigma_floor,
+        )
+        sigma_mbj = self._coerce_positive_finite(
+            bandgap_sigma_mbj,
+            default=0.20,
+            floor=sigma_floor,
+        )
+        sigma_opt = self._coerce_positive_finite(
+            bandgap_sigma_opt,
+            default=0.35,
+            floor=sigma_floor,
+        )
+        sigma_adaptive_slope = self._coerce_nonnegative_finite(
+            bandgap_sigma_adaptive_slope,
+            default=0.35,
+        )
+        fusion_correlation = self._coerce_correlation(
+            bandgap_fusion_correlation,
+            default=0.25,
+        )
+        conductivity_temp = self._coerce_positive_finite(
+            conductivity_temperature,
+            default=1.0,
+            floor=1e-6,
+        )
+        avg_mass_fallback = self._coerce_positive_finite(
+            avg_atomic_mass_fallback_amu,
+            default=30.0,
+            floor=1e-8,
+        )
+
         result = df.copy()
 
         # ─── Clean numeric columns ───
@@ -378,7 +489,7 @@ class PropertyEstimator:
 
         # Fill NaNs in priority order
         best_gap = gap_hse.fillna(gap_mbj).fillna(gap_opt)
-        best_gap[best_gap < 0] = np.nan # Filter negative gaps
+        best_gap[best_gap < 0] = np.nan  # Filter negative gaps
         result["bandgap_best"] = best_gap
 
         # ─── Probabilistic Multi-fidelity Gap Fusion ───
@@ -401,21 +512,21 @@ class PropertyEstimator:
             )
         complexity = np.ones(n_rows, dtype=float)
         if sigma_mode == "adaptive":
-            complexity = 1.0 + max(0.0, float(bandgap_sigma_adaptive_slope)) * self._formula_complexity_score(
+            complexity = 1.0 + sigma_adaptive_slope * self._formula_complexity_score(
                 formulas,
                 n_rows=n_rows,
             )
         sigmas = np.vstack(
             [
-                np.full(n_rows, max(float(bandgap_sigma_hse), bandgap_sigma_floor)),
-                np.full(n_rows, max(float(bandgap_sigma_mbj), bandgap_sigma_floor)),
-                np.full(n_rows, max(float(bandgap_sigma_opt), bandgap_sigma_floor)),
+                np.full(n_rows, sigma_hse),
+                np.full(n_rows, sigma_mbj),
+                np.full(n_rows, sigma_opt),
             ]
         ).T * complexity[:, None]
         gap_mu, gap_sigma, gap_n = self._precision_fusion(
             gaps,
             sigmas,
-            correlation=float(bandgap_fusion_correlation),
+            correlation=fusion_correlation,
         )
         gap_disagreement = self._fused_disagreement(gaps, gap_mu)
         # Inflate posterior sigma with inter-method disagreement (conservative UQ).
@@ -427,12 +538,12 @@ class PropertyEstimator:
         # ─── Probabilistic Conductivity Class ───
         # P(class) under Gaussian uncertainty on fused band gap.
         # This avoids brittle thresholding at 0.01/0.5/3.0 eV.
-        temp = max(float(conductivity_temperature), 1e-6)
+        temp = conductivity_temp
         mu = np.where(np.isfinite(gap_mu), gap_mu, best_gap.to_numpy(dtype=float))
         sigma = np.where(
             np.isfinite(gap_sigma_eff),
             gap_sigma_eff * temp,
-            max(float(bandgap_sigma_opt), bandgap_sigma_floor) * temp,
+            sigma_opt * temp,
         )
         sigma = np.maximum(sigma, 1e-8)
 
@@ -511,9 +622,11 @@ class PropertyEstimator:
         # Hardness (Chen-Niu): Hv = 2 * (k^2 * G)^0.585 - 3, k = G/K
         # k = 1/pugh = G/K
         k_ratio = G / K
-        Hv = 2.0 * (k_ratio**2 * G)**0.585 - 3.0
-        Hv[Hv < 0] = 0 # Hardness can't be negative physically (model artifact)
+        hv_arg = np.where((K > 0) & (G > 0), (k_ratio**2) * G, np.nan)
+        Hv = 2.0 * (hv_arg**0.585) - 3.0
+        Hv[Hv < 0] = 0  # Hardness can't be negative physically (model artifact)
         Hv[K <= 0] = np.nan
+        Hv[G <= 0] = np.nan
         result["hardness_chen"] = Hv
 
         # ─── Vectorized: Debye Temperature ───
@@ -551,16 +664,17 @@ class PropertyEstimator:
         avg_mass_amu_est, n_atoms_formula = self._estimate_avg_atomic_mass_amu(
             formulas,
             n_rows=n_rows,
-            fallback_mass=float(avg_atomic_mass_fallback_amu),
+            fallback_mass=avg_mass_fallback,
         )
         result["avg_atomic_mass_amu_est"] = avg_mass_amu_est
         result["n_atoms_formula_est"] = n_atoms_formula
         avg_mass_kg = avg_mass_amu_est * AMU
+        rho_kg_arr = rho_kg.to_numpy(dtype=float)
         n_density = np.divide(
-            rho_kg.to_numpy(dtype=float),
+            rho_kg_arr,
             np.maximum(avg_mass_kg, 1e-30),
             out=np.full(len(result), np.nan, dtype=float),
-            where=np.isfinite(rho_kg.to_numpy(dtype=float)) & (rho_kg.to_numpy(dtype=float) > 0),
+            where=np.isfinite(rho_kg_arr) & (rho_kg_arr > 0),
         )
 
         # Debye T
@@ -620,13 +734,15 @@ class PropertyEstimator:
         self,
         df: pd.DataFrame,
         criteria: dict,
-        sort_by: str = None,
+        sort_by: str | None = None,
         ascending: bool = True,
         max_results: int = 50,
     ) -> pd.DataFrame:
         """
         Efficient vector search filter.
         """
+        if not isinstance(criteria, dict):
+            raise ValueError("criteria must be a mapping of column->constraint")
         mask = pd.Series(True, index=df.index)
 
         for col, criterion in criteria.items():
@@ -634,9 +750,47 @@ class PropertyEstimator:
                 continue
 
             if isinstance(criterion, tuple):
+                if len(criterion) != 2:
+                    raise ValueError(
+                        f"Range criterion for column '{col}' must be a (lo, hi) tuple"
+                    )
                 lo, hi = criterion
-                if lo is not None: mask &= (df[col] >= lo)
-                if hi is not None: mask &= (df[col] <= hi)
+                lo_num = None
+                hi_num = None
+                if lo is not None:
+                    try:
+                        lo_num = float(lo)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Range lower bound for column '{col}' must be numeric"
+                        ) from exc
+                    if not np.isfinite(lo_num):
+                        raise ValueError(
+                            f"Range lower bound for column '{col}' must be finite"
+                        )
+                if hi is not None:
+                    try:
+                        hi_num = float(hi)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Range upper bound for column '{col}' must be numeric"
+                        ) from exc
+                    if not np.isfinite(hi_num):
+                        raise ValueError(
+                            f"Range upper bound for column '{col}' must be finite"
+                        )
+                if (
+                    lo_num is not None
+                    and hi_num is not None
+                    and lo_num > hi_num
+                ):
+                    raise ValueError(
+                        f"Range criterion for column '{col}' must satisfy lo <= hi"
+                    )
+                if lo is not None:
+                    mask &= df[col] >= lo_num
+                if hi is not None:
+                    mask &= df[col] <= hi_num
             elif isinstance(criterion, (list, set)):
                 mask &= df[col].isin(criterion)
             else:
@@ -647,19 +801,21 @@ class PropertyEstimator:
         if sort_by and sort_by in result.columns:
             result = result.sort_values(sort_by, ascending=ascending)
 
-        return result.head(max_results)
+        limit = self._coerce_search_limit(max_results, default=50, minimum=1)
+        return result.head(limit)
 
     def property_summary(self, df: pd.DataFrame) -> dict:
         """Get summary statistics."""
         summary = {}
-        # ... (similar to before, essentially built-in pandas describe)
-        desc = df.describe().T
+        desc = df.describe(include=[np.number]).T
+        if desc.empty:
+            return summary
         for idx, row in desc.iterrows():
             summary[str(idx)] = {
-                "count": int(row['count']),
-                "mean": round(row['mean'], 4),
-                "std": round(row['std'], 4),
-                "min": round(row['min'], 4),
-                "max": round(row['max'], 4),
+                "count": int(row["count"]),
+                "mean": round(float(row["mean"]), 4),
+                "std": round(float(row["std"]), 4),
+                "min": round(float(row["min"]), 4),
+                "max": round(float(row["max"]), 4),
             }
         return summary
